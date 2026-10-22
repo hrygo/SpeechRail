@@ -330,6 +330,36 @@ public actor AudiobookProductionController {
         guard chapters.count == requested.count else { throw AudiobookProductionError.taskScopeChanged }
         let bindings = try await store.voiceBindings(for: bookID)
         let pronunciation = try await store.pronunciationBinding(for: bookID)
+        var fragmentsByChapter: [UUID: [AudiobookFragment]] = [:]
+        for chapter in chapters {
+            if try await castController.chapterReadiness(bookID: bookID, chapterID: chapter.id) == .blockedByUnknownSpeakers {
+                throw AudiobookProductionError.chapterBlockedByUnknownSpeakers(chapterID: chapter.id)
+            }
+            fragmentsByChapter[chapter.id] = try AudiobookFragmentPlanner.plan(chapter: chapter,
+                annotations: await store.annotations(for: bookID, chapterID: chapter.id), bindings: bindings,
+                policy: policy, source: snapshot.sourceIndex,
+                atoms: await store.atoms(for: bookID, chapterID: chapter.id), pronunciation: pronunciation)
+        }
+        // Regeneration approves text and dependencies; unrelated historical audio
+        // cannot affect its range and must not be read just to classify availability.
+        let selection: (targets: [AudiobookFragment], preserved: Int, outdated: Int, missing: Int)
+        if intent == .regenerate {
+            selection = (chapters.flatMap { fragmentsByChapter[$0.id, default: []] }, 0, 0, 0)
+        } else {
+            selection = try await classifyExistingAudio(bookID: bookID, chapterIDs: chapters.map(\.id),
+                fragmentsByChapter: fragmentsByChapter, onlyMissing: intent == .missingOnly)
+        }
+        try await store.validateWorkingSource(snapshot)
+        return .init(id: UUID(), bookID: bookID, sourceID: snapshot.sourceID, intent: intent,
+            chapterIDs: chapters.map(\.id), chapterTitles: Dictionary(uniqueKeysWithValues: chapters.map { ($0.id, $0.title) }),
+            fragments: selection.targets, preservedAudioCount: selection.preserved,
+            preservedOutdatedAudioCount: selection.outdated, missingAudioCount: selection.missing)
+    }
+
+    private func classifyExistingAudio(
+        bookID: UUID, chapterIDs: [UUID], fragmentsByChapter: [UUID: [AudiobookFragment]], onlyMissing: Bool
+    ) async throws -> (targets: [AudiobookFragment], preserved: Int, outdated: Int, missing: Int) {
+        let requested = Set(chapterIDs)
         let candidates = try await store.candidates(for: bookID)
         var valid: [AudiobookRenderCandidate] = []
         for candidate in candidates where requested.contains(candidate.chapterID) {
@@ -341,17 +371,11 @@ public actor AudiobookProductionController {
         let savedByChapter = Dictionary(grouping: try await store.fragments(for: bookID), by: \.chapterID)
         var targets: [AudiobookFragment] = []
         var preserved = 0, outdated = 0, missing = 0
-        for chapter in chapters {
-            if try await castController.chapterReadiness(bookID: bookID, chapterID: chapter.id) == .blockedByUnknownSpeakers {
-                throw AudiobookProductionError.chapterBlockedByUnknownSpeakers(chapterID: chapter.id)
-            }
-            let fragments = try AudiobookFragmentPlanner.plan(chapter: chapter,
-                annotations: await store.annotations(for: bookID, chapterID: chapter.id), bindings: bindings,
-                policy: policy, source: snapshot.sourceIndex,
-                atoms: await store.atoms(for: bookID, chapterID: chapter.id), pronunciation: pronunciation)
-            let audio = validByChapter[chapter.id, default: []]
-            var ranges = Dictionary(uniqueKeysWithValues: savedByChapter[chapter.id, default: []].map { ($0.id, $0.sourceRange) })
-            for revision in try await store.chapterRevisions(for: bookID, chapterID: chapter.id) {
+        for chapterID in chapterIDs {
+            let fragments = fragmentsByChapter[chapterID, default: []]
+            let audio = validByChapter[chapterID, default: []]
+            var ranges = Dictionary(uniqueKeysWithValues: savedByChapter[chapterID, default: []].map { ($0.id, $0.sourceRange) })
+            for revision in try await store.chapterRevisions(for: bookID, chapterID: chapterID) {
                 for binding in revision.orderedBindings { ranges[binding.fragmentID] = binding.sourceRange }
             }
             let plannedIDs = Set(fragments.map(\.id))
@@ -367,12 +391,7 @@ public actor AudiobookProductionController {
                     return range.lowerBound < fragment.sourceRange.upperBound && fragment.sourceRange.lowerBound < range.upperBound
                 }
                 if !hasAudio { missing += 1 }
-                let shouldRender: Bool
-                switch intent {
-                case .missingOnly: shouldRender = !hasAudio
-                case .updateOutdated: shouldRender = hasAudio && !isCurrent
-                case .regenerate: shouldRender = true
-                }
+                let shouldRender = onlyMissing ? !hasAudio : hasAudio && !isCurrent
                 if shouldRender { targets.append(fragment) }
                 else if hasAudio {
                     preserved += 1
@@ -380,10 +399,7 @@ public actor AudiobookProductionController {
                 }
             }
         }
-        try await store.validateWorkingSource(snapshot)
-        return .init(id: UUID(), bookID: bookID, sourceID: snapshot.sourceID, intent: intent,
-            chapterIDs: chapters.map(\.id), chapterTitles: Dictionary(uniqueKeysWithValues: chapters.map { ($0.id, $0.title) }),
-            fragments: targets, preservedAudioCount: preserved, preservedOutdatedAudioCount: outdated, missingAudioCount: missing)
+        return (targets, preserved, outdated, missing)
     }
 
     public func regenerateFragment(
@@ -405,15 +421,17 @@ public actor AudiobookProductionController {
         approvedPlan: AudiobookProductionPlan? = nil
     ) async throws {
         guard !isStartActive else { throw AudiobookProductionError.admissionBusy }
-        var plan = approvedPlan
+        let plan: AudiobookProductionPlan
         if let resumingTaskID {
             guard let saved = try await store.productionCheckpoint(for: bookID), saved.taskID == resumingTaskID,
-                  saved.productionPlan != nil,
-                  plan == nil || plan == saved.productionPlan else {
+                  let savedPlan = saved.productionPlan,
+                  approvedPlan == nil || approvedPlan == savedPlan else {
                 throw AudiobookProductionError.taskScopeChanged
             }
-            plan = saved.productionPlan
-        } else if plan == nil {
+            plan = savedPlan
+        } else if let approvedPlan {
+            plan = approvedPlan
+        } else {
             let preview = try await previewProduction(bookID: bookID, chapterIDs: chapterIDs,
                 intent: regenerationScope == nil ? intent : .regenerate)
             if case .fragments(let ids) = regenerationScope {
@@ -431,15 +449,13 @@ public actor AudiobookProductionController {
                 plan = preview
             }
         }
-        if let plan {
-            guard (plan.intent == .regenerate) == (regenerationScope != nil),
-                  plan.bookID == bookID, Set(plan.chapterIDs) == Set(chapterIDs),
-                  Set(plan.fragments.map(\.id)).count == plan.fragments.count,
-                  plan.fragments.allSatisfy({ $0.bookID == bookID && plan.chapterIDs.contains($0.chapterID) }) else {
-                throw AudiobookProductionError.taskScopeChanged
-            }
-            if plan.fragments.isEmpty { return }
+        guard (plan.intent == .regenerate) == (regenerationScope != nil),
+              plan.bookID == bookID, Set(plan.chapterIDs) == Set(chapterIDs),
+              Set(plan.fragments.map(\.id)).count == plan.fragments.count,
+              plan.fragments.allSatisfy({ $0.bookID == bookID && plan.chapterIDs.contains($0.chapterID) }) else {
+            throw AudiobookProductionError.taskScopeChanged
         }
+        if plan.fragments.isEmpty { return }
         try await produce(bookID: bookID, chapterIDs: chapterIDs, regenerationScope: regenerationScope,
             resumingTaskID: resumingTaskID, expectedSourceID: expectedSourceID, productionPlan: plan)
     }
@@ -450,7 +466,7 @@ public actor AudiobookProductionController {
         regenerationScope: AudiobookRegenerationScope?,
         resumingTaskID: UUID?,
         expectedSourceID: UUID?,
-        productionPlan: AudiobookProductionPlan?
+        productionPlan: AudiobookProductionPlan
     ) async throws {
         // Actor methods are reentrant across `await`. Reserve the run before the first
         // suspension so a second start cannot invalidate its generation or strand its lease.
@@ -480,7 +496,7 @@ public actor AudiobookProductionController {
             if let expectedSourceID, snapshot.sourceID != expectedSourceID {
                 throw AudiobookStoreError.workingSourceChanged
             }
-            if let productionPlan, productionPlan.sourceID != snapshot.sourceID {
+            if productionPlan.sourceID != snapshot.sourceID {
                 if resumingTaskID != nil { throw AudiobookStoreError.workingSourceChanged }
                 throw AudiobookProductionError.taskScopeChanged
             }
@@ -531,7 +547,7 @@ public actor AudiobookProductionController {
 
     private func performProduction(
         bookID: UUID, chapterIDs: [UUID], regenerationScope: AudiobookRegenerationScope?, runGeneration: Int, taskID: UUID,
-        productionPlan: AudiobookProductionPlan?
+        productionPlan: AudiobookProductionPlan
     ) async throws {
         try checkRunIsActive(runGeneration)
 
@@ -566,10 +582,8 @@ public actor AudiobookProductionController {
             throw AudiobookProductionError.noReadyChaptersSelected
         }
 
-        if regenerationScope != nil || productionPlan != nil {
-            guard selectedChapters.count == Set(chapterIDs).count else {
-                throw AudiobookProductionError.noReadyChaptersSelected
-            }
+        guard selectedChapters.count == Set(chapterIDs).count else {
+            throw AudiobookProductionError.noReadyChaptersSelected
         }
         for chapter in selectedChapters {
             let readiness = try await castController.chapterReadiness(bookID: bookID, chapterID: chapter.id)
@@ -590,12 +604,9 @@ public actor AudiobookProductionController {
         var activeRoleIDs: Set<UUID> = []
         var totalFragmentCount = 0
         var allPlannedFragmentsByChapter: [UUID: [AudiobookFragment]] = [:]
-        var currentlyEligibleIDs: Set<UUID>?
-        if let productionPlan {
-            let current = try await previewProduction(bookID: bookID, chapterIDs: chapterIDs, intent: productionPlan.intent)
-            guard current.sourceID == productionPlan.sourceID else { throw AudiobookProductionError.taskScopeChanged }
-            currentlyEligibleIDs = Set(current.fragments.map(\.id))
-        }
+        let current = try await previewProduction(bookID: bookID, chapterIDs: chapterIDs, intent: productionPlan.intent)
+        guard current.sourceID == productionPlan.sourceID else { throw AudiobookProductionError.taskScopeChanged }
+        let currentlyEligibleIDs = Set(current.fragments.map(\.id))
         if case .fragments(let ids) = regenerationScope, ids.isEmpty {
             throw AudiobookProductionError.noReadyChaptersSelected
         }
@@ -613,20 +624,12 @@ public actor AudiobookProductionController {
                 atoms: chapterAtoms,
                 pronunciation: pronunciation
             )
-            let selectedFragments: [AudiobookFragment]
-            if let productionPlan {
-                let approved = productionPlan.fragments.filter { $0.chapterID == chapter.id }
-                let byID = Dictionary(uniqueKeysWithValues: fragments.map { ($0.id, $0) })
-                guard approved.allSatisfy({ byID[$0.id] == $0 }) else { throw AudiobookProductionError.taskScopeChanged }
-                selectedFragments = approved
-            } else if case .fragments(let ids) = regenerationScope {
-                selectedFragments = fragments.filter { ids.contains($0.id) }
-            } else {
-                selectedFragments = fragments
-            }
+            let selectedFragments = productionPlan.fragments.filter { $0.chapterID == chapter.id }
+            let byID = Dictionary(uniqueKeysWithValues: fragments.map { ($0.id, $0) })
+            guard selectedFragments.allSatisfy({ byID[$0.id] == $0 }) else { throw AudiobookProductionError.taskScopeChanged }
             allPlannedFragmentsByChapter[chapter.id] = fragments
             plannedFragmentsByChapter[chapter.id] = selectedFragments
-            activeRoleIDs.formUnion(selectedFragments.filter { currentlyEligibleIDs?.contains($0.id) ?? true }.map(\.roleID))
+            activeRoleIDs.formUnion(selectedFragments.filter { currentlyEligibleIDs.contains($0.id) }.map(\.roleID))
             totalFragmentCount += selectedFragments.count
             updateProgress(bookID) {
                 $0.currentChapterID = chapter.id
@@ -692,7 +695,7 @@ public actor AudiobookProductionController {
                     }
 
                     // Targets can disappear after preview (another candidate was saved), never grow.
-                    if productionPlan?.intent == .missingOnly {
+                    if productionPlan.intent == .missingOnly {
                         let latest = try await store.candidates(for: bookID, fragmentID: fragment.id)
                         var hasSavedAudio = false
                         for candidate in latest {
@@ -705,7 +708,7 @@ public actor AudiobookProductionController {
                             continue
                         }
                     }
-                    if let currentlyEligibleIDs, !currentlyEligibleIDs.contains(fragment.id) {
+                    if !currentlyEligibleIDs.contains(fragment.id) {
                         completedCount += 1
                         updateProgress(bookID) { $0.completedFragments = completedCount; $0.reusedFragments += 1 }
                         try await persistProgress(bookID)
