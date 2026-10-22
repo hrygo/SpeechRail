@@ -339,3 +339,33 @@ def test_model_errors_use_stable_machine_error_codes(
     assert cli.main(["model", "status", "--app-home", str(tmp_path), "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["error_code"] == "insufficient_disk_space"
+
+
+def test_media_export_failure_is_a_terminal_event_with_the_actual_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from uuid import uuid4
+
+    from speechrail.media import commands
+    from speechrail.media.manifest import MediaManifestError
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise MediaManifestError(
+            "media input must reside inside the book's owned audio directory",
+            error_code="invalid_request",
+        )
+
+    monkeypatch.setattr(commands, "run_media_export", fail)
+    assert (
+        cli.main(
+            ["media", "export", "--request-id", str(uuid4()), "--app-home", str(tmp_path), "--json"]
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert payload["command"] == "media.export"
+    assert payload["event"] == "result"
+    assert payload["status"] == "failed"
+    assert payload["error_code"] == "invalid_request"
+    assert "owned audio directory" in payload["message"]
