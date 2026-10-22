@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 有声书工坊开发说明"
 status: active
 audience: "macOS App 开发者、架构与测试工程师"
-version: "1.15.0"
+version: "1.16.0"
 date: 2026-10-22
 ---
 
@@ -33,7 +33,7 @@ date: 2026-10-22
 - **`AudiobookPronunciationController.swift`**：把本书词表经 `AudiobookPronunciationClient` 保存为不可变 revision（header `SpeechRail-Pronunciation-Set: <set_id>@<revision>`），本地缓存于 `pronunciation_bindings`。保存冲突（409）不覆盖远端，置 `needsRefresh` 并提示先刷新；刷新先从摘要取最新 revision，再按该 revision 读取词条，可恢复本地缓存缺失或别处更新的场景。渲染请求携带固定 header，片段依赖只对命中词条变化。
 - **`AudiobookListeningController.swift`**：复用 `SharedPlaybackOwner` 唯一播放句柄，支持倍速、章节/段落跳转与收听书签；外部试听先保存当前收听位置，再交出播放权。播放期间按 `progressSampleInterval`（默认 200 ms）采样播放器片内进度，换算片段/章节已播时间，并按 `bookmarkAutosaveInterval`（默认 5 s，复用 `AudiobookLimits.bookmarkAutosaveIntervalSeconds`）自动写书签；暂停、离开或试听抢占前先应用当前采样再保存。采样只接受向前推进的值，seek 后旧回调不会把时间轴拉回。仅显示与保存用 `AudiobookDisplayFormat` 统一时间码与倍速文本。
 - **`AudiobookCoverAssetStore.swift`**：书籍自有封面资产的落盘与读取（`books/<book_id>/cover/cover.<jpg|jpeg|png>`）。安装前校验普通文件、非符号链接、扩展名白名单（`jpg`/`jpeg`/`png`）与 8 MiB 上限，采用同目录临时文件加原子替换；封面随 `books/<book_id>` 由既有废纸篓生命周期携带，不写 SQLite。
-- **`AudiobookMediaVerifier.swift` & `AudiobookExportController.swift`**：导出前校验全部采用切片的磁盘存在性、WAV 头、帧数与 SHA-256；写入 `<app_home>/audiobooks/exports/<request_id>/request.json` 并通过 `SpeechRailControlAgent` 执行 `speechrail media encode-audiobook`，导出完成后用 `AVURLAsset` 做时长、音轨、章节数与封面存在性的二次校验。准备阶段由 Workflow 持有 requestID，可调用 `cancel(requestID:)` 中止编码并显示“未生成任何文件”；保存阶段对已存在的 M4B 文件或 MP3 目录都要求显式替换确认，目录不会被静默整体覆盖。导出面板先调用 `AudiobookExportController.audit(...)` 做只读预检（与 `prepare` 共用 `buildPlan`，不写文件、不保存生产版本），按 `AudiobookExportBlocker` 逐章列出缺分析、待确认说话人、无当前音频、资产缺失或空片段，再禁用整本 M4B 或空的 MP3 选择；准备/保存失败写入 `exportErrorMessage` 在面板内联显示，成功后清除。带封面时清单升级为 `audiobook_media_export_v2` 并携带封面相对路径与图像 SHA-256；`chapter_mp3` 与跨书封面在写清单前拒绝。
+- **`AudiobookMediaVerifier.swift` & `AudiobookExportController.swift`**：导出前校验全部采用切片的磁盘存在性、WAV 头、帧数与 SHA-256；写入 `<app_home>/audiobooks/exports/<request_id>/request.json` 并通过 `SpeechRailControlAgent` 执行 `speechrail media encode-audiobook`，导出完成后用 `AVURLAsset` 做时长、音轨、章节数与封面存在性的二次校验。准备阶段由 Workflow 持有 requestID，可调用 `cancel(requestID:)` 中止编码并显示“未生成任何文件”；保存阶段对已存在的 M4B 文件或 MP3 目录都要求显式替换确认，目录不会被静默整体覆盖。导出面板先调用 `AudiobookExportController.audit(...)` 做只读预检（与 `prepare` 共用 `buildPlan`，不写文件、不保存生产版本），按 `AudiobookExportBlocker` 逐章列出缺分析、待确认说话人、无当前音频、资产缺失或空片段，再禁用整本 M4B 或空的 MP3 选择；准备/保存失败写入 `exportErrorMessage`，在导出 Sheet 的操作浮层中显示，成功后清除。带封面时清单升级为 `audiobook_media_export_v2` 并携带封面相对路径与图像 SHA-256；`chapter_mp3` 与跨书封面在写清单前拒绝。
 - **`AudiobookWorkflowModel.swift` & `AudiobookProductionWiring.swift`**：`@MainActor @Observable` 顶层编排器，将书架、工作台两页签、收听模式与 `AppModel` / `SharedPlaybackOwner` / `SpeechCreationAdmission` 连接起来；异步读取和制作收尾校验书籍身份与任务代次。
 
 角色分析的 primary/context、工作台展示、选角试听和 TTS 共用 `workingSourceSnapshot` 固定的工作索引及 `text(in:)`，同一区间的文字与工作文件字节一致。LLM 只引用该修订的 atom ID。检查点保存 source ID 与加工版本，片段依赖包含加工版本；提交角色、标注、候选、章节和完成进度时重新核对修订，迟到结果不能修改新 source 的状态。 加工生成的段间空白不构成新的标题证据；来源映射保留每个逻辑段落的原始标题候选判定，导入与重开后使用相同判定。
@@ -59,10 +59,10 @@ Store 的 schema 7 将旧 source 标记为 `reference`，不自动准备旧作�
 
 ### 1.3 Python 媒体导出子系统 (`src/speechrail/media/`)
 
-- **`manifest.py`**：校验 `audiobook_media_export_v1`/`audiobook_media_export_v2` 请求清单、64 MiB 体积上限、路径穿越与符号链接拦截、所有输入 WAV 的 64 KiB 分块 SHA-256 核对。v2 额外要求固定形状的封面路径 `books/<book_id>/cover/cover.<jpg|jpeg|png>`（文件名固定为 `cover`）、图像 SHA-256 与 8 MiB 上限；`v1` 出现 `cover` 键、`chapter_mp3` 配 v2 一律拒绝。v2 的 `loudness` 与封面同为可选扩展，可独立出现：`unit` 固定 `lufs`、`target_i` 必填、`true_peak_db`（默认 `-1.5`）与 `loudness_range`（默认 `11`）范围校验、未知键拒绝；`v1` 携带 `loudness` 同样拒绝。
+- **`manifest.py`**：校验 `audiobook_media_export_v1`/`audiobook_media_export_v2` 请求清单、64 MiB 体积上限、路径穿越与符号链接拦截、所有输入 WAV 的 64 KiB 分块 SHA-256 核对。音频与封面路径中的书籍 UUID 按相同身份比较，不区分十六进制字母大小写；文件读取保留清单中的原始路径，不改名或移动资产。v2 额外要求固定形状的封面路径 `books/<book_id>/cover/cover.<jpg|jpeg|png>`（文件名固定为 `cover`）、图像 SHA-256 与 8 MiB 上限；`v1` 出现 `cover` 键、`chapter_mp3` 配 v2 一律拒绝。v2 的 `loudness` 与封面同为可选扩展，可独立出现：`unit` 固定 `lufs`、`target_i` 必填、`true_peak_db`（默认 `-1.5`）与 `loudness_range`（默认 `11`）范围校验、未知键拒绝；`v1` 携带 `loudness` 同样拒绝。
 - **`encoder.py`**：定位 `ffmpeg`，整理章节 PCM 为 48 kHz 单声道，生成以 `1/48000` 为时间基准的 FFMETADATA 章节轨，编码为 `.m4b`（AAC、`+faststart+disable_chpl`）或分章 `.mp3`；有封面时 `.m4b` 追加第二路输入并以 `-map 2:v:0 -c:v copy -disposition:v:0 attached_pic` 挂载封面（同时移除 `-vn`），无封面时命令行与既有输出逐项一致；Swift 校验器独立探测实际媒体并与预期帧数核对。请求带 `loudness` 时先以 `-f null` 测量整本节目、解析 `print_format=json` 的 I/LRA/TP/thresh/offset，再以 `linear=true` 把同一组测量值应用到 `.m4b` 或每个分章 `.mp3`；工具链探测不到 `loudnorm` 时抛 `MediaCodecUnavailableError`，测量失败即报错，不回退单遍处理。
 
-- **`commands.py` & `cli.py`**：提供 `speechrail media encode-audiobook --app-home <path> --request-id <uuid> --format json`，供 `SpeechRailControlAgent` 调用并记入 `OperationJournal`。
+- **`commands.py` & `cli.py`**：提供 `speechrail media export --app-home <path> --request-id <uuid> --json`，供 `SpeechRailControlAgent` 调用并记入 `OperationJournal`。JSON 行协议以 `event=progress` 报告进度，以 `event=result` 报告成功或失败终态；失败返回 `status=failed`、稳定的 `error_code` 与脱敏后的 `message`，即使尚未开始编码也遵守相同终态格式。
 
 ## 2. 关键不变量
 
@@ -98,6 +98,8 @@ Store 的 schema 7 将旧 source 标记为 `reference`，不自动准备旧作�
 
 - 工作台顶部默认「只补缺失音频…」；本章与全书的补缺失、更新和重新制作在「更多操作」中分别提供。所有用户入口先预览，展示章节、目标片段编号、数量和保留/采用规则；单段重录也先打开范围确认。人物与声音确认后显示状态，「查看章节音频」只导航。
 - `previewProduction` 不写片段、候选或检查点，也不请求在线能力；核验实际资产后生成 `AudiobookProductionPlan`。`missingOnly` 跳过任何可用已有音频（包括依赖过时和回执未确认的候选）；文件缺失或损坏可补，旧文件保留。历史片段范围与新规划重叠时视为已有，无法映射的历史音频令该章保守保留，不凭空认定缺失。`updateOutdated` 仅处理已有且无当前有效候选的片段，明确排除缺失。`regenerate` 只规划目标正文与依赖，不读取无关历史候选的音频文件；同任务续作仅对待复用候选验证资产。内部执行接收非可选的冻结计划，所有入口先生成或恢复计划。
+- 空目标计划使用简短结果 Sheet，只显示保留结果与“完成”；补缺失空结果中的“查看待更新音频”仅在原章节范围内生成新的 `updateOutdated` 预览，仍须再次确认。关闭旧预览后，迟到的新预览不能重新打开弹窗。
+- 候选提交成功但回执未验证时，候选保留，任务写入 `failed` 与可选 `verificationFailureFragmentID`，不得报告完成或提供原条件续作。相同依赖已有待校验候选时，更新预览报出校验问题，禁止重复生成；补缺失仍保留其音频。旧 checkpoint 缺少该可选字段时正常解码。`isComplete` 按本次任务的完成阶段及状态判断，章节部分成片不妨碍已完成的批次显示 100%。
 - `start` 默认 `missingOnly`；没有目标时不创建任务或读取在线能力。批准计划冻结稿件、章节与完整片段依赖，执行前逐一重规划比较，禁止增加目标；开始每段补缺失前再次核验已保存音频。首次完整章节可形成初始版本，已有版本在更新和重做时保留，必须显式采用候选才替换。完成投影依据未跳过章节及 `resumePlan.readyChapterIDs`；书架总数排除跳过章节，全部跳过不视为成书；`reviewChapterIDs` 引导已有完整更新候选的核对。
 - `AudiobookRegenerationDraft` 冻结作品、加工稿件、章节和片段预览。逐章保留规划阻塞原因，其他章节的准备问题不阻止打开范围面板。所选范围包含受阻章时，确认接口拒绝并提供处理入口；确认接口也拒绝空范围和跨作品/跨章节片段；控制器再验证稿件 ID 与重规划范围，先校验再保存片段。整章重录为所有目标片段生成本任务新候选，已有章节不自动采用；尚无音频的完整章节可首次发布。
 - Checkpoint 的可选 `productionPlan` JSON 保存意图和原片段清单，不改变 SQLite schema。续作先展示原任务类型和范围；控制器校验稿件、原章节、计划身份及每个目标依赖，不能加入后来新增的缺失或待更新。重做只复用同任务候选；所有缺少冻结计划的旧检查点（含显式重录）均拒绝自动续作，用户需重新预览；程序内直接发起的重做也必须先冻结片段依赖。开始新操作前明确提示将替换已暂停任务的续作记录，保留所有音频和版本。回退时保留库及资产，不用旧 App 续作含新计划字段的任务。
