@@ -3736,9 +3736,9 @@ public actor AudiobookProjectStore {
 
     private func buildSummary(for book: AudiobookBook) throws -> AudiobookBookSummary {
         let bArg: [SQLValue] = [.text(book.id.uuidString)]
-        let totalChapterCount = try countRows("SELECT COUNT(*) FROM chapters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id);", bArg)
+        let totalChapterCount = try countRows("SELECT COUNT(*) FROM chapters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id) AND is_skipped = 0;", bArg)
         let completedChapterCount = try countRows(
-            "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id) AND current_chapter_revision_id IS NOT NULL;",
+            "SELECT COUNT(*) FROM chapters WHERE book_id = ? AND source_id = (SELECT source_id FROM books WHERE id = chapters.book_id) AND is_skipped = 0 AND current_chapter_revision_id IS NOT NULL;",
             bArg
         )
         let unknownCount = try countRows(
