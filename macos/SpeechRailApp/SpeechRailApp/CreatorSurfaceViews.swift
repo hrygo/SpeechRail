@@ -2064,39 +2064,63 @@ private struct VoiceCandidateSaveSheet: View {
     let onCancel: () -> Void
 
     @FocusState private var isNameFocused: Bool
+    @FocusState private var isRecoveryTextFocused: Bool
+    @FocusState private var isSheetFocused: Bool
+    @State private var recoveryText = ""
+    @State private var isEditingReference = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             Text("保存候选 \(candidate.slot) 为音色")
                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                .focusable()
+                .focused($isSheetFocused)
 
-            Text("保存后将在后台自动串联文本确认、Base 合成验收并发布入库，无需逐步手动操作。")
+            Text("保存时会自动检查文案与音频，再检查配音效果；通过后加入音色库。")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if showsPublicationFlow {
-                publicationSummary
-                publicationStep
-            } else {
-                nameField
-                candidateSummary
+            ScrollView {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+                    if showsPublicationFlow {
+                        publicationSummary
+                        publicationStep
+                    } else {
+                        nameField
+                        candidateSummary
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if model.voiceDesignPublication.phase == .failed {
+                failureActions
+            } else if !showsPublicationFlow {
                 initialActions
+            } else {
+                reviewActions
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .frame(width: Self.sheetWidth, alignment: .leading)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.formWidth, alignment: .leading)
+        .frame(idealHeight: SpeechRailDesignTokens.Layout.creatorVoiceRecoverySheetHeight,
+               maxHeight: SpeechRailDesignTokens.Layout.creatorVoiceRecoverySheetHeight)
         .onAppear {
-            if !showsPublicationFlow {
-                isNameFocused = true
-            }
+            if showsPublicationFlow { isSheetFocused = true } else { isNameFocused = true }
+            recoveryText = currentReferenceText
         }
         .onChange(of: model.voiceDesignPublication.candidateRevision) { _, _ in
             resetHumanReview()
+            recoveryText = currentReferenceText
+            isEditingReference = false
         }
         .onChange(of: model.voiceDesignPublication.validationID) { _, _ in
             resetHumanReview()
         }
+        .onChange(of: model.voiceDesignPublication.phase) { _, phase in
+            if phase == .failed { isSheetFocused = true }
+        }
+        .onExitCommand(perform: onCancel)
     }
 
     private var showsPublicationFlow: Bool {
@@ -2120,7 +2144,7 @@ private struct VoiceCandidateSaveSheet: View {
     private var candidateSummary: some View {
         Group {
             summaryRow("音色描述", value: candidate.instructionSnapshot)
-            summaryRow("参考文案", value: candidate.referenceTextSnapshot)
+            summaryRow("参考文案", value: currentReferenceText)
             summaryRow("Seed", value: String(candidate.seed))
             summaryRow("预览时长", value: durationText)
         }
@@ -2130,7 +2154,7 @@ private struct VoiceCandidateSaveSheet: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
             summaryRow("音色名称", value: voiceName)
             summaryRow("音色描述", value: candidate.instructionSnapshot)
-            summaryRow("参考文案", value: candidate.referenceTextSnapshot)
+            summaryRow("参考文案", value: currentReferenceText)
             if let revision = model.voiceDesignPublication.candidateRevision {
                 summaryRow("当前候选版本", value: revision)
             }
@@ -2156,9 +2180,7 @@ private struct VoiceCandidateSaveSheet: View {
             audioReviewStep(
                 title: "候选参考音频",
                 isPlayed: model.voiceDesignPublication.referenceAudioWasPlayed,
-                play: toggleReferencePlayback,
-                continueTitle: "确认参考，开始复验",
-                continueAction: model.confirmVoiceDesignReference
+                play: toggleReferencePlayback
             ) {
                 Text("请听完这段音频，并对照上面的参考文案确认。播放完整结束后才能继续。")
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -2174,9 +2196,7 @@ private struct VoiceCandidateSaveSheet: View {
             audioReviewStep(
                 title: "本次复验输出",
                 isPlayed: model.voiceDesignPublication.validationAudioWasPlayed,
-                play: toggleValidationPlayback,
-                continueTitle: "确认并发布到音色库",
-                continueAction: onPublish
+                play: toggleValidationPlayback
             ) {
                 Text("请听完整段复验输出，再判断身份是否一致、表达是否自然。")
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -2212,22 +2232,105 @@ private struct VoiceCandidateSaveSheet: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Button("取消保存", action: onCancel)
+            if model.voiceDesignPublication.referenceAudioData != nil {
+                Button(model.isVoiceDesignAudioPlaying ? "停止试听" : "试听当前候选", action: toggleReferencePlayback)
                     .speechRailButton(.secondary)
-                    .keyboardShortcut(.cancelAction)
-                Spacer(minLength: 0)
-                Button(
-                    model.voiceDesignPublicationRetryActionTitle,
-                    action: model.retryVoiceDesignPublication
-                )
-                    .speechRailButton(.primary)
-                    .keyboardShortcut(.defaultAction)
+            }
+            if model.voiceDesignPublication.validationAudioData != nil {
+                Button("试听本次配音检查", action: toggleValidationPlayback)
+                    .speechRailButton(.secondary)
+            }
+            DisclosureGroup("失败详情与文字差异") {
+                if let comparison = model.voiceDesignPublication.referenceComparison {
+                    comparisonDetails(comparison)
+                } else {
+                    Text("本次未返回参考文案比对详情。")
+                }
+            }
+            .font(SpeechRailDesignTokens.Typography.caption)
+            if model.canRegenerateVoiceDesignPublication {
+                DisclosureGroup("修改参考文案", isExpanded: $isEditingReference) {
+                    Text("修改后会重新生成音频并重新检查，当前音频和验收结果不会沿用。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                    TextField("参考文案（20–240 个字符）", text: $recoveryText, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isRecoveryTextFocused)
+                        .accessibilityLabel("重新生成使用的参考文案")
+                    Text("\(recoveryText.trimmingCharacters(in: .whitespacesAndNewlines).count) / 240 字符，至少需要 20 个字符")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                }
+                .onChange(of: isEditingReference) { _, expanded in
+                    if expanded { isRecoveryTextFocused = true }
+                }
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.sm)
         .speechRailSurface(.control)
         .accessibilityElement(children: .contain)
+    }
+
+    private var currentReferenceText: String {
+        !showsPublicationFlow || model.voiceDesignPublication.referenceText.isEmpty
+            ? candidate.referenceTextSnapshot : model.voiceDesignPublication.referenceText
+    }
+
+    private func comparisonDetails(_ comparison: VoiceDesignReferenceComparison) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text("文字匹配度 \(comparison.matchScore.formatted(.percent.precision(.fractionLength(1))))；要求至少 \(comparison.requiredScore.formatted(.percent.precision(.fractionLength(0))))")
+            Text(comparison.numbersMatch ? "数字一致性检查通过" : "数字内容不一致")
+            ForEach(Array(comparison.differences.enumerated()), id: \.offset) { _, difference in
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Text("文案：\(difference.expected.isEmpty ? "（无）" : difference.expected)")
+                    Text("识别：\(difference.recognized.isEmpty ? "（无）" : difference.recognized)")
+                }
+                .textSelection(.enabled)
+            }
+            if comparison.truncated { Text("差异较多，仅展示部分内容。") }
+            Text("差异已忽略繁简体和普通标点。识别结果也可能出错，请结合试听判断。")
+        }
+    }
+
+    private var failureActions: some View {
+        VStack(alignment: .trailing, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            if model.canRegenerateVoiceDesignPublication {
+                Button("用此文案重新生成") {
+                    model.regenerateVoiceDesignPublication(referenceText: recoveryText)
+                }
+                .speechRailButton(.primary)
+                .disabled(!(SpeechRailCreatorLimits.referenceTextMinimumLength...SpeechRailCreatorLimits.referenceTextMaximumLength)
+                    .contains(recoveryText.trimmingCharacters(in: .whitespacesAndNewlines).count))
+            }
+            HStack {
+                Button("取消保存", action: onCancel)
+                    .speechRailButton(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                Spacer(minLength: 0)
+                if model.voiceDesignPublicationRetryActionTitle != "重新生成候选" {
+                    Button(model.voiceDesignPublicationRetryActionTitle, action: model.retryVoiceDesignPublication)
+                        .speechRailButton(.secondary)
+                }
+            }
+        }
+    }
+
+    private var reviewActions: some View {
+        HStack {
+            Button("取消保存", action: onCancel)
+                .speechRailButton(.secondary)
+                .keyboardShortcut(.cancelAction)
+            Spacer(minLength: 0)
+            if model.voiceDesignPublication.phase == .awaitingReferenceReview {
+                Button("确认参考，开始复验", action: model.confirmVoiceDesignReference)
+                    .speechRailButton(.primary)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!model.voiceDesignPublication.referenceAudioWasPlayed)
+            } else if model.voiceDesignPublication.phase == .awaitingValidationReview {
+                Button("确认并发布到音色库", action: onPublish)
+                    .speechRailButton(.primary)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!model.voiceDesignPublication.validationAudioWasPlayed || !canContinue)
+            }
+        }
     }
 
     private func progressMessage(_ message: String) -> some View {
@@ -2249,8 +2352,6 @@ private struct VoiceCandidateSaveSheet: View {
         title: String,
         isPlayed: Bool,
         play: @escaping () -> Void,
-        continueTitle: String,
-        continueAction: @escaping () -> Void,
         @ViewBuilder details: () -> Details
     ) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -2267,14 +2368,6 @@ private struct VoiceCandidateSaveSheet: View {
                 }
                 .speechRailButton(.secondary)
                 .accessibilityHint("请从头播放到结束，播放完成后才能继续")
-                Button("取消保存", action: onCancel)
-                    .speechRailButton(.secondary)
-                    .keyboardShortcut(.cancelAction)
-                Spacer(minLength: 0)
-                Button(continueTitle, action: continueAction)
-                    .speechRailButton(.primary)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!isPlayed || !canContinue)
             }
             if let message = model.voiceDesignPublication.message {
                 Text(message)
@@ -2357,7 +2450,6 @@ private struct VoiceCandidateSaveSheet: View {
         return SpeechRailDisplayFormat.duration(seconds)
     }
 
-    private static let sheetWidth: CGFloat = 420
 }
 
 /// 稿 `waveform(...)` 的落点：按给定高度序列画一排 2pt 圆角条，宽高由 `pattern` 推出。

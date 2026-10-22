@@ -1373,6 +1373,92 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testVoiceDesignMismatchCanRecheckOrRegenerateWithEditedText() async throws {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeVoiceModel(
+            transport: ClosureControlTransport { _ in throw CancellationError() },
+            voiceDesignClient: creator
+        )
+        let original = "这是一段用于音色保存失败恢复的原始测试参考文案。"
+        let edited = "换一段清晰自然的新文案，用于重新生成并检查这个声音。"
+        let candidate = VoiceDesignCandidateSnapshot(
+            slot: "1", seed: 101, title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然", referenceTextSnapshot: original,
+            status: .ready, audioData: Data([0, 1, 2])
+        )
+        await creator.rejectNextConfirmation()
+        model.startVoiceDesignPublication(candidate, name: "测试音色", autoPublish: true)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        XCTAssertEqual(model.voiceDesignPublicationRetryActionTitle, "重新校验")
+        XCTAssertTrue(model.canRegenerateVoiceDesignPublication)
+        XCTAssertNotNil(model.voiceDesignPublication.referenceAudioData)
+        XCTAssertEqual(model.voiceDesignPublication.referenceComparison?.matchScore, 0.9)
+        let before = await creator.createRequests()
+
+        // Invalid edits cannot discard the current candidate or its evidence.
+        model.regenerateVoiceDesignPublication(referenceText: "太短")
+        XCTAssertEqual(model.voiceDesignPublication.phase, .failed)
+        let afterInvalidEdit = await creator.createRequests()
+        XCTAssertEqual(afterInvalidEdit, before)
+
+        await creator.rejectNextConfirmation()
+        model.retryVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        let afterRecheck = await creator.createRequests()
+        XCTAssertEqual(afterRecheck, before)
+
+        // A new candidate has fresh request identity; no review is inherited.
+        await creator.loseNextCreateResponseAfterCommit()
+        model.regenerateVoiceDesignPublication(referenceText: edited)
+        XCTAssertNil(model.voiceDesignPublication.referenceComparison)
+        XCTAssertNil(model.voiceDesignPublication.referenceAudioData)
+        XCTAssertFalse(model.voiceDesignPublication.referenceAudioWasPlayed)
+        XCTAssertNil(model.voiceDesignPublication.validationID)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        XCTAssertNil(model.voiceDesignPublication.candidateID)
+        let requests = await creator.createRequests()
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests.last?.referenceText, edited)
+        let regenerationEvents = await creator.events()
+        XCTAssertEqual(regenerationEvents.filter { $0 == "cancel" }.count, 1)
+        XCTAssertNotEqual(requests.last?.voiceID, requests.first?.voiceID)
+        XCTAssertNotEqual(requests.last?.idempotencyKey, requests.first?.idempotencyKey)
+        XCTAssertEqual(model.voiceDesignPublication.referenceText, edited)
+        model.retryVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.published, snapshot: { model.voiceDesignPublication })
+        let recovered = await creator.createRequests()
+        XCTAssertEqual(recovered.count, 3)
+        XCTAssertEqual(recovered[1], recovered[2])
+        let committed = await creator.committedCreateCount()
+        XCTAssertEqual(committed, 2)
+    }
+
+    func testVoiceDesignRegenerationRetirementFailureDoesNotCreateUnwantedAudio() async throws {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeVoiceModel(
+            transport: ClosureControlTransport { _ in throw CancellationError() },
+            voiceDesignClient: creator
+        )
+        let text = "这是一段用于候选替换取消失败恢复的自然测试参考文案。"
+        let candidate = VoiceDesignCandidateSnapshot(
+            slot: "1", seed: 101, title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然", referenceTextSnapshot: text,
+            status: .ready, audioData: Data([0, 1, 2])
+        )
+        await creator.rejectNextConfirmation()
+        model.startVoiceDesignPublication(candidate, name: "测试音色", autoPublish: true)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        await creator.failNextCandidateCancel()
+        model.regenerateVoiceDesignPublication(referenceText: text)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        let requests = await creator.createRequests()
+        XCTAssertEqual(requests.count, 1)
+        model.cancelVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.idle, snapshot: { model.voiceDesignPublication })
+        let afterCancellation = await creator.createRequests()
+        XCTAssertEqual(afterCancellation.count, 1)
+    }
+
     func testVoiceDesignLostCreateResponseRetriesTheSameCommittedIdentity() async throws {
         let creator = VoiceDesignWorkflowCreatorClient()
         await creator.loseNextCreateResponseAfterCommit()
@@ -2450,6 +2536,9 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
     private var heldPublication: CheckedContinuation<VoiceDesignPublishResult, Error>?
     private var heldPublicationResult: VoiceDesignPublishResult?
     private var nextCandidateState = "generated"
+    private var rejectsConfirmation = false
+
+    func rejectNextConfirmation() { rejectsConfirmation = true }
 
     func events() -> [String] { recordedEvents }
     func createRequests() -> [CreateRequest] { recordedCreateRequests }
@@ -2604,6 +2693,15 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         referenceText: String?
     ) async throws -> VoiceDesignCandidate {
         recordedEvents.append("confirm")
+        if rejectsConfirmation {
+            rejectsConfirmation = false
+            throw VoiceDesignReferenceMismatch(
+                comparison: VoiceDesignReferenceComparison(
+                    candidateRevision: candidateRevision, matchScore: 0.9,
+                    requiredScore: 0.92, numbersMatch: true, differences: [], truncated: false
+                )
+            )
+        }
         guard let existingCandidate = currentCandidate else {
             throw ServiceAPIClientError.requestFailed
         }

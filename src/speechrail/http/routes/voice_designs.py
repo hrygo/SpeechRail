@@ -14,6 +14,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -360,6 +361,45 @@ def _selected_capability_key(services: AppServices) -> str:
 
 def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _reference_comparison(
+    revision: str,
+    expected: str,
+    recognized: str,
+    score: float,
+) -> dict[str, Any]:
+    """Return bounded local recovery details, never log transcript content."""
+    reference = vq.normalize_transcript_for_match(expected)
+    transcript = vq.normalize_transcript_for_match(recognized)
+    differences: list[dict[str, str]] = []
+    truncated = False
+    for kind, start, end, other_start, other_end in SequenceMatcher(
+        None,
+        reference,
+        transcript,
+        autojunk=False,
+    ).get_opcodes():
+        if kind == "equal":
+            continue
+        if len(differences) == 24:
+            truncated = True
+            break
+        truncated |= end - start > 24 or other_end - other_start > 24
+        differences.append(
+            {
+                "expected": reference[start : min(end, start + 24)],
+                "recognized": transcript[other_start : min(other_end, other_start + 24)],
+            }
+        )
+    return {
+        "candidate_revision": revision,
+        "match_score": score,
+        "required_score": TRANSCRIPT_PASS_SCORE,
+        "numbers_match": vq.transcript_numbers_match(expected, recognized),
+        "differences": differences,
+        "truncated": truncated,
+    }
 
 
 def _candidate_for_request(
@@ -960,11 +1000,23 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             )
             score = vq.transcript_match_score(text, transcript)
             if score < TRANSCRIPT_PASS_SCORE or not vq.transcript_numbers_match(text, transcript):
-                return error_response(
+                response = error_response(
                     400,
                     request_id,
                     "transcript_mismatch",
                     "Candidate reference did not meet the text-fidelity requirements",
+                )
+                content = json.loads(bytes(response.body))
+                content["error"]["reference_comparison"] = _reference_comparison(
+                    candidate.revision,
+                    text,
+                    transcript,
+                    score,
+                )
+                return JSONResponse(
+                    status_code=400,
+                    content=content,
+                    headers={"X-SpeechRail-Error-Code": "transcript_mismatch"},
                 )
             changed = text != candidate.reference_text
             if changed:

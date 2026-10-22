@@ -2318,6 +2318,45 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 
+    func testVoiceDesignConfirmationDecodesFailureComparison() async throws {
+        let client = makeHTTPClient(statusCode: 400, body: Data("""
+        {"error":{"type":"invalid_request_error","code":"transcript_mismatch",
+          "message":"Mismatch","request_id":"req_fixture","retryable":false,
+          "reference_comparison":{"candidate_revision":"vr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "match_score":0.9,"required_score":0.92,"numbers_match":true,
+            "differences":[{"expected":"甲","recognized":"乙"}],"truncated":false}}}
+        """.utf8))
+        do {
+            _ = try await client.confirmVoiceDesignCandidate(
+                id: "vd_0123456789abcdef01234567", referenceText: nil
+            )
+            XCTFail("Mismatch must not confirm the candidate")
+        } catch let mismatch as VoiceDesignReferenceMismatch {
+            XCTAssertEqual(mismatch.comparison.matchScore, 0.9)
+            XCTAssertEqual(mismatch.comparison.differences.first?.recognized, "乙")
+            XCTAssertEqual(String(describing: mismatch), "VoiceDesignReferenceMismatch")
+            XCTAssertEqual(String(reflecting: mismatch), "VoiceDesignReferenceMismatch")
+        } catch {
+            XCTFail("Expected typed reference comparison, got \(type(of: error))")
+        }
+    }
+
+    func testVoiceDesignConfirmationWithoutComparisonKeepsStableError() async throws {
+        let client = makeHTTPClient(statusCode: 400, body: Data("""
+        {"error":{"type":"invalid_request_error","code":"transcript_mismatch",
+          "message":"Mismatch","request_id":"req_fixture","retryable":false}}
+        """.utf8))
+        do {
+            _ = try await client.confirmVoiceDesignCandidate(
+                id: "vd_0123456789abcdef01234567", referenceText: nil
+            )
+            XCTFail("Mismatch must not confirm the candidate")
+        } catch let error as ServiceAPIClientError {
+            XCTAssertEqual(error.code, "transcript_mismatch")
+            XCTAssertEqual(error.requestID, "req_fixture")
+        }
+    }
+
     /// C1: the namespaced quality-runs route returns an envelope, not a bare report.
     /// Decoding it as `VoiceQualityReportSnapshotV2` fails on the missing top-level
     /// `status`, which is exactly the mismatch this DTO now models.
