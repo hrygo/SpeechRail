@@ -200,6 +200,9 @@ public struct AudiobookBookWorkspaceView: View {
                         onResume: { Task { await workflow.resumeProduction() } }
                     )
                 }
+                if workflow.isProductionComplete {
+                    productionCompletionGuide
+                }
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                     if !isChapterSidebarCollapsed {
                         chapterSidebarColumn
@@ -224,6 +227,9 @@ public struct AudiobookBookWorkspaceView: View {
                 if shouldShowWorkspaceTransport {
                     workspaceTransportBar
                 }
+            }
+            .sheet(item: $bindableWorkflow.regenerationDraft) { draft in
+                AudiobookRegenerationSheet(workflow: workflow, draft: draft, availableSize: proxy.size)
             }
             .sheet(item: $chapterRenameTarget) { target in
                 chapterRenameSheet(for: target)
@@ -313,6 +319,27 @@ public struct AudiobookBookWorkspaceView: View {
                 }
             }
         }
+    }
+
+    private var productionCompletionGuide: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Label("制作完成", systemImage: "checkmark.circle.fill")
+                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                Text("所有需朗读章节均已就绪。现在可以开始收听，或导出有声书保存和分享。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+            Button("导出有声书…", systemImage: "square.and.arrow.up") {
+                workflow.isShowingExportSheet = true
+            }
+            .speechRailButton(.secondary)
+            .accessibilityIdentifier("audiobook-completed-export")
+        }
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .speechRailRecessedSlot()
+        .accessibilityIdentifier("audiobook-production-completed-guide")
     }
 
     // MARK: - Top Summary & Single Primary Action Bar
@@ -463,6 +490,33 @@ public struct AudiobookBookWorkspaceView: View {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
             }
+            if let guidance = productionActionGuidance {
+                Label(guidance, systemImage: "checkmark.shield")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .accessibilityIdentifier("audiobook-production-action-guidance")
+            }
+        }
+    }
+
+    private var productionActionGuidance: String? {
+        switch workflow.selectedBookPrimaryAction {
+        case .makeConfirmedChapters:
+            if workflow.pendingProductionChapters.isEmpty { return workflow.productionBlocker?.message }
+            return "处理待制作的 \(workflow.pendingProductionChapters.count) 章，已完成片段自动复用。已有章节的更新需试听并采用，才会替换当前版本。"
+        case .resumeProduction:
+            return "从上次保存处继续，保留原任务范围。已有章节的更新需试听并采用，才会替换当前版本。"
+        case .pauseProduction:
+            return "已完成片段逐段保存，暂停后可继续；已有章节版本保留。"
+        case .reviewCandidates:
+            return "新候选已保存。试听并选择采用后，才会替换当前章节版本。"
+        case .continueListening:
+            return "收听当前已采用的版本。想重新尝试，可在「更多操作」中选择重新制作范围，已有版本保留。"
+        default:
+            return nil
         }
     }
 
@@ -1271,16 +1325,8 @@ public struct AudiobookBookWorkspaceView: View {
                     SessionEmptyState(
                         systemImage: "waveform.path.ecg",
                         title: "本章尚未生成音频",
-                        message: "请先完成全书分析并确认角色配声，即可生成本章音频。"
-                    ) {
-                        Button("生成本章音频") {
-                            if let chID = workflow.selectedChapterID {
-                                workflow.makeConfirmedChapters(chapterIDs: [chID])
-                            }
-                        }
-                        .speechRailButton(.primary)
-                        .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails || workflow.isEditingChapterLayout)
-                    }
+                        message: "完成分析与配声后，用顶部制作按钮补齐待制作章节；只制作本章可用下方「更多操作」。已有音频会自动复用。"
+                    ) {}
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
@@ -1298,52 +1344,52 @@ public struct AudiobookBookWorkspaceView: View {
                 SessionHairline()
                 SessionPanelActions {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        if workflow.isProducing,
-                           workflow.productionBookID == workflow.selectedBook?.id
-                        {
-                            Button {
-                                Task { await workflow.pauseProduction() }
-                            } label: {
-                                Label(workflow.isPausingProduction ? "正在暂停…" : "暂停制作", systemImage: "pause.circle")
+                        if let chID = workflow.selectedChapterID {
+                            if workflow.resumePlan?.reviewChapterIDs.contains(chID) == true {
+                                Button("试听本章新候选", systemImage: "play.circle") {
+                                    workflow.reviewProductionCandidates(chapterID: chID)
+                                }
+                                .speechRailButton(.secondary)
+                                .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails || workflow.isEditingChapterLayout)
+                            } else if workflow.isChapterAudioCurrent(chID) {
+                                Button("收听本章", systemImage: "headphones") {
+                                    Task { await workflow.startListening(chapterID: chID) }
+                                }
+                                .speechRailButton(.secondary)
+                                .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails || workflow.isEditingChapterLayout)
                             }
-                            .speechRailButton(.secondary)
-                            .disabled(workflow.isPausingProduction)
-                        } else if workflow.selectedBook?.productionState == .paused {
-                            Button("继续制作", systemImage: "play.circle") {
-                                Task { await workflow.resumeProduction() }
-                            }
-                            .speechRailButton(.primary)
-                            .disabled(workflow.isProductionBusy || workflow.isEditingChapterLayout)
-                        } else {
-                            Button {
+                        }
+
+                        Menu("更多操作", systemImage: "ellipsis.circle") {
+                            Button("仅补齐本章音频", systemImage: "waveform.badge.plus") {
                                 if let chID = workflow.selectedChapterID {
                                     workflow.makeConfirmedChapters(chapterIDs: [chID])
                                 }
-                            } label: {
-                                Label(
-                                    workflow.chapterProductionButtonTitle(for: workflow.selectedChapterID),
-                                    systemImage: "waveform.badge.plus"
-                                )
                             }
-                            .speechRailButton(.primary)
-                            .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails || workflow.isEditingChapterLayout)
+                            .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails
+                                || workflow.isAnalyzing || workflow.isEditingChapterLayout
+                                || workflow.selectedBook?.productionState == .paused
+                                || !workflow.pendingProductionChapters.contains { $0.id == workflow.selectedChapterID })
+                            Divider()
+                            Button("重新制作…", systemImage: "arrow.clockwise") {
+                                Task { await workflow.prepareRegeneration() }
+                            }
+                            .disabled(workflow.isProductionBusy || workflow.isPreparingRegeneration
+                                || workflow.isAnalyzing || workflow.isEditingChapterLayout
+                                || !workflow.chapters.contains { !$0.isSkipped && $0.currentChapterRevisionID != nil })
+                            Button("回退本章上一版本", systemImage: "arrow.uturn.backward") {
+                                Task { await workflow.undoChapterAdoption() }
+                            }
+                            .disabled(workflow.isProductionBusy)
                         }
-
-                        Button {
-                            Task { await workflow.undoChapterAdoption() }
-                        } label: {
-                            Label("回退本章上一版本", systemImage: "arrow.uturn.backward")
-                        }
-                        .speechRailButton(.quiet)
+                        .help("仅补齐本章会复用已有音频；重新制作会先选择范围，已有章节需采用新候选才替换原版。")
+                        .accessibilityIdentifier("audiobook-production-more-actions")
 
                         Spacer()
-
-                        Button {
-                            Task { await workflow.startListening() }
-                        } label: {
-                            Label("进入听书模式", systemImage: "headphones")
-                        }
-                        .speechRailButton(.secondary)
+                        Text("已有章节保留 · 更新候选采用后替换")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -1711,18 +1757,23 @@ public struct AudiobookBookWorkspaceView: View {
     @ViewBuilder
     private var primaryCastingActionButton: some View {
         if workflow.isAuditionConfirmedForSelectedBook {
-            Button {
-                workflow.workbenchTab = .production
-            } label: {
-                Label("开始制作章节", systemImage: "play.circle.fill")
+            if workflow.workbenchTab == .preparation {
+                Button("查看章节音频", systemImage: "arrow.right") {
+                    workflow.workbenchTab = .production
+                }
+                .speechRailButton(.secondary)
+                .help("切换到「制作与返修」，不会开始制作或替换已有音频。")
+                .accessibilityIdentifier("audiobook-start-production-action-button")
+            } else {
+                Label("配声已确认", systemImage: "checkmark.circle")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
-            .speechRailButton(.primary)
-            .accessibilityIdentifier("audiobook-start-production-action-button")
         } else if workflow.hasMissingVoiceCreationDrafts {
             Button("浏览并创建音色", systemImage: "person.wave.2") {
                 workflow.isShowingVoicePreparationSheet = true
             }
-            .speechRailButton(.primary)
+            .speechRailButton(.secondary)
             .disabled(workflow.isCreatingLeadExclusiveVoices || workflow.isAssigningRecommendedVoices)
             .accessibilityIdentifier("audiobook-review-missing-voices-button")
         } else if !workflow.castingPlanNeedsSeparateConfirmation {
@@ -1733,7 +1784,7 @@ public struct AudiobookBookWorkspaceView: View {
             } label: {
                 Label(workflow.isAssigningRecommendedVoices ? "正在准备配声…" : "一键智能配声", systemImage: "wand.and.stars")
             }
-            .speechRailButton(.primary)
+            .speechRailButton(.secondary)
             .disabled(workflow.isCreatingLeadExclusiveVoices || workflow.isAssigningRecommendedVoices || workflow.isAnalyzing || workflow.isProductionBusy || workflow.selectedBook?.analysisState != .allWindowsValidated)
             .help("使用已有声音自动为全书配声，角色按需共用；已有选声会保留，同章撞音会集中提示确认。完成后由你启动章节制作")
             .accessibilityIdentifier("audiobook-smart-assign-voices-button")
@@ -1756,7 +1807,11 @@ public struct AudiobookBookWorkspaceView: View {
                     primaryCastingActionButton
                 }
 
-                if !workflow.isAuditionConfirmedForSelectedBook {
+                if workflow.isAuditionConfirmedForSelectedBook {
+                    Text("制作请用工作台顶部按钮。更换声音只影响相关片段，已有章节版本保留。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                } else {
                     Text(workflow.hasMissingVoiceCreationDrafts
                         ? "缺少声音的创建资料已备好，浏览、勾选后即可批量创建。"
                         : "自动匹配已有声音，数量不足时按需共用。想精调时再打开角色；准备好后由你开始制作。")
@@ -2263,6 +2318,8 @@ public struct AudiobookBookWorkspaceView: View {
             Task { await workflow.resumeProduction() }
         case .pauseProduction:
             Task { await workflow.pauseProduction() }
+        case .reviewCandidates:
+            workflow.reviewProductionCandidates()
         case .continueListening:
             Task { await workflow.startListening() }
         }
@@ -2907,4 +2964,165 @@ private struct AudiobookChapterEditingSheet: View {
         if hasChanges { isConfirmingDiscard = true }
         else { workflow.cancelChapterEditing() }
     }
+}
+
+
+/// Frozen book/range preview; editable choices stay local until explicit confirmation.
+private struct AudiobookRegenerationSheet: View {
+    @Bindable var workflow: AudiobookWorkflowModel
+    let draft: AudiobookRegenerationDraft
+    let availableSize: CGSize
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var isContentFocused: Bool
+    @State private var scope: Scope = .currentChapter
+    @State private var chapterIDs: Set<UUID>
+    @State private var fragmentIDs: Set<UUID>
+
+    private enum Scope: String, CaseIterable, Identifiable {
+        case fragments = "所选片段"
+        case currentChapter = "当前章节"
+        case chapters = "勾选章节"
+        case wholeBook = "整本书"
+        var id: String { rawValue }
+    }
+
+    init(workflow: AudiobookWorkflowModel, draft: AudiobookRegenerationDraft, availableSize: CGSize) {
+        self.workflow = workflow
+        self.draft = draft
+        self.availableSize = availableSize
+        _chapterIDs = State(initialValue: draft.blockedChapterReasons[draft.defaultChapterID] == nil ? [draft.defaultChapterID] : [])
+        let initialFragment = draft.fragmentsByChapter[draft.defaultChapterID, default: []]
+            .first { $0.id == workflow.selectedFragmentID }
+        _fragmentIDs = State(initialValue: initialFragment.map { [$0.id] } ?? [])
+    }
+
+    private var targetChapterIDs: Set<UUID> {
+        switch scope {
+        case .fragments, .currentChapter: [draft.defaultChapterID]
+        case .chapters: chapterIDs
+        case .wholeBook: Set(draft.chapters.map(\.id))
+        }
+    }
+
+    private var blockedChapters: [AudiobookChapter] {
+        draft.chapters.filter { targetChapterIDs.contains($0.id) && draft.blockedChapterReasons[$0.id] != nil }
+    }
+
+    private var fragmentCount: Int {
+        if scope == .fragments { return fragmentIDs.count }
+        return targetChapterIDs.reduce(0) { $0 + draft.fragmentsByChapter[$1, default: []].count }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            Text("重新制作")
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+            Text("生成新的声音候选，原有音频和历史版本全部保留。试听并采用后，才会替换当前声音。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+                    Picker("重新制作范围", selection: $scope) {
+                        ForEach(Scope.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    scopeChoices
+                    ForEach(blockedChapters) { chapter in
+                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Label(chapter.title, systemImage: "exclamationmark.circle")
+                            Text(draft.blockedChapterReasons[chapter.id, default: "请先完成准备。"])
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if !blockedChapters.isEmpty {
+                        Button("去处理未准备好的章节") {
+                            if let chapter = blockedChapters.first { workflow.selectedChapterID = chapter.id }
+                            workflow.workbenchTab = .preparation
+                            dismiss()
+                        }
+                        .speechRailButton(.secondary)
+                    }
+                    if let error = workflow.errorMessage {
+                        NoticeBar(tone: .critical, message: error)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(SpeechRailDesignTokens.Spacing.xs)
+            }
+            .focusable(interactions: .edit)
+            .focused($isContentFocused)
+            Text("将重新制作 \(targetChapterIDs.count) 章、\(fragmentCount) 个片段。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .accessibilityIdentifier("audiobook-regeneration-summary")
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Button("取消", role: .cancel) { dismiss() }
+                    .speechRailButton(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("确认重新制作") {
+                    workflow.confirmRegeneration(draft: draft, chapterIDs: targetChapterIDs,
+                        fragmentIDs: scope == .fragments ? fragmentIDs : nil)
+                }
+                .speechRailButton(.primary)
+                .disabled(fragmentCount == 0 || targetChapterIDs.isEmpty || !blockedChapters.isEmpty || workflow.isProductionBusy)
+                .accessibilityIdentifier("audiobook-regeneration-confirm")
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .frame(width: min(SpeechRailDesignTokens.Layout.Sheet.prominentWidth,
+                          max(0, availableSize.width - SpeechRailDesignTokens.Spacing.lg)),
+               height: min(SpeechRailDesignTokens.Layout.audiobookCastingDetailsHeight,
+                           max(0, availableSize.height - SpeechRailDesignTokens.Spacing.lg)))
+        .defaultFocus($isContentFocused, true)
+        .onExitCommand { dismiss() }
+        .task { isContentFocused = true }
+    }
+
+    @ViewBuilder
+    private var scopeChoices: some View {
+        switch scope {
+        case .chapters:
+            ForEach(draft.chapters) { chapter in chapterChoice(chapter) }
+        case .fragments:
+            ForEach(Array(draft.fragmentsByChapter[draft.defaultChapterID, default: []].enumerated()), id: \.element.id) { entry in
+                fragmentChoice(index: entry.offset, fragment: entry.element)
+            }
+        case .currentChapter:
+            Text(draft.chapters.first { $0.id == draft.defaultChapterID }?.title ?? "当前章节")
+        case .wholeBook:
+            Text("包含所有未跳过章节；尚无音频的章节将首次制作，已有音频生成新候选。")
+        }
+    }
+
+    private func chapterChoice(_ chapter: AudiobookChapter) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Toggle(chapter.title, isOn: Binding(
+                get: { chapterIDs.contains(chapter.id) },
+                set: { if $0 { chapterIDs.insert(chapter.id) } else { chapterIDs.remove(chapter.id) } }
+            ))
+            .disabled(draft.blockedChapterReasons[chapter.id] != nil)
+            if let reason = draft.blockedChapterReasons[chapter.id] {
+                Text(reason)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+        }
+    }
+
+    private func fragmentChoice(index: Int, fragment: AudiobookFragment) -> some View {
+        Toggle(isOn: Binding(
+            get: { fragmentIDs.contains(fragment.id) },
+            set: { if $0 { fragmentIDs.insert(fragment.id) } else { fragmentIDs.remove(fragment.id) } }
+        )) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text("片段 \(index + 1)")
+                Text(draft.fragmentExcerpts[fragment.id, default: ""])
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
 }

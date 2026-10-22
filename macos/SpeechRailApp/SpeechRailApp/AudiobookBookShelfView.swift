@@ -331,6 +331,8 @@ public struct AudiobookBookShelfView: View {
             await workflow.resumeProduction()
         case .pauseProduction:
             await workflow.pauseProduction()
+        case .reviewCandidates:
+            workflow.reviewProductionCandidates()
         case .continueListening:
             await workflow.startListening()
         }
