@@ -2,6 +2,17 @@ import Foundation
 import Observation
 import SpeechRailControlKit
 
+public struct AudiobookRegenerationDraft: Identifiable, Sendable {
+    public let id = UUID()
+    public let bookID: UUID
+    public let sourceID: UUID
+    public let chapters: [AudiobookChapter]
+    public let fragmentsByChapter: [UUID: [AudiobookFragment]]
+    public let defaultChapterID: UUID
+    public let fragmentExcerpts: [UUID: String]
+    public let blockedChapterReasons: [UUID: String]
+}
+
 /// T13：有声书工坊唯一功能 Owner（管理书架、导入预览、全书分析、角色确认、逐章制作、返修版本、共享听书与导出状态，视图不持有长任务）。
 @MainActor
 @Observable
@@ -85,6 +96,7 @@ public final class AudiobookWorkflowModel {
         case resumeProduction
         case pauseProduction
         case continueListening
+        case reviewCandidates
 
         public var title: String {
             switch self {
@@ -104,6 +116,8 @@ public final class AudiobookWorkflowModel {
                 return "继续制作"
             case .pauseProduction:
                 return "暂停制作"
+            case .reviewCandidates:
+                return "试听并采用新候选"
             case .continueListening:
                 return "继续听"
             }
@@ -123,6 +137,8 @@ public final class AudiobookWorkflowModel {
                 return "waveform.badge.plus"
             case .pauseProduction:
                 return "pause.circle"
+            case .reviewCandidates:
+                return "headphones.circle"
             case .continueListening:
                 return "headphones"
             }
@@ -241,6 +257,9 @@ public final class AudiobookWorkflowModel {
     public private(set) var chapterCandidatesByFragmentID: [UUID: [AudiobookRenderCandidate]] = [:]
     public private(set) var atomTextsByID: [UUID: String] = [:]
     public private(set) var fragmentTextsByID: [UUID: String] = [:]
+    public var regenerationDraft: AudiobookRegenerationDraft?
+    public private(set) var isPreparingRegeneration = false
+    private var productionRegenerationScope: AudiobookRegenerationScope?
     public var selectedFragmentID: UUID?
     public var selectedAtomIDs: Set<UUID> = []
 
@@ -744,20 +763,39 @@ public final class AudiobookWorkflowModel {
         return isProductionBlocked(for: bookID)
     }
 
+    public var pendingProductionChapters: [AudiobookChapter] {
+        let awaitingAdoption = Set(resumePlan?.reviewChapterIDs ?? [])
+        let incomplete = Set(resumePlan?.incompleteChapterIDs ?? [])
+        return chapters.filter { chapter in
+            guard !chapter.isSkipped, !awaitingAdoption.contains(chapter.id) else { return false }
+            let state = chapterReadinessByID[chapter.id]
+            return state == .readyForProduction || state == .needsUpdate || state == .paused
+                || (state == .chapterAudioReady && incomplete.contains(chapter.id))
+        }
+    }
+
+    public var isProductionComplete: Bool {
+        let included = chapters.filter { !$0.isSkipped }
+        guard !included.isEmpty, !isProductionBusy else { return false }
+        let ready = Set(resumePlan?.readyChapterIDs ?? [])
+        return included.allSatisfy { chapter in
+            chapter.currentChapterRevisionID != nil && (resumePlan == nil || ready.contains(chapter.id))
+        }
+    }
+
+    public func isChapterAudioCurrent(_ chapterID: UUID) -> Bool {
+        guard let chapter = chapters.first(where: { $0.id == chapterID }), !chapter.isSkipped,
+              chapter.currentChapterRevisionID != nil else { return false }
+        return resumePlan == nil || resumePlan?.readyChapterIDs.contains(chapterID) == true
+    }
+
     public var productionBlocker: ProductionBlocker? {
         guard let bookID = selectedBook?.id, !chapters.isEmpty else { return nil }
         if isEditingChapterLayout { return .editingChapterLayout }
         if isProductionBlocked(for: bookID) { return .anotherBookProducing }
 
-        let hasReadyChapter = chapters.contains { chapter in
-            guard !chapter.isSkipped else { return false }
-            switch chapterReadinessByID[chapter.id] {
-            case .readyForProduction, .needsUpdate, .paused:
-                return true
-            default:
-                return false
-            }
-        }
+        if isProductionComplete || !(resumePlan?.reviewChapterIDs.isEmpty ?? true) { return nil }
+        let hasReadyChapter = !pendingProductionChapters.isEmpty
         guard !hasReadyChapter else { return nil }
 
         if totalUnknownSpeakerCount > 0 {
@@ -783,6 +821,13 @@ public final class AudiobookWorkflowModel {
         {
             return "另一部有声书正在制作"
         }
+        if action == .makeConfirmedChapters, selectedBook?.id == bookID {
+            let count = pendingProductionChapters.count
+            if count > 0 { return "继续制作剩余 \(count) 章" }
+        }
+        if action == .continueListening, selectedBook?.id == bookID, isProductionComplete {
+            return "开始收听"
+        }
         return action.title
     }
 
@@ -796,7 +841,8 @@ public final class AudiobookWorkflowModel {
         else {
             return "生成本章音频"
         }
-        return "更新本章音频"
+        if resumePlan?.reviewChapterIDs.contains(chapter.id) == true { return "试听新候选" }
+        return isChapterAudioCurrent(chapter.id) ? "收听本章" : "更新受影响内容"
     }
 
     /// 严格唯一主动作推导：任何状态下只突出下一步最合理的动作。
@@ -829,6 +875,10 @@ public final class AudiobookWorkflowModel {
         if book.productionState == .paused {
             return .resumeProduction
         }
+        if selectedBook?.id == book.id, isProductionComplete { return .continueListening }
+        if selectedBook?.id == book.id, !pendingProductionChapters.isEmpty { return .makeConfirmedChapters }
+        if selectedBook?.id == book.id, !(resumePlan?.reviewChapterIDs.isEmpty ?? true) { return .reviewCandidates }
+        if summary.totalChapterCount == 0 { return .makeConfirmedChapters }
         if summary.completedChapterCount < summary.totalChapterCount {
             return .makeConfirmedChapters
         }
@@ -842,8 +892,8 @@ public final class AudiobookWorkflowModel {
         }
         let fallbackSummary = AudiobookBookSummary(
             book: book,
-            totalChapterCount: chapters.count,
-            completedChapterCount: chapters.filter { $0.currentChapterRevisionID != nil }.count,
+            totalChapterCount: chapters.filter { !$0.isSkipped }.count,
+            completedChapterCount: chapters.filter { !$0.isSkipped && $0.currentChapterRevisionID != nil }.count,
             unknownSpeakerCount: unknownAnnotationsInSelectedChapter.count,
             characterCount: characters.count
         )
@@ -3283,7 +3333,85 @@ public final class AudiobookWorkflowModel {
             }
             return
         }
-        startProductionRun(bookID: bookID, chapterIDs: [chapterID], regeneratingFragmentID: fragmentID)
+        startProductionRun(bookID: bookID, chapterIDs: [chapterID], regenerationScope: .fragments([fragmentID]))
+    }
+
+    public func reviewProductionCandidates(chapterID: UUID? = nil) {
+        workbenchTab = .production
+        if let target = chapterID ?? resumePlan?.reviewChapterIDs.first { selectedChapterID = target }
+        errorMessage = nil
+        showPersistentBanner("新候选已准备好。请逐段试听并选择“采用此候选”；当前音频和历史版本保留。")
+    }
+
+    public func prepareRegeneration() async {
+        guard let store, let book = selectedBook, !isProductionBusy, !isAnalyzing,
+              !isEditingChapterLayout, !isPreparingRegeneration else { return }
+        guard isAuditionConfirmedForSelectedBook else {
+            errorMessage = "请先确认角色与配声，再重新制作。"
+            return
+        }
+        isPreparingRegeneration = true
+        defer { isPreparingRegeneration = false }
+        do {
+            let snapshot = try await store.workingSourceSnapshot(bookID: book.id)
+            let eligible = try await store.chapters(for: book.id).filter { !$0.isSkipped }
+            guard let first = eligible.first else { throw AudiobookProductionError.noReadyChaptersSelected }
+            let bindings = try await store.voiceBindings(for: book.id)
+            let pronunciation = try await store.pronunciationBinding(for: book.id)
+            var fragments: [UUID: [AudiobookFragment]] = [:]
+            var excerpts: [UUID: String] = [:]
+            var blocked: [UUID: String] = [:]
+            errorMessage = nil
+            for chapter in eligible {
+                let annotations = try await store.annotations(for: book.id, chapterID: chapter.id)
+                let atoms = try await store.atoms(for: book.id, chapterID: chapter.id)
+                do {
+                    let planned = try AudiobookFragmentPlanner.plan(chapter: chapter,
+                        annotations: annotations, bindings: bindings, policy: .standard, source: snapshot.sourceIndex,
+                        atoms: atoms, pronunciation: pronunciation)
+                    if planned.isEmpty { blocked[chapter.id] = "本章没有可制作的正文。" }
+                    fragments[chapter.id] = planned
+                    for fragment in planned {
+                        excerpts[fragment.id] = String(try snapshot.sourceIndex.text(in: fragment.sourceRange).prefix(100))
+                    }
+                } catch let error as AudiobookFragmentPlanningError {
+                    blocked[chapter.id] = error.localizedDescription
+                }
+            }
+            try await store.validateWorkingSource(snapshot)
+            guard selectedBook?.id == book.id, !isProductionBusy, !isAnalyzing, !isEditingChapterLayout else { return }
+            regenerationDraft = .init(bookID: book.id, sourceID: snapshot.sourceID, chapters: eligible,
+                fragmentsByChapter: fragments,
+                defaultChapterID: eligible.first { $0.id == selectedChapterID }?.id ?? first.id,
+                fragmentExcerpts: excerpts, blockedChapterReasons: blocked)
+        } catch {
+            if selectedBook?.id == book.id { errorMessage = error.localizedDescription }
+        }
+    }
+
+    public func confirmRegeneration(draft: AudiobookRegenerationDraft, chapterIDs: Set<UUID>, fragmentIDs: Set<UUID>? = nil) {
+        guard regenerationDraft?.id == draft.id, selectedBook?.id == draft.bookID,
+              selectedBook?.sourceID == draft.sourceID, !isProductionBusy, !isAnalyzing, !isEditingChapterLayout,
+              !chapterIDs.isEmpty, chapterIDs.isSubset(of: Set(draft.chapters.map(\.id))) else {
+            errorMessage = "制作范围已变化，请重新选择。"
+            return
+        }
+        if let blocked = draft.chapters.first(where: { chapterIDs.contains($0.id) && draft.blockedChapterReasons[$0.id] != nil }) {
+            errorMessage = draft.blockedChapterReasons[blocked.id]
+            return
+        }
+        if let fragmentIDs {
+            let available = Set(chapterIDs.flatMap { draft.fragmentsByChapter[$0, default: []].map(\.id) })
+            guard !fragmentIDs.isEmpty, fragmentIDs.isSubset(of: available) else {
+                errorMessage = "请选择需要重新制作的片段。"
+                return
+            }
+        }
+        regenerationDraft = nil
+        startProductionRun(bookID: draft.bookID,
+            chapterIDs: draft.chapters.filter { chapterIDs.contains($0.id) }.map(\.id),
+            regenerationScope: fragmentIDs.map { .fragments($0) } ?? .chapters,
+            expectedSourceID: draft.sourceID)
     }
 
     public func makeConfirmedChapters(chapterIDs: [UUID]? = nil) {
@@ -3292,7 +3420,7 @@ public final class AudiobookWorkflowModel {
            let checkpoint = selectedProductionCheckpoint, checkpoint.progress.canResume
         {
             startProductionRun(bookID: bookID, chapterIDs: checkpoint.chapterIDs,
-                               regeneratingFragmentID: checkpoint.regeneratingFragmentID,
+                               regenerationScope: checkpoint.effectiveRegenerationScope,
                                resumingTaskID: checkpoint.taskID)
             return
         }
@@ -3307,18 +3435,28 @@ public final class AudiobookWorkflowModel {
             return
         }
         let targetChapterIDs: [UUID]
-        if let chapterIDs, !chapterIDs.isEmpty {
-            targetChapterIDs = chapterIDs
-        } else {
-            targetChapterIDs = chapters.compactMap { ch in
-                let state = chapterReadinessByID[ch.id]
-                if state == .readyForProduction || state == .needsUpdate || state == .paused {
-                    return ch.id
-                }
-                return nil
+        let pendingIDs = Set(pendingProductionChapters.map(\.id))
+        if let chapterIDs {
+            guard !chapterIDs.isEmpty, Set(chapterIDs).isSubset(of: Set(chapters.map(\.id))) else {
+                errorMessage = "请选择本书需要制作的章节。"
+                return
             }
+            targetChapterIDs = chapters.filter { pendingIDs.contains($0.id) && chapterIDs.contains($0.id) }.map(\.id)
+        } else {
+            targetChapterIDs = pendingProductionChapters.map(\.id)
         }
         guard !targetChapterIDs.isEmpty else {
+            let requestedIDs = chapterIDs ?? chapters.filter { !$0.isSkipped }.map(\.id)
+            if requestedIDs.contains(where: { resumePlan?.reviewChapterIDs.contains($0) == true }) {
+                reviewProductionCandidates(chapterID: requestedIDs.first { resumePlan?.reviewChapterIDs.contains($0) == true })
+                return
+            }
+            let requested = chapters.filter { chapterIDs == nil || chapterIDs!.contains($0.id) }.filter { !$0.isSkipped }
+            if !requested.isEmpty, requested.allSatisfy({ isChapterAudioCurrent($0.id) }) {
+                errorMessage = nil
+                showPersistentBanner("所选章节已制作完成，可以开始收听或导出有声书。")
+                return
+            }
             if !allUnknownAnnotations.isEmpty {
                 errorMessage = "当前仍有 \(allUnknownAnnotations.count) 处待确认说话人阻碍章节就绪，请先在「准备与角色」页快速确认说话人。"
                 Task { await jumpToFirstUnknownSpeaker() }
@@ -3342,7 +3480,7 @@ public final class AudiobookWorkflowModel {
             if let checkpoint, checkpoint.progress.canResume {
                 startProductionRun(
                     bookID: bookID, chapterIDs: checkpoint.chapterIDs,
-                    regeneratingFragmentID: checkpoint.regeneratingFragmentID,
+                    regenerationScope: checkpoint.effectiveRegenerationScope,
                     resumingTaskID: checkpoint.taskID
                 )
             } else {
@@ -3362,8 +3500,9 @@ public final class AudiobookWorkflowModel {
     private func startProductionRun(
         bookID: UUID,
         chapterIDs: [UUID],
-        regeneratingFragmentID: UUID? = nil,
-        resumingTaskID: UUID? = nil
+        regenerationScope: AudiobookRegenerationScope? = nil,
+        resumingTaskID: UUID? = nil,
+        expectedSourceID: UUID? = nil
     ) {
         guard let productionController else { return }
         guard !isEditingChapterLayout else {
@@ -3384,7 +3523,12 @@ public final class AudiobookWorkflowModel {
         let runID = UUID()
         productionRunID = runID
         productionBookID = bookID
-        productionFragmentID = regeneratingFragmentID
+        productionRegenerationScope = regenerationScope
+        if case .fragments(let ids) = regenerationScope, ids.count == 1 {
+            productionFragmentID = ids.first
+        } else {
+            productionFragmentID = nil
+        }
         productionProgress = AudiobookProductionProgress(bookID: bookID, state: .running, totalChapters: chapterIDs.count)
         productionProgressPollTask?.cancel()
         isProducing = true
@@ -3414,26 +3558,15 @@ public final class AudiobookWorkflowModel {
         productionTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                if let regeneratingFragmentID {
-                    guard chapterIDs.count == 1, let chapterID = chapterIDs.first else {
-                        throw AudiobookProductionError.noReadyChaptersSelected
-                    }
-                    try await productionController.regenerateFragment(
-                        bookID: bookID,
-                        chapterID: chapterID,
-                        fragmentID: regeneratingFragmentID,
-                        resumingTaskID: resumingTaskID
-                    )
-                } else {
-                    try await productionController.start(bookID: bookID, chapterIDs: chapterIDs, resumingTaskID: resumingTaskID)
-                }
+                try await productionController.start(bookID: bookID, chapterIDs: chapterIDs,
+                    resumingTaskID: resumingTaskID, regenerationScope: regenerationScope, expectedSourceID: expectedSourceID)
                 let progress = await productionController.progress(for: bookID)
                 guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 self.productionProgress = progress
                 await self.refreshProductionBook(bookID)
                 guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 self.finishProductionRun(runID)
-                self.showProductionCompletionMessage(bookID: bookID, isFragmentRegeneration: regeneratingFragmentID != nil)
+                self.showProductionCompletionMessage(bookID: bookID, isFragmentRegeneration: regenerationScope != nil)
             } catch {
                 guard self.productionRunID == runID, !self.isPausingProduction else { return }
                 let progress = await productionController.progress(for: bookID)
@@ -3458,7 +3591,7 @@ public final class AudiobookWorkflowModel {
               let bookID = productionBookID,
               let runID = productionRunID
         else { return }
-        let isFragmentRegeneration = productionFragmentID != nil
+        let isFragmentRegeneration = productionRegenerationScope != nil
         isPausingProduction = true
         productionProgressPollTask?.cancel()
         productionProgress?.state = .pausing
@@ -3489,10 +3622,11 @@ public final class AudiobookWorkflowModel {
 
     private func showProductionCompletionMessage(bookID: UUID, isFragmentRegeneration: Bool) {
         guard selectedBook?.id == bookID, surfaceMode == .workspace else { return }
-        bannerMessage = isFragmentRegeneration
-            ? "本段新候选已生成；当前章节版本保持不变。请试听后选择“采用此候选”。"
+        let needsAdoption = isFragmentRegeneration || !(resumePlan?.reviewChapterIDs.isEmpty ?? true)
+        bannerMessage = needsAdoption
+            ? "新候选已生成；当前章节版本保持不变。请逐段试听后选择“采用此候选”。"
             : "所选章节制作已完成，可立即进入听书或导出。"
-        bannerRequiresAction = isFragmentRegeneration
+        bannerRequiresAction = needsAdoption
     }
 
     private func finishProductionRun(_ runID: UUID) {
