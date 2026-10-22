@@ -7,6 +7,13 @@ struct AudiobookRoleStatsWork: Equatable, Sendable {
     var rangeVisits = 0
 }
 
+struct AudiobookProductionRow: Identifiable, Sendable {
+    let fragment: AudiobookFragment
+    let previousFragment: AudiobookFragment?
+
+    var id: UUID { fragment.id }
+}
+
 struct AudiobookChapterDetailsSnapshot: Sendable {
     let chapterID: UUID?
     let atoms: [AudiobookTextAtom]
@@ -122,6 +129,14 @@ enum AudiobookWorkspaceError: Error, LocalizedError {
 }
 
 enum AudiobookWorkspaceProjection {
+    /// Freeze adjacent fragments together before SwiftUI defers row rendering.
+    static func productionRows(_ fragments: [AudiobookFragment]) -> [AudiobookProductionRow] {
+        fragments.enumerated().map { index, fragment in
+            AudiobookProductionRow(fragment: fragment,
+                previousFragment: index > 0 ? fragments[index - 1] : nil)
+        }
+    }
+
     @concurrent
     static func chapter(_ input: AudiobookChapterWorkspaceInput, preferredFragmentID: UUID?,
         metrics: AppPerformanceMetrics = .shared,
