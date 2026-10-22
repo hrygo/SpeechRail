@@ -24,6 +24,7 @@ public struct SettingsView: View {
     @State private var restoreReport: RestoreReport?
     @State private var isChecking = false
     @State private var checkedModule: LLMModule?
+    @State private var connectionNoticeID = UUID()
     @State private var isAdvancedLLMConfigurationExpanded = false
     @State private var didSeedAdvancedLLMConfigurationExpansion = false
 
@@ -46,7 +47,6 @@ public struct SettingsView: View {
                     moduleKeyDrafts: $moduleKeyDrafts,
                     moduleKeySaved: $moduleKeySaved,
                     connectionResult: $connectionResult,
-                    keySaveError: $keySaveError,
                     isChecking: $isChecking,
                     checkedModule: $checkedModule,
                     isAdvancedLLMConfigurationExpanded: $isAdvancedLLMConfigurationExpanded,
@@ -80,37 +80,30 @@ public struct SettingsView: View {
             llmKeySaved = await Task.detached { LLMKeychain.hasKey }.value
             moduleKeySaved = Set(savedModules)
         }
-        .alert(
-            "备份记录库失败",
-            isPresented: Binding(
-                get: { backupErrorMessage != nil },
-                set: { isPresented in
-                    if !isPresented { backupErrorMessage = nil }
-                }
-            )
-        ) {
-            Button("好", role: .cancel) {
-                backupErrorMessage = nil
-            }
-        } message: {
-            Text(backupErrorMessage ?? "无法完成备份。")
-        }
-        .alert(
-            "已备份",
-            isPresented: Binding(
-                get: { backupDoneMessage != nil },
-                set: { isPresented in
-                    if !isPresented { backupDoneMessage = nil }
-                }
-            )
-        ) {
-            Button("好", role: .cancel) { backupDoneMessage = nil }
-        } message: {
-            Text(backupDoneMessage ?? "")
-        }
+        .operationFeedback([
+            OperationFeedback(backupErrorMessage, title: "备份操作未完成",
+                              onDismiss: { backupErrorMessage = nil }),
+            OperationFeedback(keySaveError, title: checkedModule == nil
+                ? "连接已通过，但密钥未保存" : "连接已通过，但专用密钥未保存",
+                onDismiss: { keySaveError = nil }),
+            connectionFeedback,
+            OperationFeedback(backupDoneMessage, tone: .healthy, title: "备份已完成",
+                              autoDismiss: true, onDismiss: { backupDoneMessage = nil })
+        ])
         .sheet(item: $restoreReport) { report in
             restoreReportSheet(report)
         }
+    }
+
+    private var connectionFeedback: OperationFeedback? {
+        guard !isChecking, let result = connectionResult else { return nil }
+        return OperationFeedback(
+            result.detail,
+            tone: result.isReady ? .healthy : .critical,
+            title: SettingsConnectionPresentation.title(for: result),
+            id: connectionNoticeID.uuidString,
+            autoDismiss: result.isReady
+        )
     }
 
     private var generalPane: some View {
@@ -304,6 +297,7 @@ public struct SettingsView: View {
             checkedModule = nil
             keySaveError = nil
             connectionResult = .unreachable(error.localizedDescription)
+            connectionNoticeID = UUID()
         }
     }
 
@@ -321,6 +315,7 @@ public struct SettingsView: View {
             checkedModule = module
             keySaveError = nil
             connectionResult = .unreachable(error.localizedDescription)
+            connectionNoticeID = UUID()
         }
     }
 
@@ -379,6 +374,7 @@ public struct SettingsView: View {
                 operation: module?.requiredOperation ?? .responses)
         }
         connectionResult = result
+        connectionNoticeID = UUID()
         guard LLMKeyDraftPolicy.shouldPersist(
             draft: draft,
             connection: result,

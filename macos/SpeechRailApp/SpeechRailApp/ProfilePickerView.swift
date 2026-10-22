@@ -192,7 +192,8 @@ public struct ProfilePickerView: View {
                         .font(SpeechRailDesignTokens.Typography.secondary)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
-                if let operation = model.operation {
+                if let operation = model.operation, operation.command == .profileApply,
+                   operation.state == .accepted || operation.state == .running {
                     Text("操作：\(operationStateText(operation.state))")
                         .font(SpeechRailDesignTokens.Typography.secondary)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -201,16 +202,7 @@ public struct ProfilePickerView: View {
                             .font(SpeechRailDesignTokens.Typography.secondary)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
-                    if let errorCode = operation.errorCode {
-                        Text("错误码：\(errorCode.rawValue)")
-                            .font(SpeechRailDesignTokens.Typography.technical)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    }
-                    if let message = operation.message {
-                        Text(SpeechRailOperationMessagePresentation.text(message))
-                            .font(SpeechRailDesignTokens.Typography.secondary)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.critical)
-                    }
+
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -228,6 +220,19 @@ public struct ProfilePickerView: View {
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
         .speechRailContentSurface()
+        .operationFeedback([profileOperationFeedback])
+    }
+
+    private var profileOperationFeedback: OperationFeedback? {
+        guard let operation = model.operation, operation.command == .profileApply,
+              operation.state != .accepted, operation.state != .running else { return nil }
+        let succeeded = operation.state == .committed
+        return OperationFeedback(
+            SpeechRailOperationMessagePresentation.text(operation.message ?? (succeeded ? "模型配置已应用。" : "模型配置未能应用。")),
+            tone: succeeded ? .healthy : (operation.state == .cancelled ? .neutral : .critical),
+            title: succeeded ? "配置已应用" : "配置未完成",
+            id: "profile-\(operation.operationID)-\(operation.state.rawValue)", autoDismiss: succeeded
+        )
     }
 
     /// 高级项：ASR 与 TTS 各自选档，写进同一对 `asr_spec`/`tts_spec`。

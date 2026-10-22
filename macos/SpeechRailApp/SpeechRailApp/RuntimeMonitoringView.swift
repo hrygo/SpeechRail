@@ -12,6 +12,8 @@ public struct RuntimeMonitoringView: View {
     @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var timeWindow = MonitoringTimeWindow.fiveMinutes
     @State private var reportMessage: String?
+    @State private var reportCopySucceeded = false
+    @State private var reportNoticeID = UUID()
     @State private var showsDetail = false
 
     /// The chart samples are session-scoped, so the window only ever trims the
@@ -106,12 +108,6 @@ public struct RuntimeMonitoringView: View {
                 loadingState
             } else {
                 monitoringSummary
-                if let reportMessage {
-                    Label(reportMessage, systemImage: "checkmark.circle.fill")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ready)
-                        .transition(reduceMotion ? .identity : .opacity)
-                }
                 // 首屏常驻实时：指标条与趋势图固定读 App 每 5 秒的采样，不随时间窗
                 // 换源。选历史档时这两块仍然是「现在」，历史回看另起一块放在下面——
                 // 否则一切到历史档，整页只剩回看、没有当下的读数了
@@ -134,6 +130,13 @@ public struct RuntimeMonitoringView: View {
                 )
             }
         }
+        .operationFeedback([
+            OperationFeedback(model.monitoringMessage, title: "运行数据暂时无法读取"),
+            OperationFeedback(reportMessage, tone: reportCopySucceeded ? .healthy : .critical,
+                              title: reportCopySucceeded ? "已复制监控摘要" : "复制未完成",
+                              id: reportNoticeID.uuidString, autoDismiss: reportCopySucceeded,
+                              onDismiss: { reportMessage = nil })
+        ])
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 // 这一页每 5 秒自己采样一次，所以头部没有「刷新」——手动重读
@@ -1079,11 +1082,7 @@ public struct RuntimeMonitoringView: View {
                         latencyEmptyState
                     }
                 }
-                if let message = model.monitoringMessage, !message.isEmpty {
-                    Text(message)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(monitoringTone.color)
-                }
+
             }
             // 稿的卡片内边距是 18（`card()` 默认 `pad: 18`），应用统一取
             // `Layout.cardInset`(20) 这一档；这张卡此前是 16，比稿和应用自己的
@@ -2089,7 +2088,9 @@ public struct RuntimeMonitoringView: View {
         \(historyReportLines)
         """
         _ = NSPasteboard.general.clearContents()
-        if NSPasteboard.general.setString(report, forType: .string) {
+        reportCopySucceeded = NSPasteboard.general.setString(report, forType: .string)
+        reportNoticeID = UUID()
+        if reportCopySucceeded {
             withAnimation(SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.standardEaseOut, reduceMotion: reduceMotion)) {
                 reportMessage = "已复制脱敏监控摘要"
             }
@@ -2170,11 +2171,11 @@ public struct RuntimeMonitoringView: View {
         if model.isRefreshingMonitoring {
             return "正在读取本机服务的运行状态。"
         }
-        if let message = model.healthMessage {
-            return "\(message) \(lastHealthRefreshText)。"
+        if model.healthMessage != nil {
+            return "服务状态暂时无法读取，\(lastHealthRefreshText)。"
         }
-        if let message = model.metricsMessage {
-            return "\(SpeechRailOperationMessagePresentation.text(message))；下面的数字保留最近一次可信数据，\(lastMetricsRefreshText)。"
+        if model.metricsMessage != nil {
+            return "下面的数字保留最近一次可信数据，\(lastMetricsRefreshText)。"
         }
         return switch monitoringTone {
         case .healthy:
@@ -2182,7 +2183,7 @@ public struct RuntimeMonitoringView: View {
         case .attention:
             "服务可能正在启动，或当前能力还没有准备完成。"
         case .critical:
-            model.monitoringMessage ?? "控制中心暂时无法连接到 SpeechRail。"
+            "控制中心暂时无法连接到 SpeechRail。"
         case .neutral:
             "打开此页面后会自动读取本机运行状态。"
         }

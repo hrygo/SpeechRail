@@ -54,6 +54,9 @@ public struct TeleprompterStageView: View {
 
     public var body: some View {
         stageWithLifecycle
+            .operationFeedback([
+                OperationFeedback(session.lastFailure)
+            ])
     }
 
     private var stageBase: some View {
@@ -119,10 +122,7 @@ public struct TeleprompterStageView: View {
                 handlePhaseChange(to: newPhase)
             }
             .onChange(of: session.blocked) { _, blocked in
-                showErrorNoticeIfNeeded(blocked != nil || session.lastFailure != nil)
-            }
-            .onChange(of: session.lastFailure) { _, failure in
-                showErrorNoticeIfNeeded(failure != nil && session.blocked == nil)
+                showErrorNoticeIfNeeded(blocked != nil)
             }
             .onChange(of: readingAreaFocused, initial: true) { _, focused in
                 presentation.readingAreaFocused = focused
@@ -228,8 +228,6 @@ public struct TeleprompterStageView: View {
             if errorNoticeVisible {
                 if let blocked = session.blocked {
                     attentionMessage(blocked: blocked)
-                } else if let failure = session.lastFailure {
-                    saveFailureMessage(failure)
                 }
             }
             scriptStack
@@ -539,32 +537,6 @@ public struct TeleprompterStageView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("需要注意")
         .accessibilityValue(blocked.title + "：" + blocked.detail)
-    }
-
-    private func saveFailureMessage(_ failure: String) -> some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Image(systemName: "externaldrive.badge.exclamationmark")
-                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-            Text("进度未保存，当前阅读仍可继续。")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-        .background(
-            SpeechRailDesignTokens.Color.attention.opacity(
-                SpeechRailDesignTokens.Teleprompter.stageAttentionBackgroundOpacity
-            ),
-            in: RoundedRectangle(
-                cornerRadius: SpeechRailDesignTokens.Corner.nested,
-                style: .continuous
-            )
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("进度未保存，当前阅读仍可继续")
-        .accessibilityHint(failure)
     }
 
     private var scriptStack: some View {

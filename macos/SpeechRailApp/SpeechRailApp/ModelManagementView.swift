@@ -44,6 +44,7 @@ public struct ModelManagementView: View {
                 helpText: "查看所选模型的来源、哈希与校验详情 (⌘⌥I)"
             )
         }
+        .operationFeedback(modelFeedback)
         // 头部动作只有右侧详情面板的开关；下载并校验、应用到档位这些本页动作
         // 全都属于卡片里的制品。页面身份由窗口组合根 `ControlCenterView` 声明（§6.2）。
         .focusedSceneValue(
@@ -108,6 +109,35 @@ public struct ModelManagementView: View {
             selectAvailableProfileIfNeeded()
             selectFirstArtifactIfNeeded()
         }
+    }
+
+    private var modelFeedback: [OperationFeedback?] {
+        let message = model.modelAvailability == .available
+            ? model.message.map(SpeechRailOperationMessagePresentation.text) : nil
+        guard let operation = model.operation,
+              operation.command == .modelPrepare || operation.command == .profileApply,
+              operation.state != .accepted, operation.state != .running
+        else { return [OperationFeedback(message)] }
+
+        let succeeded = operation.state == .committed
+        let title = succeeded ? "操作已完成" : "操作未完成"
+        let fallback = succeeded ? "模型操作已完成。" : "模型操作未完成，请重试。"
+        let operationMessage = SpeechRailOperationMessagePresentation.text(operation.message ?? message ?? fallback)
+        var detail = operationMessage
+        if operation.state == .interrupted {
+            detail += " 重试会重新核对已有文件，再从起点完成校验。"
+        }
+        return [
+            OperationFeedback(message == operationMessage ? nil : message),
+            OperationFeedback(
+                detail, tone: succeeded ? .healthy : (operation.state == .cancelled ? .neutral : .critical),
+                title: operation.state == .cancelled ? "操作已取消" : title,
+                id: "model-\(operation.operationID)-\(operation.state.rawValue)",
+                autoDismiss: succeeded,
+                actionTitle: succeeded ? nil : operationActionTitle(for: operation),
+                action: succeeded ? nil : { handleOperationAction(operation, canRetry: true) }
+            )
+        ]
     }
 
     @ViewBuilder
@@ -955,35 +985,20 @@ public struct ModelManagementView: View {
             }
             // 长任务进度贴在触发它的那一行下面（§6.4「在触发页内联」），
             // 而不是沉到制品卡后面去。
-            if let operation = activeModelOperation {
-                let canRetry = operation.state == .interrupted
-                    || operation.state == .failed
-                    || operation.state == .cancelled
+            if let operation = activeModelOperation,
+               operation.state == .accepted || operation.state == .running {
                 OperationBar(
                     operation: operation,
                     actionTitle: operationActionTitle(for: operation)
                 ) {
-                    handleOperationAction(operation, canRetry: canRetry)
-                }
-                if operation.state == .interrupted {
-                    Text("上一次准备被中断。本机不做断点续传：重试会重新核对已存在的文件，再从起点完成校验。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    handleOperationAction(operation, canRetry: false)
                 }
             }
         }
     }
 
     /// 按「先处理会挡路的、再处理需要解释的」排序，只返回最该先解决的那一条。
-    /// 服务消息排第一：它多半是上一次操作失败的原因，其余几条都是它的下游。
     private var actionGuidance: (text: String, tone: StatusTone)? {
-        if let message = model.message,
-           !message.isEmpty,
-           model.modelAvailability == .available
-        {
-            return (SpeechRailOperationMessagePresentation.text(message), .critical)
-        }
         if assistantBlocksProfileSwitch {
             return (profileSwitchBlockedByAssistantText, .attention)
         }

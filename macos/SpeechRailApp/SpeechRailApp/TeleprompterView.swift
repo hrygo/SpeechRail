@@ -12,6 +12,8 @@ public struct TeleprompterView: View {
     @State private var isImporterPresented = false
     @State private var isAIDataFlowDisclosurePresented = false
     @State private var operationMessage: String?
+    @State private var operationMessageIsSuccess = false
+    @State private var operationNoticeID = UUID()
     @State private var documentToDelete: TeleprompterDocument?
     @State private var isDeleteAlertPresented = false
     @State private var unavailableDocumentToDelete: TeleprompterV2DocumentListItem?
@@ -66,13 +68,6 @@ public struct TeleprompterView: View {
                     )
                 }
 
-                if let operationMessage {
-                    Label(operationMessage, systemImage: "exclamationmark.triangle")
-                        .font(SpeechRailDesignTokens.Typography.callout)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                }
-
                 if documents.isEmpty {
                     welcomeHub
                 } else {
@@ -85,6 +80,16 @@ public struct TeleprompterView: View {
         } trailing: {
             headerActions
         }
+        .operationFeedback([
+            OperationFeedback(
+                operationMessage,
+                tone: operationMessageIsSuccess ? .healthy : .critical,
+                title: operationMessageIsSuccess ? "操作已完成" : "操作未完成",
+                id: operationNoticeID.uuidString,
+                autoDismiss: operationMessageIsSuccess,
+                onDismiss: { operationMessage = nil }
+            )
+        ])
         .task {
             reloadDocuments()
         }
@@ -148,7 +153,7 @@ public struct TeleprompterView: View {
                 importFromURL(url)
             case .failure(let error):
                 if let cocoaError = error as? CocoaError, cocoaError.code != .userCancelled {
-                    operationMessage = "导入失败：\(error.localizedDescription)"
+                    showOperationMessage("导入失败：\(error.localizedDescription)")
                 }
             }
         }
@@ -160,10 +165,10 @@ public struct TeleprompterView: View {
             Button("删除", role: .destructive) {
                 do {
                     try session.deleteDocument(documentID: doc.id)
-                    operationMessage = nil
+                    showOperationMessage(nil)
                     reloadDocuments()
                 } catch {
-                    operationMessage = error.localizedDescription
+                    showOperationMessage(error.localizedDescription)
                 }
             }
             Button("取消", role: .cancel) {}
@@ -181,13 +186,19 @@ public struct TeleprompterView: View {
                     unavailableDocumentToDelete = nil
                     reloadDocuments()
                 } catch {
-                    operationMessage = error.localizedDescription
+                    showOperationMessage(error.localizedDescription)
                 }
             }
             Button("取消", role: .cancel) {}
         } message: { item in
             Text("「\(item.id)」的当前格式无法读取。删除后可以重新导入原稿。")
         }
+    }
+
+    private func showOperationMessage(_ message: String?, isSuccess: Bool = false) {
+        operationMessage = message
+        operationMessageIsSuccess = isSuccess
+        operationNoticeID = UUID()
     }
 
     private var pageStatusPresentation: SessionPageStatusPresentation {
@@ -605,7 +616,7 @@ public struct TeleprompterView: View {
                 requestAIAnalysis()
             }
         } catch {
-            operationMessage = error.localizedDescription
+            showOperationMessage(error.localizedDescription)
         }
     }
 
@@ -828,7 +839,7 @@ public struct TeleprompterView: View {
                                             _ = try session.duplicateDocument(documentID: document.id)
                                             reloadDocuments()
                                         } catch {
-                                            operationMessage = error.localizedDescription
+                                            showOperationMessage(error.localizedDescription)
                                         }
                                     }
                                     Button("复制稿件内容", systemImage: SpeechRailDesignTokens.Icon.Symbol.copy.systemName) {
@@ -880,10 +891,10 @@ public struct TeleprompterView: View {
                 Task {
                     do {
                         if try await session.loadForSelection(documentID: id) {
-                            operationMessage = nil
+                            showOperationMessage(nil)
                         }
                     } catch {
-                        operationMessage = "打开稿件失败：\(error.localizedDescription)"
+                        showOperationMessage("打开稿件失败：\(error.localizedDescription)")
                     }
                 }
             }
@@ -1123,7 +1134,7 @@ public struct TeleprompterView: View {
                         _ = try session.duplicateDocument(documentID: doc.id)
                         reloadDocuments()
                     } catch {
-                        operationMessage = error.localizedDescription
+                        showOperationMessage(error.localizedDescription)
                     }
                 }
             }
@@ -1268,7 +1279,7 @@ public struct TeleprompterView: View {
             if session.calibrationSource != .uncalibrated {
                 Button("恢复默认语速 (1.0x)", systemImage: SpeechRailDesignTokens.Icon.Symbol.reset.systemName) {
                     session.applyTrialCalibration(k: 1.0, source: .uncalibrated)
-                    operationMessage = "已恢复为默认自然语速 (1.0x)"
+                    showOperationMessage("已恢复为默认自然语速 (1.0x)", isSuccess: true)
                 }
             }
         } label: {
@@ -1362,11 +1373,11 @@ public struct TeleprompterView: View {
                         Button("直接使用原稿") {
                             do {
                                 try session.useDeterministicFallback()
-                                operationMessage = nil
+                                showOperationMessage(nil)
                             } catch {
                                 // 静默 `try?` 会让读者以为按钮坏了：状态已回滚，
                                 // 按钮还能再按，但必须告诉他为什么这次没成。
-                                operationMessage = error.localizedDescription
+                                showOperationMessage(error.localizedDescription)
                             }
                         }
                         .speechRailButton(.secondary)
@@ -1398,11 +1409,11 @@ public struct TeleprompterView: View {
                         Button("重试保存") {
                             do {
                                 try session.save()
-                                operationMessage = nil
+                                showOperationMessage(nil)
                             } catch {
                                 // 重试再次失败时不能一声不吭：读者刚腾出磁盘空间，
                                 // 看不到结果就只会以为按钮坏了。
-                                operationMessage = error.localizedDescription
+                                showOperationMessage(error.localizedDescription)
                             }
                         }
                         .speechRailButton(.primary)
@@ -2126,11 +2137,11 @@ public struct TeleprompterView: View {
                         // E6/N01：不再无条件全文回写——段落编辑已直接汇入
                         // Session，未经编辑的候选原样采用，块身份完整保留。
                         try session.acceptPendingVersion()
-                        operationMessage = nil
+                        showOperationMessage(nil)
                         reloadDocuments()
                         showStage()
                     } catch {
-                        operationMessage = error.localizedDescription
+                        showOperationMessage(error.localizedDescription)
                     }
                 } label: {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -2544,13 +2555,13 @@ public struct TeleprompterView: View {
         if let snippet = pasteboardSnippet {
             do {
                 try session.createDocumentValidated(title: "剪贴板稿件", sourceText: snippet.text)
-                operationMessage = nil
+                showOperationMessage(nil)
                 reloadDocuments()
             } catch {
-                operationMessage = "导入失败：\(error.localizedDescription)"
+                showOperationMessage("导入失败：\(error.localizedDescription)")
             }
         } else {
-            operationMessage = "剪贴板中未检测到文本内容"
+            showOperationMessage("剪贴板中未检测到文本内容")
         }
     }
 
@@ -2577,7 +2588,7 @@ public struct TeleprompterView: View {
             documents = try session.listDocuments()
         } catch {
             documents = []
-            operationMessage = error.localizedDescription
+            showOperationMessage(error.localizedDescription)
             return
         }
         // 自动打开第一份稿件失败时，列表本身仍然有用——不能把两者混在同一个
@@ -2586,7 +2597,7 @@ public struct TeleprompterView: View {
             do {
                 try session.load(documentID: first.id)
             } catch {
-                operationMessage = error.localizedDescription
+                showOperationMessage(error.localizedDescription)
             }
         }
     }
@@ -2594,10 +2605,10 @@ public struct TeleprompterView: View {
     private func showStage() {
         stage.show()
         if let message = stage.lastPresentationError {
-            operationMessage = message
+            showOperationMessage(message)
             return
         }
-        operationMessage = nil
+        showOperationMessage(nil)
     }
 
     private func commitTargetMinutesInputIfNeeded() {
@@ -2637,10 +2648,10 @@ public struct TeleprompterView: View {
         do {
             try session.flushPendingDraftSave()
             try session.openForManualReading()
-            operationMessage = nil
+            showOperationMessage(nil)
             showStage()
         } catch {
-            operationMessage = error.localizedDescription
+            showOperationMessage(error.localizedDescription)
         }
     }
 
@@ -2663,9 +2674,9 @@ public struct TeleprompterView: View {
     private func startAnnotation() {
         Task {
             if let message = await session.annotateActiveVersion() {
-                operationMessage = message
+                showOperationMessage(message)
             } else {
-                operationMessage = "已添加朗读提示；正文保持不变。"
+                showOperationMessage("已添加朗读提示；正文保持不变。", isSuccess: true)
             }
         }
     }
@@ -2681,12 +2692,15 @@ public struct TeleprompterView: View {
         }
         guard let text = resolvedText,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            operationMessage = "还没有可复制的稿件内容。"
+            showOperationMessage("还没有可复制的稿件内容。")
             return
         }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        operationMessage = "已复制稿件内容"
+        guard NSPasteboard.general.setString(text, forType: .string) else {
+            showOperationMessage("稿件内容暂时未能复制，请重试。")
+            return
+        }
+        showOperationMessage("已复制稿件内容", isSuccess: true)
     }
 
     private func exportSourceDocument() {
@@ -2736,9 +2750,9 @@ public struct TeleprompterView: View {
         if savePanel.runModal() == .OK, let url = savePanel.url {
             do {
                 try data.write(to: url, options: .atomic)
-                operationMessage = "已导出到「\(url.lastPathComponent)」"
+                showOperationMessage("已导出到「\(url.lastPathComponent)」", isSuccess: true)
             } catch {
-                operationMessage = "导出失败：\(error.localizedDescription)"
+                showOperationMessage("导出失败：\(error.localizedDescription)")
             }
         }
     }
@@ -2759,10 +2773,10 @@ public struct TeleprompterView: View {
                 DispatchQueue.main.async {
                     do {
                         try session.createDocumentValidated(title: "拖拽导入稿件", sourceText: string)
-                        operationMessage = "已从拖拽文本创建新稿件"
+                        showOperationMessage("已从拖拽文本创建新稿件", isSuccess: true)
                         reloadDocuments()
                     } catch {
-                        operationMessage = "导入失败：\(error.localizedDescription)"
+                        showOperationMessage("导入失败：\(error.localizedDescription)")
                     }
                 }
             }
@@ -2778,10 +2792,10 @@ public struct TeleprompterView: View {
                 title: url.deletingPathExtension().lastPathComponent,
                 importedSource: imported
             )
-            operationMessage = "已导入「\(url.lastPathComponent)」"
+            showOperationMessage("已导入「\(url.lastPathComponent)」", isSuccess: true)
             reloadDocuments()
         } catch {
-            operationMessage = "导入失败：\(error.localizedDescription)"
+            showOperationMessage("导入失败：\(error.localizedDescription)")
         }
     }
 }
