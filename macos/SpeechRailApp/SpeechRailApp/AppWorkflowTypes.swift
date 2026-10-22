@@ -413,6 +413,7 @@ struct VoiceDesignPublicationContext: Equatable, Sendable {
     var candidateRevision: String?
     var validationID: String?
     var supersededCandidateID: String?
+    var creationWasRejected: Bool = false
     var autoPublish: Bool = false
 }
 

@@ -1459,6 +1459,169 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(afterCancellation.count, 1)
     }
 
+    func testVoiceDesignRejectedReplacementCanEditAndGenerateAgain() async throws {
+        for code in ["invalid_ref_text", "validation_error"] {
+            let creator = VoiceDesignWorkflowCreatorClient()
+            let model = makeVoiceModel(
+                transport: ClosureControlTransport { _ in throw CancellationError() },
+                voiceDesignClient: creator
+            )
+            let candidate = VoiceDesignCandidateSnapshot(
+                slot: "1", seed: 101, title: "候选 1",
+                instructionSnapshot: "温暖、清晰、自然",
+                referenceTextSnapshot: "这是一段用于创建拒绝后继续恢复的自然测试参考文案。",
+                status: .ready, audioData: Data([0, 1, 2])
+            )
+            await creator.rejectNextConfirmation()
+            model.startVoiceDesignPublication(candidate, name: "测试音色", autoPublish: true)
+            await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+            await creator.rejectNextCreateBeforeCommit(code: code)
+            model.regenerateVoiceDesignPublication(referenceText: String(repeating: "文", count: 240))
+            await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+            XCTAssertNil(model.voiceDesignPublication.candidateID)
+            XCTAssertTrue(model.canRegenerateVoiceDesignPublication, code)
+            guard model.canRegenerateVoiceDesignPublication else { continue }
+
+            let corrected = "修改后使用清楚自然的参考文案，仍然需要重新完成全部检查。"
+            model.regenerateVoiceDesignPublication(referenceText: corrected)
+            await waitForVoiceDesignPhase(.published, snapshot: { model.voiceDesignPublication })
+            let requests = await creator.createRequests()
+            XCTAssertEqual(requests.count, 3)
+            XCTAssertEqual(requests.last?.referenceText, corrected)
+            XCTAssertNotEqual(requests[1].voiceID, requests[2].voiceID)
+            XCTAssertNotEqual(requests[1].idempotencyKey, requests[2].idempotencyKey)
+            let committed = await creator.committedCreateCount()
+            XCTAssertEqual(committed, 2)
+        }
+    }
+
+    func testVoiceDesignRejectedReplacementCancelsLocallyAndAllowsAnotherSave() async throws {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeVoiceModel(
+            transport: ClosureControlTransport { _ in throw CancellationError() },
+            voiceDesignClient: creator
+        )
+        let candidate = VoiceDesignCandidateSnapshot(
+            slot: "1", seed: 101, title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于创建拒绝后安全取消的自然测试参考文案。",
+            status: .ready, audioData: Data([0, 1, 2])
+        )
+        await creator.rejectNextConfirmation()
+        model.startVoiceDesignPublication(candidate, name: "测试音色", autoPublish: true)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        await creator.rejectNextCreateBeforeCommit()
+        model.regenerateVoiceDesignPublication(referenceText: String(repeating: "文", count: 240))
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        let eventsBeforeCancel = await creator.events()
+        model.cancelVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.idle, snapshot: { model.voiceDesignPublication })
+        let eventsAfterCancel = await creator.events()
+        XCTAssertEqual(eventsAfterCancel, eventsBeforeCancel)
+        guard model.voiceDesignPublication.phase == .idle else { return }
+
+        model.startVoiceDesignPublication(candidate, name: "再次保存")
+        await waitForVoiceDesignPhase(.awaitingReferenceReview, snapshot: { model.voiceDesignPublication })
+        let requests = await creator.createRequests()
+        XCTAssertEqual(requests.count, 3)
+    }
+
+    func testVoiceDesignLostReplacementResponseCancelsTheSameCommittedIdentity() async throws {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeVoiceModel(
+            transport: ClosureControlTransport { _ in throw CancellationError() },
+            voiceDesignClient: creator
+        )
+        let candidate = VoiceDesignCandidateSnapshot(
+            slot: "1", seed: 101, title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于替代创建响应丢失恢复的自然测试参考文案。",
+            status: .ready, audioData: Data([0, 1, 2])
+        )
+        await creator.rejectNextConfirmation()
+        model.startVoiceDesignPublication(candidate, name: "测试音色", autoPublish: true)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        await creator.loseNextCreateResponseAfterCommit()
+        model.regenerateVoiceDesignPublication(referenceText: candidate.referenceTextSnapshot)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        XCTAssertFalse(model.canRegenerateVoiceDesignPublication)
+        let before = await creator.createRequests()
+        model.regenerateVoiceDesignPublication(referenceText: "结果未明时不应启动另一份可能重复创建音色的新请求。")
+        let after = await creator.createRequests()
+        XCTAssertEqual(before, after)
+
+        model.cancelVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.idle, snapshot: { model.voiceDesignPublication })
+        let recovered = await creator.createRequests()
+        XCTAssertEqual(recovered.count, 3)
+        XCTAssertEqual(recovered[1], recovered[2])
+        let committed = await creator.committedCreateCount()
+        XCTAssertEqual(committed, 2)
+    }
+
+    func testVoiceDesignUnknownCreateFailureKeepsRecoveryIdentity() async throws {
+        let errors: [ServiceAPIClientError] = [
+            .requestTimedOut,
+            .http(statusCode: 422, code: "unknown_rejection", message: "Unknown", requestID: nil, retryable: false),
+            .http(statusCode: 503, code: "invalid_ref_text", message: "Unavailable", requestID: nil, retryable: true),
+            .http(statusCode: 422, code: "invalid_ref_text", message: "Retry later", requestID: nil, retryable: true),
+        ]
+        for error in errors {
+            let creator = VoiceDesignWorkflowCreatorClient()
+            let model = makeVoiceModel(
+                transport: ClosureControlTransport { _ in throw CancellationError() },
+                voiceDesignClient: creator
+            )
+            let candidate = VoiceDesignCandidateSnapshot(
+                slot: "1", seed: 101, title: "候选 1",
+                instructionSnapshot: "温暖、清晰、自然",
+                referenceTextSnapshot: "这是一段用于检查未知创建结果恢复身份的自然参考文案。",
+                status: .ready, audioData: Data([0, 1, 2])
+            )
+            await creator.failNextCreateBeforeCommit(error)
+            model.startVoiceDesignPublication(candidate, name: "测试音色")
+            await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+            XCTAssertFalse(model.canRegenerateVoiceDesignPublication)
+            model.cancelVoiceDesignPublication()
+            await waitForVoiceDesignPhase(.idle, snapshot: { model.voiceDesignPublication })
+            let requests = await creator.createRequests()
+            XCTAssertEqual(requests.count, 2)
+            XCTAssertEqual(requests.first, requests.last)
+        }
+    }
+
+    func testVoiceDesignRetryCannotReuseRejectionAfterLosingCreateResponse() async throws {
+        let creator = VoiceDesignWorkflowCreatorClient()
+        let model = makeVoiceModel(
+            transport: ClosureControlTransport { _ in throw CancellationError() },
+            voiceDesignClient: creator
+        )
+        let candidate = VoiceDesignCandidateSnapshot(
+            slot: "1", seed: 101, title: "候选 1",
+            instructionSnapshot: "温暖、清晰、自然",
+            referenceTextSnapshot: "这是一段用于检查重试不能沿用上次拒绝结论的自然参考文案。",
+            status: .ready, audioData: Data([0, 1, 2])
+        )
+        await creator.rejectNextCreateBeforeCommit()
+        model.startVoiceDesignPublication(candidate, name: "测试音色")
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        XCTAssertTrue(model.canRegenerateVoiceDesignPublication)
+        // The service can change between attempts; a lost response is ambiguous.
+        await creator.clearCreateRejections()
+        await creator.loseNextCreateResponseAfterCommit()
+        model.retryVoiceDesignPublication()
+        await waitForCreatorEvent("create", minimumCount: 2, creator: creator)
+        await waitForVoiceDesignPhase(.failed, snapshot: { model.voiceDesignPublication })
+        XCTAssertFalse(model.canRegenerateVoiceDesignPublication)
+        model.cancelVoiceDesignPublication()
+        await waitForVoiceDesignPhase(.idle, snapshot: { model.voiceDesignPublication })
+        let requests = await creator.createRequests()
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertTrue(requests.allSatisfy { $0 == requests.first })
+        let committed = await creator.committedCreateCount()
+        XCTAssertEqual(committed, 1)
+    }
+
     func testVoiceDesignLostCreateResponseRetriesTheSameCommittedIdentity() async throws {
         let creator = VoiceDesignWorkflowCreatorClient()
         await creator.loseNextCreateResponseAfterCommit()
@@ -1965,12 +2128,13 @@ final class AppModelTests: XCTestCase {
 
     private func waitForCreatorEvent(
         _ expected: String,
+        minimumCount: Int = 1,
         creator: VoiceDesignWorkflowCreatorClient,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
         for _ in 0..<200 {
-            if await creator.events().contains(expected) {
+            if await creator.events().filter({ $0 == expected }).count >= minimumCount {
                 return
             }
             await Task.yield()
@@ -2521,6 +2685,9 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
     private var recordedCreateRequests: [CreateRequest] = []
     private var committedCreates: [String: VoiceDesignCandidate] = [:]
     private var shouldLoseNextCreateResponse = false
+    private var nextCreateRejectionCode: String?
+    private var nextCreateFailure: ServiceAPIClientError?
+    private var rejectedCreates: [(request: CreateRequest, code: String)] = []
     private var recordedEvents: [String] = []
     private let candidateID = "vd_0123456789abcdef01234567"
     private let candidateRevision = "vr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -2544,6 +2711,9 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
     func createRequests() -> [CreateRequest] { recordedCreateRequests }
     func committedCreateCount() -> Int { committedCreates.count }
     func loseNextCreateResponseAfterCommit() { shouldLoseNextCreateResponse = true }
+    func rejectNextCreateBeforeCommit(code: String = "invalid_ref_text") { nextCreateRejectionCode = code }
+    func failNextCreateBeforeCommit(_ error: ServiceAPIClientError) { nextCreateFailure = error }
+    func clearCreateRejections() { rejectedCreates = [] }
 
     func holdNextPublication() {
         shouldHoldNextPublication = true
@@ -2623,10 +2793,25 @@ private actor VoiceDesignWorkflowCreatorClient: SpeechRailVoiceDirectoryClient, 
         idempotencyKey: String?
     ) async throws -> VoiceDesignCandidate {
         recordedEvents.append("create")
-        recordedCreateRequests.append(CreateRequest(
+        let request = CreateRequest(
             voiceID: voiceID, name: name, instruction: instruction,
             referenceText: referenceText, seed: seed, idempotencyKey: idempotencyKey
-        ))
+        )
+        recordedCreateRequests.append(request)
+        if let error = nextCreateFailure {
+            nextCreateFailure = nil
+            throw error
+        }
+        if let code = nextCreateRejectionCode {
+            nextCreateRejectionCode = nil
+            rejectedCreates.append((request, code))
+        }
+        if let rejection = rejectedCreates.first(where: { $0.request == request }) {
+            throw ServiceAPIClientError.http(
+                statusCode: 422, code: rejection.code, message: "Reference text rejected",
+                requestID: "request-rejected", retryable: false
+            )
+        }
         if let idempotencyKey, let committed = committedCreates[idempotencyKey] {
             currentCandidate = committed
             return committed
