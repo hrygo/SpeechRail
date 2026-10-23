@@ -209,6 +209,10 @@ public enum DubbingCastRules {
             let name = normalizedName(role.name)
             guard !name.isEmpty else { throw DubbingProjectError.roleNameEmpty }
             guard seen.insert(name).inserted else { throw DubbingProjectError.roleNameDuplicate }
+            // 语速边界也是角色表不变量：越界值与空名一样是自相矛盾的数据，不是可以悄悄夹住的输入。
+            guard role.speed >= 0.5, role.speed <= 2.0 else {
+                throw DubbingProjectError.roleSpeedOutOfRange
+            }
             var copy = role
             copy.name = name
             copy.speed = role.voice?.mode == "clone" ? 1.0 : role.speed

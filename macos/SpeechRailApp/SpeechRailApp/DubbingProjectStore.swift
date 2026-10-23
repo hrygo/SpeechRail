@@ -244,8 +244,12 @@ public enum DubbingProjectError: Error, LocalizedError, Equatable, Sendable {
     /// 多角色项目里这一段既没有角色，也没有项目默认角色。
     case segmentVoiceUnassigned
     case roleNotFound
+    /// 角色还在被段落引用：先改派段落，再删角色。与「找不到这个角色」是两件事。
+    case roleStillInUse
     case roleNameEmpty
     case roleNameDuplicate
+    /// 角色语速越界（0.5x–2.0x）。
+    case roleSpeedOutOfRange
     case candidateInUse
     case projectHasAdoptedCandidates
     case cleanupRequired
@@ -279,10 +283,14 @@ public enum DubbingProjectError: Error, LocalizedError, Equatable, Sendable {
             "这一段还没有绑定角色或声音，请先给角色选一个音色"
         case .roleNotFound:
             "找不到这个角色"
+        case .roleStillInUse:
+            "这个角色还有段落在用，请先把这些段落改派给其他角色再删除"
         case .roleNameEmpty:
             "角色名不能为空"
         case .roleNameDuplicate:
             "已有同名角色，请换一个名字"
+        case .roleSpeedOutOfRange:
+            "语速需要在 0.5x 到 2.0x 之间"
         case .candidateInUse:
             "这个候选仍被采用或撤销记录使用，请先撤销相关采用"
         case .projectHasAdoptedCandidates:
@@ -621,7 +629,8 @@ public actor DubbingProjectStore {
                 guard project.segments.allSatisfy({ segment in
                     segment.roleID.map(roleIDs.contains) ?? true
                 }) else {
-                    throw DubbingProjectError.roleNotFound
+                    // 角色还在用与角色不存在是两件事：说「找不到」会让用户去找一个好好存在的角色。
+                    throw DubbingProjectError.roleStillInUse
                 }
                 project.cast = normalized
                 project.defaultRoleID = defaultRoleID

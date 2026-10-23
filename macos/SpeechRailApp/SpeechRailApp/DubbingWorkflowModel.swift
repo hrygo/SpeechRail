@@ -829,7 +829,7 @@ public final class DubbingWorkflowModel {
             guard let index = cast.firstIndex(where: { $0.id == roleID }) else {
                 throw DubbingProjectError.roleNotFound
             }
-            guard speed >= 0.5, speed <= 2.0 else { throw DubbingProjectError.invalidIdentifier }
+            guard speed >= 0.5, speed <= 2.0 else { throw DubbingProjectError.roleSpeedOutOfRange }
             cast[index].speed = cast[index].voice?.mode == "clone" ? 1.0 : speed
         }
     }
@@ -842,7 +842,8 @@ public final class DubbingWorkflowModel {
                 throw DubbingProjectError.roleNotFound
             }
             guard dubbingProject?.segments.contains(where: { $0.roleID == roleID }) != true else {
-                throw DubbingProjectError.roleNotFound
+                // 角色还在用与角色不存在是两件事：说「找不到」会让用户去找一个好好存在的角色。
+                throw DubbingProjectError.roleStillInUse
             }
             cast.remove(at: index)
             if defaultRoleID == roleID { defaultRoleID = cast.first?.id }
@@ -1300,10 +1301,14 @@ public final class DubbingWorkflowModel {
                 "这一段还没有绑定角色或声音，请先给角色选一个音色。"
             case .roleNotFound:
                 "找不到这个角色，可能已被删除。请刷新项目后重试。"
+            case .roleStillInUse:
+                "这个角色还有段落在用，请先把这些段落改派给其他角色，再删除角色。"
             case .roleNameEmpty:
                 "角色名不能为空。"
             case .roleNameDuplicate:
                 "已有同名角色，请换一个名字。"
+            case .roleSpeedOutOfRange:
+                "语速需要在 0.5x 到 2.0x 之间。"
             case .recoveryRequired:
                 "配音项目音频未通过完整性校验，请保留项目并打开诊断。"
             case .candidateNotFound, .segmentNotFound:

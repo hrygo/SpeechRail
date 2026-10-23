@@ -178,6 +178,21 @@ final class DubbingCastTests: XCTestCase {
         XCTAssertEqual(cast[0].speed, 1.0)
     }
 
+    /// 语速越界是自相矛盾的数据：拒绝并说明边界，不悄悄夹成 1.0x。
+    func testOutOfRangeRoleSpeedIsRejected() throws {
+        for speed in [0.4, 2.1, -1.0, 10.0] {
+            do {
+                _ = try DubbingCastRules.validate([role("role_1", "旁白", speed: speed)])
+                XCTFail("语速 \(speed) 不该被接受")
+            } catch {
+                XCTAssertEqual(error as? DubbingProjectError, .roleSpeedOutOfRange)
+            }
+        }
+        // 边界值本身合法。
+        _ = try DubbingCastRules.validate([role("role_1", "旁白", speed: 0.5)])
+        _ = try DubbingCastRules.validate([role("role_1", "旁白", speed: 2.0)])
+    }
+
     // MARK: - 停顿
 
     func testPauseIsClampedMeasuredAndLabelled() {
@@ -351,10 +366,34 @@ final class DubbingCastTests: XCTestCase {
             )
             XCTFail("还有段落指着这个角色时不该允许删除")
         } catch {
-            XCTAssertEqual(error as? DubbingProjectError, .roleNotFound)
+            // 「还在用」必须与「找不到」分开：用户要看到的下一步是改派段落，不是刷新。
+            XCTAssertEqual(error as? DubbingProjectError, .roleStillInUse)
         }
         let reloaded = try await store.list().first { $0.id == project.id }
         XCTAssertEqual(reloaded?.cast.count, 2, "失败的提交不得改动角色表")
+    }
+
+    /// 删除默认角色本身不是错，错的是删完之后默认角色不在表里。
+    func testDefaultRoleMissingFromCastIsStillRoleNotFound() async throws {
+        let store = makeStore()
+        let project = project(
+            segments: [DubbingSegment(id: "s1", text: "甲说。", roleID: "role_2")],
+            cast: [role("role_1", "旁白"), role("role_2", "记者")],
+            defaultRoleID: "role_1"
+        )
+        try await seed(store, project: project, candidates: [])
+
+        do {
+            _ = try await store.updateCast(
+                projectID: project.id,
+                cast: [role("role_2", "记者")],
+                defaultRoleID: "role_1",
+                operationID: UUID()
+            )
+            XCTFail("默认角色不在新角色表里时不该允许提交")
+        } catch {
+            XCTAssertEqual(error as? DubbingProjectError, .roleNotFound)
+        }
     }
 
     func testAssigningAnUnknownRoleIsRejected() async throws {
