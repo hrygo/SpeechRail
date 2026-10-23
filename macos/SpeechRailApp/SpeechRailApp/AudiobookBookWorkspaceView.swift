@@ -1297,6 +1297,8 @@ public struct AudiobookBookWorkspaceView: View {
 
                 productionBlockerBar
 
+                AudiobookProductionQueuePanel(workflow: workflow)
+
                 if let plan = workflow.resumePlan, !plan.redoFragmentIDs.isEmpty {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                         StatusPill(tone: .healthy, label: "可复用 \(plan.reusableFragmentIDs.count) 段")
@@ -2994,9 +2996,35 @@ private struct AudiobookProductionConfirmationSheet<Content: View>: View {
     let errorMessage: String?
     let availableSize: CGSize
     let onConfirm: () -> Void
+    let onEnqueue: (() -> Void)?
     @ViewBuilder let content: Content
     @Environment(\.dismiss) private var dismiss
     @FocusState private var isContentFocused: Bool
+
+    /// 显式初始化让「加入队列」可以是可选的，同时保留尾随闭包的 content。
+    init(
+        title: String,
+        impact: String,
+        summary: String,
+        confirmationTitle: String,
+        canConfirm: Bool,
+        errorMessage: String?,
+        availableSize: CGSize,
+        onConfirm: @escaping () -> Void,
+        onEnqueue: (() -> Void)? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.impact = impact
+        self.summary = summary
+        self.confirmationTitle = confirmationTitle
+        self.canConfirm = canConfirm
+        self.errorMessage = errorMessage
+        self.availableSize = availableSize
+        self.onConfirm = onConfirm
+        self.onEnqueue = onEnqueue
+        self.content = content()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
@@ -3022,6 +3050,12 @@ private struct AudiobookProductionConfirmationSheet<Content: View>: View {
                 Button("取消", role: .cancel) { dismiss() }
                     .speechRailButton(.secondary)
                     .keyboardShortcut(.cancelAction)
+                if let onEnqueue {
+                    Button("加入制作队列", action: onEnqueue)
+                        .speechRailButton(.secondary)
+                        .disabled(!canConfirm)
+                        .accessibilityIdentifier("audiobook-production-plan-enqueue")
+                }
                 Spacer()
                 Button(confirmationTitle, action: onConfirm)
                     .speechRailButton(.primary)
@@ -3062,7 +3096,8 @@ private struct AudiobookProductionPlanSheet: View {
             confirmationTitle: plan.intent == .missingOnly ? "确认只补 \(plan.fragments.count) 段" : "确认更新 \(plan.fragments.count) 段",
             canConfirm: !plan.fragments.isEmpty && !workflow.isProductionBusy && !workflow.isAnalyzing && !workflow.isEditingChapterLayout,
             errorMessage: workflow.errorMessage, availableSize: availableSize,
-            onConfirm: { workflow.confirmProduction(plan) }
+            onConfirm: { workflow.confirmProduction(plan) },
+            onEnqueue: { workflow.enqueueConfirmedProduction(plan) }
         ) {
             Text("已核对 \(plan.chapterIDs.count) 个已就绪章节；保留已有音频 \(plan.preservedAudioCount) 段。")
             if plan.intent == .missingOnly {
@@ -3338,4 +3373,121 @@ private struct AudiobookRegenerationSheet: View {
         }
     }
 
+}
+
+/// T17 跨作品制作队列。只读当前计划与产品状态；所有动作都回到 workflow，
+/// 由队列自己决定什么时候真正开始下一项。
+private struct AudiobookProductionQueuePanel: View {
+    let workflow: AudiobookWorkflowModel
+
+    private var plan: AudiobookProductionQueuePlan { workflow.productionQueuePlan }
+
+    var body: some View {
+        Group {
+            if let loadError = workflow.productionQueueLoadError {
+                NoticeBar(tone: .warning, message: "队列记录读不出来：\(loadError) 已入队的内容仍会在本次运行中执行，但重启后可能丢失。")
+            } else if !plan.items.isEmpty {
+                content
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .background(SpeechRailDesignTokens.Color.recessedField)
+        .accessibilityIdentifier("audiobook-production-queue")
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Text("制作队列（\(plan.items.count) 项）")
+                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                Spacer()
+                if plan.activeItem != nil {
+                    Button("暂停队列") { workflow.pauseProductionQueue() }
+                        .speechRailButton(.secondary)
+                        .accessibilityIdentifier("audiobook-production-queue-pause")
+                } else if plan.hasPendingWork {
+                    Button("继续队列") { workflow.resumeProductionQueue() }
+                        .speechRailButton(.secondary)
+                        .accessibilityIdentifier("audiobook-production-queue-resume")
+                }
+                if !plan.failedItems.isEmpty {
+                    Button("重试失败项") { workflow.retryFailedProductionQueueItems() }
+                        .speechRailButton(.secondary)
+                        .accessibilityIdentifier("audiobook-production-queue-retry")
+                }
+            }
+            Text("一次只制作一项。失败会停在这里等您重试；重启后未确认终态的项需要先核对。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            ForEach(plan.items) { item in
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Text(item.title).lineLimit(1)
+                    StatusPill(tone: tone(for: item.state), label: label(for: item.state))
+                    if let reason = item.failureReason {
+                        Text(reason)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .lineLimit(2)
+                    }
+                    Spacer()
+                    if item.state == .interrupted {
+                        Button("核对后继续") { workflow.confirmInterruptedProductionQueueItem(item.id) }
+                            .speechRailButton(.secondary)
+                    } else if item.state == .queued || item.state == .running || item.state == .waiting {
+                        Button("取消") { workflow.cancelProductionQueueItem(item.id) }
+                            .speechRailButton(.secondary)
+                    }
+                    if item.state == .queued {
+                        if queuedIndex(of: item) > 0 {
+                            Button("上移") { moveQueued(item, by: -1) }
+                                .speechRailButton(.secondary)
+                                .accessibilityIdentifier("audiobook-production-queue-move-up")
+                        }
+                        if queuedIndex(of: item) < plan.queuedItems.count - 1 {
+                            Button("下移") { moveQueued(item, by: 1) }
+                                .speechRailButton(.secondary)
+                                .accessibilityIdentifier("audiobook-production-queue-move-down")
+                        }
+                    }
+                }
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+            }
+        }
+    }
+
+    private func label(for state: AudiobookProductionQueueItemState) -> String {
+        switch state {
+        case .queued: "等待中"
+        case .running: "正在制作"
+        case .waiting: "等待语音服务"
+        case .paused: "已暂停"
+        case .failed: "失败"
+        case .completed: "已完成"
+        case .interrupted: "待核对"
+        }
+    }
+
+    private func tone(for state: AudiobookProductionQueueItemState) -> StatusTone {
+        switch state {
+        case .running, .waiting: .healthy
+        case .queued, .paused, .interrupted: .neutral
+        case .failed: .attention
+        case .completed: .healthy
+        }
+    }
+
+    /// 该项在未开始子队列中的位置；不在其中时返回 0（此时不显示移动按钮）。
+    private func queuedIndex(of item: AudiobookProductionQueueItem) -> Int {
+        plan.queuedItems.firstIndex(where: { $0.id == item.id }) ?? 0
+    }
+
+    private func moveQueued(_ item: AudiobookProductionQueueItem, by offset: Int) {
+        var ids = plan.queuedItems.map(\.id)
+        let from = queuedIndex(of: item)
+        let to = from + offset
+        guard ids.indices.contains(from), ids.indices.contains(to) else { return }
+        ids.swapAt(from, to)
+        workflow.reorderProductionQueue(queuedIDs: ids)
+    }
 }

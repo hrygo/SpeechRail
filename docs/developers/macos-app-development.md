@@ -202,6 +202,37 @@ hypothesis 时清空本地播放队列并显式发送 `speechrail.tts.cancel`；
 旧 `transcription_session.update`、`conversation.item.create`、`response.create/cancel` 和
 `response.audio.*` 不会被 Native 或服务端翻译。
 
+### 跨作品制作队列（2026-10-23）
+
+**队列是调度层，不是第二个制作器。** `AudiobookProductionQueue` 架在
+`AudiobookProductionController` 之上，只接受「一份已确认的计划」：入队前由
+`AudiobookWorkflowModel.enqueueConfirmedProduction` 核对当前作品、source、draft 与忙态，
+计划为空或已漂移时拒绝并说明原因。队列不解析文本、不挑选片段、不放宽任何制作条件，
+`AudiobookProductionController` 仍是唯一执行者。
+
+**一次只制作一项，`await execute` 返回即停止屏障。** 窄执行协议
+`AudiobookProductionQueueExecutor` 只有三个方法：`execute(_:)`、`lastAttemptTaskID(for:)`、
+`cancelActive()`。循环在第一次 `await` 之前占住队列项，串行等待当前项真正收尾后才开始下一项；
+执行器抛错、用户取消、或 outcome 报告未确认的远端停止（`unconfirmedRemoteStopFragmentID`）
+都会把队列停在这个状态等用户，不自动进入下一项，也不把取消冒充成完成。
+`LiveAudiobookProductionQueueExecutor` 把 `CancellationError` 与
+`AudiobookProductionError.cancelled` 转成 `stoppedByRequest` 的正常收尾，用户取消因此既不会
+误判为失败，也不会被记成成功。
+
+**失败重试复用已提交片段。** `finishFailed` 先通过 `lastAttemptTaskID(for:)` 取回该作品最近一次
+尝试的 taskID 再标记失败；「重试失败项」据此带 `continuesTaskID` 重新入队，已提交片段不重复制作。
+队列持久化为单份 JSON（schema `audiobook_production_queue_v1`），tmp 文件加原子替换；
+读到的计划里 running/waiting 一律改写成 interrupted 并要求用户显式「核对后继续」——重启不自动
+续跑。文件损坏或 schema 未知时拒绝加载且不改动原文件，界面上给出可读的加载失败提示，
+已入队内容仍在本次运行中执行。
+
+队列面板（`audiobook-production-queue` 及 `-pause` / `-resume` / `-retry` / `-move-up` /
+`-move-down` 标识符）只呈现队列事实：每项的状态、失败原因与可用动作；未开始项可上移/下移，
+`reorder` 要求传入的 ID 集合与当前未开始项完全一致，缺项多项都拒绝。 「加入制作队列」按钮在
+制作确认面板上（`audiobook-production-plan-enqueue`），与「确认制作」并列但互不替代。26 个
+`AudiobookProductionQueueTests` 全部使用 fake 执行器与隔离存储，不打开麦克风、不联网、
+不碰真实作品库。
+
 ## 当前控制面 surface
 
 `Window("SpeechRail 管理控制台", id: "control-center")` 承载同一个 `AppModel` 下的三类一级 surface：

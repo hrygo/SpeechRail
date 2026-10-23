@@ -454,6 +454,10 @@ public final class AudiobookWorkflowModel {
     private var productionController: AudiobookProductionController?
     private var exportController: AudiobookExportController?
     private var coverStore: AudiobookCoverAssetStore?
+    @ObservationIgnored private var productionQueue: AudiobookProductionQueue?
+    @ObservationIgnored private var productionQueuePollTask: Task<Void, Never>?
+    public private(set) var productionQueuePlan: AudiobookProductionQueuePlan = .empty
+    public private(set) var productionQueueLoadError: String?
 
     public let voiceCatalogModel: VoiceCatalogModel
     public private(set) var voiceCatalogRevision: String = ""
@@ -546,6 +550,24 @@ public final class AudiobookWorkflowModel {
             store: createdStore,
             client: dependencies.pronunciationClient
         )
+        // T17：跨作品队列只在确认过预览之后入队，重启后不自动开始——
+        // 加载计划时未确认终态的项会被标成「待核对」等用户明确继续。
+        let queuePersistence = AudiobookProductionQueueFileStore(rootURL: createdStore.rootURL.deletingLastPathComponent())
+        let restored: AudiobookProductionQueuePlan?
+        do {
+            restored = try queuePersistence.load()
+            productionQueueLoadError = nil
+        } catch {
+            restored = nil
+            productionQueueLoadError = error.localizedDescription
+        }
+        productionQueue = AudiobookProductionQueue(
+            executor: LiveAudiobookProductionQueueExecutor(controller: prod, store: createdStore),
+            persistence: queuePersistence,
+            clock: dependencies.clock,
+            restoredPlan: restored
+        )
+        productionQueuePlan = restored ?? .empty
         self.castController = cast
         self.revisionController = rev
         self.productionController = prod
@@ -3485,6 +3507,126 @@ public final class AudiobookWorkflowModel {
             expectedSourceID: draft.sourceID, approvedPlan: draft)
     }
 
+    // MARK: - 跨作品制作队列（T17）
+
+    /// 队列读到的计划。轮询只在队列真的动过时才刷新，避免空闲时反复触发视图更新。
+    public var hasProductionQueueWork: Bool {
+        productionQueuePlan.hasPendingWork
+    }
+
+    public var productionQueueActiveItem: AudiobookProductionQueueItem? {
+        productionQueuePlan.activeItem
+    }
+
+    public func enqueueConfirmedProduction(_ draft: AudiobookProductionPlan) {
+        guard let productionQueue, let book = selectedBook,
+              productionDraft == draft, book.id == draft.bookID,
+              selectedBook?.sourceID == draft.sourceID, !draft.fragments.isEmpty,
+              !isProductionBusy, !isAnalyzing, !isEditingChapterLayout else {
+            errorMessage = "制作范围已变化或没有需要处理的片段，请重新预览。"
+            return
+        }
+        productionDraft = nil
+        let title = book.title
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.productionQueue?.enqueue(bookID: draft.bookID, title: title, plan: draft)
+                self.errorMessage = nil
+                self.startProductionQueuePolling()
+                await self.refreshProductionQueuePlan()
+            } catch {
+                self.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    public func pauseProductionQueue() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do { try await self.productionQueue?.pause() }
+            catch { self.errorMessage = error.localizedDescription }
+            await self.refreshProductionQueuePlan()
+        }
+    }
+
+    public func resumeProductionQueue() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do { try await self.productionQueue?.resume() }
+            catch { self.errorMessage = error.localizedDescription }
+            self.startProductionQueuePolling()
+            await self.refreshProductionQueuePlan()
+        }
+    }
+
+    public func cancelProductionQueueItem(_ itemID: UUID) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do { try await self.productionQueue?.cancelItem(itemID: itemID) }
+            catch { self.errorMessage = error.localizedDescription }
+            await self.refreshProductionQueuePlan()
+        }
+    }
+
+    public func retryFailedProductionQueueItems() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do { try await self.productionQueue?.retryFailedItems() }
+            catch { self.errorMessage = error.localizedDescription }
+            self.startProductionQueuePolling()
+            await self.refreshProductionQueuePlan()
+        }
+    }
+
+    public func confirmInterruptedProductionQueueItem(_ itemID: UUID) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do { try await self.productionQueue?.confirmInterrupted(itemID: itemID) }
+            catch { self.errorMessage = error.localizedDescription }
+            self.startProductionQueuePolling()
+            await self.refreshProductionQueuePlan()
+        }
+    }
+
+    public func reorderProductionQueue(queuedIDs: [UUID]) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do { try await self.productionQueue?.reorder(queuedIDs: queuedIDs) }
+            catch { self.errorMessage = error.localizedDescription }
+            await self.refreshProductionQueuePlan()
+        }
+    }
+
+    public func dismissProductionQueueLoadError() {
+        productionQueueLoadError = nil
+    }
+
+    @MainActor
+    private func refreshProductionQueuePlan() async {
+        guard let productionQueue else { return }
+        let plan = await productionQueue.snapshot()
+        guard plan != productionQueuePlan else { return }
+        productionQueuePlan = plan
+        if plan.activeItem == nil { productionQueuePollTask?.cancel(); productionQueuePollTask = nil }
+    }
+
+    @MainActor
+    private func startProductionQueuePolling() {
+        guard productionQueuePollTask == nil else { return }
+        productionQueuePollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled, let self else { return }
+                await self.refreshProductionQueuePlan()
+                if self.productionQueuePlan.activeItem == nil { break }
+            }
+            if let self, self.productionQueuePlan.activeItem == nil {
+                self.productionQueuePollTask = nil
+            }
+        }
+    }
+
     public func prepareResumeProduction() async {
         guard let store, let bookID = selectedBook?.id, !isProductionBusy else { return }
         do {
@@ -4138,6 +4280,10 @@ public final class AudiobookWorkflowModel {
         productionRunID = nil
         productionProgressPollTask?.cancel()
         await productionController?.shutdown()
+        await productionQueue?.shutdown()
+        productionQueuePollTask?.cancel()
+        productionQueuePollTask = nil
+        if let productionQueue { productionQueuePlan = await productionQueue.snapshot() }
         let task = productionTask
         task?.cancel()
         if let task { await task.value }

@@ -272,6 +272,7 @@ let package = Package(
                 "AudiobookDependencies.swift",
                 "AudiobookVoicePreparation.swift",
                 "AudiobookProductionController.swift",
+                "AudiobookProductionQueue.swift",
                 "AudiobookRevisionController.swift",
                 "AudiobookListeningController.swift",
                 "AudiobookPronunciationController.swift",
