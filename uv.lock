@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.14.*"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -833,7 +833,7 @@ wheels = [
 
 [[package]]
 name = "pyannote-metrics"
-version = "4.2.0"
+version = "4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
@@ -843,9 +843,9 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "scipy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8e/ba/fc98b9343da0de8cfc8745672ce35a2ff7cb50f2e0e4385412d11a2e13ab/pyannote_metrics-4.2.0.tar.gz", hash = "sha256:d66566e253958e39728f0f51b6e648449044a29e43b2d25e486193366cd348e0", size = 1603577, upload-time = "2026-10-16T06:39:05.351Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/74/ba/7dbc2f790d5e321e46dc1e250ff00b69cdefc0c5695b811e96a4b932cddd/pyannote_metrics-4.1.tar.gz", hash = "sha256:afe24c54ee0799e8cfbe8ee85fa517793c3450bb7eae8fedd1a77ccec0343f7e", size = 883419, upload-time = "2026-05-06T16:33:10.163Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8d/30/0df61660a9c724f7bbfeaebf4b88d292ffc72c146990f403e5d3cc81364e/pyannote_metrics-4.2.0-py3-none-any.whl", hash = "sha256:4e933ed1d05e3ce76d5657e34f51c9a12362d148bf56decd4ea5051eed4f23db", size = 52115, upload-time = "2026-10-16T06:39:04.23Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/d3/9cd1df66aa9be47a36df46f007e198bbdec3ddebc1bd8833c7a9e8a554a9/pyannote_metrics-4.1-py3-none-any.whl", hash = "sha256:34a54b7671f61709c1865d0484843e5b46ea3c4e4e5260ab065e5b3156c733d3", size = 52116, upload-time = "2026-05-06T16:33:08.586Z" },
 ]
 
 [[package]]
@@ -1269,7 +1269,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26,<3.0" },
     { name = "onnxruntime", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==1.31.0" },
     { name = "openai", marker = "extra == 'dev'", specifier = ">=2.0,<4.0" },
-    { name = "pyannote-metrics", marker = "extra == 'dev'", specifier = "==4.2.0" },
+    { name = "pyannote-metrics", marker = "extra == 'dev'", specifier = "==4.1" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pydantic-settings", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },

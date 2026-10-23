@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    # Evaluation scorers require a coordinated policy/evidence migration.
+    ignore:
+      - dependency-name: "pyannote-metrics"
+      - dependency-name: "meeteval"
     groups:
       python-dependencies:
         patterns:
