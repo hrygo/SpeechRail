@@ -3933,8 +3933,7 @@ components:
           type: string
           enum: [clone, instruction]
         revision:
-          type: string
-          nullable: true
+          type: [string, "null"]
         includes_reference_audio:
           type: boolean
         includes_reference_text:
@@ -3942,8 +3941,7 @@ components:
         reference_audio_bytes:
           type: integer
         reference_audio_sha256:
-          type: string
-          nullable: true
+          type: [string, "null"]
         entries:
           type: array
           items:
@@ -3971,8 +3969,7 @@ components:
         source_voice_id:
           type: string
         source_revision:
-          type: string
-          nullable: true
+          type: [string, "null"]
         includes_reference_audio:
           type: boolean
         includes_reference_text:
@@ -4012,17 +4009,14 @@ components:
           type: string
           enum: [clone, instruction]
         revision:
-          type: string
-          nullable: true
+          type: [string, "null"]
         renamed_from:
-          type: string
-          nullable: true
+          type: [string, "null"]
           description: The requested name when it collided with an existing custom voice.
         source_voice_id:
           type: string
         source_revision:
-          type: string
-          nullable: true
+          type: [string, "null"]
         validation:
           type: string
           enum: [unverified]
