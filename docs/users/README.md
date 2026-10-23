@@ -2,8 +2,8 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "3.2.3"
-date: 2026-10-20
+version: "3.2.5"
+date: 2026-10-23
 ---
 
 # 🔌 SpeechRail 用户与集成指南
@@ -35,6 +35,7 @@ graph TD
 5. **[📑 OpenAPI 3.1 规范文档](../../contracts/openapi.yaml)**：提供标准 OpenAPI 3.1 Schema，支持直接导入 Postman、Apifox 或生成客户端 SDK。
 6. **[🧭 有效能力快照与安全音色目录](effective-capabilities.md)**：说明 `effective_capabilities_v1`、同代一致性、ETag 与安全 voice 列表投影。
 7. **[🎁 音色包：备份、迁移与重新验证](voice-bundles.md)**：`.srvoice` 的格式、包内不携带的内容、只读预检与导入后必须重新验证的边界。
+8. **[🎭 多角色短脚本：逐句选声、停顿与局部返修](dubbing-multi-role.md)**：粘贴对话稿即可开始，逐句选角色、设停顿，只重做不满意的一句，以及导出三份文件如何一一对应。
 
 ---
 

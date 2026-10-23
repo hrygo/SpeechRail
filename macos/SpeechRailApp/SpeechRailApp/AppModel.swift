@@ -665,6 +665,65 @@ public final class AppModel {
         await dubbingWorkflow.discardDubbingExport()
     }
 
+    // MARK: 多角色脚本
+
+    @discardableResult
+    public func createMultiRoleDubbingProject(
+        title: String,
+        scriptText: String,
+        roles: [DubbingRole]
+    ) async -> DubbingProject? {
+        await dubbingWorkflow.createMultiRoleDubbingProject(
+            title: title, scriptText: scriptText, roles: roles
+        )
+    }
+
+    public var dubbingCastIssues: [DubbingCastIssue] { dubbingWorkflow.dubbingCastIssues }
+
+    public func dubbingSegmentNeedsRedo(_ segment: DubbingSegment) -> Bool {
+        dubbingWorkflow.dubbingSegmentNeedsRedo(segment)
+    }
+
+    @discardableResult
+    public func addDubbingRole(voice: DubbingVoiceBinding? = nil) async -> Bool {
+        await dubbingWorkflow.addDubbingRole(voice: voice)
+    }
+
+    @discardableResult
+    public func renameDubbingRole(_ roleID: String, to name: String) async -> Bool {
+        await dubbingWorkflow.renameDubbingRole(roleID, to: name)
+    }
+
+    @discardableResult
+    public func bindDubbingVoice(_ binding: DubbingVoiceBinding?, toRole roleID: String) async -> Bool {
+        await dubbingWorkflow.bindDubbingVoice(binding, toRole: roleID)
+    }
+
+    @discardableResult
+    public func setDubbingRoleSpeed(_ speed: Double, roleID: String) async -> Bool {
+        await dubbingWorkflow.setDubbingRoleSpeed(speed, roleID: roleID)
+    }
+
+    @discardableResult
+    public func removeDubbingRole(_ roleID: String) async -> Bool {
+        await dubbingWorkflow.removeDubbingRole(roleID)
+    }
+
+    @discardableResult
+    public func setDefaultDubbingRole(_ roleID: String?) async -> Bool {
+        await dubbingWorkflow.setDefaultDubbingRole(roleID)
+    }
+
+    @discardableResult
+    public func assignDubbingSegmentRole(_ segmentID: String, to roleID: String?) async -> Bool {
+        await dubbingWorkflow.assignDubbingSegmentRole(segmentID, to: roleID)
+    }
+
+    @discardableResult
+    public func setDubbingSegmentPause(_ segmentID: String, milliseconds: Int) async -> Bool {
+        await dubbingWorkflow.setDubbingSegmentPause(segmentID, milliseconds: milliseconds)
+    }
+
     static func dubbingErrorMessage(for error: Error) -> String {
         DubbingWorkflowModel.dubbingErrorMessage(for: error)
     }

@@ -102,6 +102,7 @@ private struct DubbingDeskComposerView: View {
     @State private var exportMessage: String?
     @State private var exportFeedbackID = UUID()
     @State private var saveNotice: String?
+    @State private var isMultiRoleSetupPresented = false
     @FocusState private var isScriptFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -196,6 +197,9 @@ private struct DubbingDeskComposerView: View {
             model.cancelVoicePreview()
             model.stopAudio()
         }
+        .sheet(isPresented: $isMultiRoleSetupPresented) {
+            DubbingProjectSheet(newScript: dubbingText)
+        }
     }
 
     // MARK: 文稿
@@ -279,12 +283,16 @@ private struct DubbingDeskComposerView: View {
                 voiceControl
                 speedControl
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+                multiRoleButton
                 generateButton
             }
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 voiceControl
                 speedControl
-                generateButton
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    multiRoleButton
+                    generateButton
+                }
             }
         }
         // 稿的 `composer` 控制卡是 padX 16 / padY 12（帧实测文字左沿距卡沿约 18pt）。
@@ -547,6 +555,18 @@ private struct DubbingDeskComposerView: View {
             get: { speechSpeed },
             set: { storedSpeed = $0 }
         )
+    }
+
+    /// 多角色脚本入口：不需要先有已保存作品，也不需要 LLM 配置。
+    private var multiRoleButton: some View {
+        Button {
+            isMultiRoleSetupPresented = true
+        } label: {
+            Label("多角色脚本…", systemImage: "person.2.wave.2")
+        }
+        .speechRailButton(.secondary)
+        .disabled(model.isCreatingSpeech)
+        .help("粘贴一段多人对话脚本，给每句选角色、加停顿，只重做不满意的一句。")
     }
 
     private var generateButton: some View {
@@ -4440,26 +4460,45 @@ private struct DubbingProjectSheet: View {
     @Environment(\.dismiss) private var dismiss
     let work: CreativeWork?
     let projectID: String?
+    /// 从粘贴脚本开始的多角色入口：建立项目之前没有 `dubbingProject`。
+    let newScript: String?
     @State private var rebuildCandidate: DubbingCandidate?
     @State private var cleanupAction: DubbingCleanupAction?
+    @State private var draftScript = ""
+    @State private var draftTitle = ""
+    @State private var draftRoles: [DubbingRole] = []
+    @State private var isCreatingProject = false
 
     init(work: CreativeWork) {
         self.work = work
         self.projectID = nil
+        self.newScript = nil
     }
 
     init(projectID: String) {
         self.work = nil
         self.projectID = projectID
+        self.newScript = nil
+    }
+
+    /// 多角色脚本：直接粘贴文稿，给每句选角色，不需要先有已保存作品或 LLM 配置。
+    init(newScript: String) {
+        self.work = nil
+        self.projectID = nil
+        self.newScript = newScript
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             header
             Divider()
-            content
-            Divider()
-            footer
+            if model.dubbingProject == nil, newScript != nil {
+                setupForm
+            } else {
+                content
+                Divider()
+                footer
+            }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .frame(
@@ -4472,6 +4511,14 @@ private struct DubbingProjectSheet: View {
                 await model.startDubbingProject(for: work)
             } else if let projectID {
                 await model.openDubbingProject(projectID)
+            } else if let newScript {
+                draftScript = newScript
+                if draftRoles.isEmpty {
+                    draftRoles = [
+                        DubbingRole(id: "role_1", name: "角色 1"),
+                        DubbingRole(id: "role_2", name: "角色 2"),
+                    ]
+                }
             }
         }
         .onDisappear {
@@ -4531,8 +4578,97 @@ private struct DubbingProjectSheet: View {
     }
 
     private var subtitle: String {
+        if model.dubbingProject?.isMultiRole == true {
+            return "每句可以指定角色，句间可以留停顿。成品由被采用的段落按顺序拼成，"
+                + "正文与片段清单只包含这些段落。"
+        }
         return "只重做你点的那一段。成品由被采用的段落按顺序拼成，"
             + "正文只包含这些段落，\(model.dubbingProjectVoice.text)。"
+    }
+
+    /// 多角色入口的第一步：粘贴脚本、给角色选声音，然后建立项目。
+    private var setupForm: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("把脚本粘进来，给每个角色选一个声音。一个默认声音就够开始，逐句再覆盖。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("项目名称", text: $draftTitle)
+                .textFieldStyle(.roundedBorder)
+
+            TextEditor(text: $draftScript)
+                .font(SpeechRailDesignTokens.Typography.body)
+                .frame(minHeight: 160)
+                .overlay(
+                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container)
+                        .stroke(SpeechRailDesignTokens.Color.separator, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                )
+
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Text("角色 \(draftRoles.count) 个")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer(minLength: 0)
+                Button("添加角色") {
+                    draftRoles.append(
+                        DubbingRole(
+                            id: DubbingCastRules.newRoleID(existing: draftRoles),
+                            name: DubbingCastRules.newRoleName(existing: draftRoles)
+                        )
+                    )
+                }
+                .speechRailButton(.quiet)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    ForEach($draftRoles) { $role in
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                            TextField("角色名", text: $role.name)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 180)
+                            DubbingVoiceBindingMenu(role: role) { binding in
+                                role.voice = binding
+                            }
+                            Spacer(minLength: 0)
+                            Button("删除", role: .destructive) {
+                                draftRoles.removeAll { $0.id == role.id }
+                            }
+                            .speechRailButton(.quiet)
+                            .disabled(draftRoles.count <= 1)
+                        }
+                    }
+                }
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Spacer(minLength: 0)
+                Button("取消") { dismiss() }
+                    .speechRailButton(.secondary)
+                Button(isCreatingProject ? "正在建立…" : "开始制作") {
+                    isCreatingProject = true
+                    Task {
+                        await model.createMultiRoleDubbingProject(
+                            title: draftTitle,
+                            scriptText: draftScript,
+                            roles: draftRoles
+                        )
+                        isCreatingProject = false
+                    }
+                }
+                .speechRailButton(.primary)
+                .disabled(
+                    isCreatingProject
+                        || draftScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || draftRoles.isEmpty
+                )
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     @ViewBuilder
@@ -4540,6 +4676,9 @@ private struct DubbingProjectSheet: View {
         if let project = model.dubbingProject {
             ScrollView {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    if project.isMultiRole {
+                        castSection(project)
+                    }
                     if let message = model.dubbingConditionsMessage {
                         Text(message)
                             .font(SpeechRailDesignTokens.Typography.caption)
@@ -4548,7 +4687,7 @@ private struct DubbingProjectSheet: View {
                     }
                     ForEach(Array(project.segments.enumerated()), id: \.element.id) {
                         index, segment in
-                        segmentCard(segment, index: index)
+                        segmentCard(segment, index: index, project: project)
                     }
                 }
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
@@ -4563,20 +4702,70 @@ private struct DubbingProjectSheet: View {
         }
     }
 
-    private func segmentCard(_ segment: DubbingSegment, index: Int) -> some View {
+    /// 角色表：改名、换声音、设默认、删角色。问题逐条列出，不合并成一句「有问题」。
+    private func castSection(_ project: DubbingProject) -> some View {
+        CardSurface {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Text("角色与音色")
+                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    Spacer(minLength: 0)
+                    Button("添加角色") {
+                        Task { await model.addDubbingRole() }
+                    }
+                    .speechRailButton(.quiet)
+                    .disabled(model.dubbingBusySegmentID != nil)
+                }
+
+                ForEach(project.cast) { role in
+                    DubbingRoleRow(
+                        role: role,
+                        isDefault: project.defaultRoleID == role.id,
+                        isLocked: model.dubbingBusySegmentID != nil
+                            || project.segments.contains { $0.roleID == role.id }
+                    )
+                }
+
+                ForEach(model.dubbingCastIssues, id: \.roleID) { issue in
+                    Text(issue.message)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("没有指定角色的段落跟随默认角色。换声音后，这个角色的旧版本会标为需要重新生成。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func segmentCard(_ segment: DubbingSegment, index: Int, project: DubbingProject) -> some View {
         let candidates = candidates(for: segment.id)
         let isBusy = model.dubbingBusySegmentID == segment.id
         let isAdopted = segment.acceptedCandidateID != nil
+        let needsRedo = model.dubbingSegmentNeedsRedo(segment)
         return CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                     Text("第 \(index + 1) 段")
                         .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    if project.isMultiRole, let role = project.resolvedRole(for: segment) {
+                        Text(role.name)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                    }
                     Spacer(minLength: 0)
-                    Text(isAdopted ? "已采用" : "尚未采用")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Text(
+                        needsRedo
+                            ? "需要重新生成"
+                            : (isAdopted ? "已采用" : "尚未采用")
+                    )
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
 
                 Text(segment.text)
@@ -4584,6 +4773,18 @@ private struct DubbingProjectSheet: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                if project.isMultiRole {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        DubbingSegmentRoleMenu(
+                            segment: segment,
+                            project: project,
+                            isLocked: isBusy || model.dubbingBusySegmentID != nil
+                        )
+                        DubbingSegmentPauseMenu(segment: segment, isLocked: isBusy)
+                        Spacer(minLength: 0)
+                    }
+                }
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                     if isBusy {
@@ -4790,5 +4991,180 @@ private struct DubbingProjectSheet: View {
         model.dubbingCandidates
             .filter { $0.segmentID == segmentID }
             .sorted { $0.createdAt > $1.createdAt }
+    }
+}
+
+// MARK: - 多角色：角色与音色绑定
+
+/// 选声音的菜单。不可用的音色照样列出但不可选，并写明「当前不可用」——
+/// 从列表里悄悄消失会让用户以为自己看错了。
+private struct DubbingVoiceBindingMenu: View {
+    @Environment(AppModel.self) private var model
+    let role: DubbingRole
+    let onSelect: (DubbingVoiceBinding?) -> Void
+
+    var body: some View {
+        Menu {
+            Button("暂不指定") { onSelect(nil) }
+            Divider()
+            ForEach(model.creatorVoices) { voice in
+                Button {
+                    onSelect(
+                        DubbingVoiceBinding(
+                            voiceID: voice.id,
+                            voiceName: voice.name,
+                            voiceRevision: voice.revision,
+                            mode: voice.mode
+                        )
+                    )
+                } label: {
+                    Text(voice.available ? voice.name : "\(voice.name)（当前不可用）")
+                }
+                .disabled(!voice.available)
+            }
+        } label: {
+            Text(role.voice?.voiceName ?? "选择音色")
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .accessibilityLabel("为「\(role.name)」选择音色")
+    }
+}
+
+/// 一行角色：改名、换声音、设默认、删除。
+private struct DubbingRoleRow: View {
+    @Environment(AppModel.self) private var model
+    let role: DubbingRole
+    let isDefault: Bool
+    /// 还有段落指着这个角色时不允许删除：先改派，再删。
+    let isLocked: Bool
+    @State private var name: String
+    @FocusState private var isNameFocused: Bool
+
+    init(role: DubbingRole, isDefault: Bool, isLocked: Bool) {
+        self.role = role
+        self.isDefault = isDefault
+        self.isLocked = isLocked
+        _name = State(initialValue: role.name)
+    }
+
+    var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            TextField("角色名", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 160)
+                .focused($isNameFocused)
+                .onSubmit { commitName() }
+                .onChange(of: isNameFocused) { _, focused in
+                    if !focused { commitName() }
+                }
+
+            DubbingVoiceBindingMenu(role: role) { binding in
+                Task { await model.bindDubbingVoice(binding, toRole: role.id) }
+            }
+
+            if isDefault {
+                Text("默认")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+            } else {
+                Button("设为默认") {
+                    Task { await model.setDefaultDubbingRole(role.id) }
+                }
+                .speechRailButton(.quiet)
+            }
+
+            Spacer(minLength: 0)
+
+            Button("删除", role: .destructive) {
+                Task { await model.removeDubbingRole(role.id) }
+            }
+            .speechRailButton(.quiet)
+            .disabled(isLocked)
+            .help(isLocked ? "还有段落使用这个角色。先把这些段落改派给别的角色，再删除。" : "删除这个角色")
+        }
+        .onChange(of: role.name) { _, updated in
+            // 别处改了名字（例如刷新后）时同步回本地草稿，避免显示过期值。
+            if !isNameFocused { name = updated }
+        }
+    }
+
+    private func commitName() {
+        let trimmed = DubbingCastRules.normalizedName(name)
+        guard !trimmed.isEmpty else {
+            name = role.name
+            return
+        }
+        guard trimmed != role.name else { return }
+        Task { await model.renameDubbingRole(role.id, to: trimmed) }
+    }
+}
+
+/// 一段的朗读角色。选「跟随默认角色」就是显式回落，不是隐式继承。
+private struct DubbingSegmentRoleMenu: View {
+    @Environment(AppModel.self) private var model
+    let segment: DubbingSegment
+    let project: DubbingProject
+    let isLocked: Bool
+
+    var body: some View {
+        Menu {
+            Button("跟随默认角色") {
+                Task { await model.assignDubbingSegmentRole(segment.id, to: nil) }
+            }
+            Divider()
+            ForEach(project.cast) { role in
+                Button(role.name) {
+                    Task { await model.assignDubbingSegmentRole(segment.id, to: role.id) }
+                }
+            }
+        } label: {
+            Label(
+                project.resolvedRole(for: segment)?.name ?? "选择角色",
+                systemImage: "person.wave.2"
+            )
+            .font(SpeechRailDesignTokens.Typography.caption)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(isLocked)
+        .accessibilityLabel("这一段的角色")
+    }
+}
+
+/// 一段之后的停顿。只在句间生效，最后一段之后的停顿不写进成品。
+private struct DubbingSegmentPauseMenu: View {
+    @Environment(AppModel.self) private var model
+    let segment: DubbingSegment
+    let isLocked: Bool
+
+    var body: some View {
+        Menu {
+            ForEach(DubbingPause.presets, id: \.self) { milliseconds in
+                Button(DubbingPause.label(milliseconds)) {
+                    Task { await model.setDubbingSegmentPause(segment.id, milliseconds: milliseconds) }
+                }
+            }
+            Divider()
+            Button("加 0.1 秒") { step(+DubbingPause.stepMilliseconds) }
+            Button("减 0.1 秒") { step(-DubbingPause.stepMilliseconds) }
+        } label: {
+            Label(
+                DubbingPause.label(segment.pauseAfterMilliseconds),
+                systemImage: "pause.circle"
+            )
+            .font(SpeechRailDesignTokens.Typography.caption)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(isLocked)
+        .accessibilityLabel("这一段之后的停顿")
+    }
+
+    private func step(_ delta: Int) {
+        let next = DubbingPause.clamped(segment.pauseAfterMilliseconds + delta)
+        Task { await model.setDubbingSegmentPause(segment.id, milliseconds: next) }
     }
 }

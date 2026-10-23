@@ -4823,7 +4823,7 @@ extension AppModelTests {
         try await XCTAssertFalseAsync(await model.writeDubbingExport(to: target))
         XCTAssertEqual(
             model.dubbingMessage,
-            "已写入 \(bundle.audioFileName)，但正文没能写入：目标位置可能被占用或空间不足。",
+            "已写入 \(bundle.audioFileName)，但正文或片段清单没能写入：目标位置可能被占用或空间不足。",
             "失败发生在第二步时必须说清楚音频已经落地了"
         )
         XCTAssertNotNil(
