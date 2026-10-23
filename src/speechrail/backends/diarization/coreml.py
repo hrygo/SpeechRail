@@ -117,9 +117,11 @@ class CoreMLSortformerEngine:
     def readiness(self) -> DiarizationReadiness:
         return self._readiness
 
-    def open(self, *, epoch: str) -> ActivitySession:
+    def open(self, *, epoch: str, max_speakers: int | None = None) -> ActivitySession:
         """Open one session-scoped activity stream with an opaque epoch."""
 
+        if max_speakers is not None:
+            raise ValueError("Sortformer does not support an identity budget")
         if not epoch:
             raise ValueError("diarization epoch must not be empty")
         if not self._readiness.ready:

@@ -880,16 +880,18 @@ public actor RealtimeASRClient {
 
         /// 分人协商失败时返回服务端稳定码（Gap1 降级续跑的判据），其他错误返回 nil。
         ///
-        /// 只认这两个码：`diarization_not_available`（分人引擎不可用）与
+        /// `diarization_not_available`（分人引擎不可用）与
         /// `backend_not_ready`（配置阶段含对齐器——分人的既有前置——缺失；
         /// 本层不启用 TTS，所以 TTS 未就绪那一路到不了这里）。后者名义上也可能
         /// 是整场问题（如 Silero VAD 预检失败），但那时第二次建连同样被拒，
         /// 降级路径自然收敛到整场拦下——多一次建连，不多一次误判。
+        /// `invalid_diarization_capability` 表示分人预算/后端回显不符，也只回退分人。
         /// 其他 `serverError`（协议回执不对等）与 transport/closed/timeout
         /// 都不是“分人单项不可用”，整场拦下。
         public var diarizationUnavailableCode: String? {
             if case .serverError(let code, _) = self,
-               code == "diarization_not_available" || code == "backend_not_ready" {
+               code == "diarization_not_available" || code == "backend_not_ready"
+                || code == "invalid_diarization_capability" {
                 return code
             }
             return nil
@@ -1066,6 +1068,7 @@ public actor RealtimeASRClient {
     /// 分人开关（每场一次，**首个 PCM 之前**协商，之后改不了）。
     private let diarizationEnabled: Bool
     private let diarizationBackend: SpeechRailDiarizationBackend?
+    private let diarizationMaxSpeakers: Int?
     /// `session.speechrail.task`（会话层语义标签）。
     private let sessionTask: SpeechRailSessionUpdate.Task
     private let windowScene: SpeechRailWindowScene?
@@ -1140,6 +1143,7 @@ public actor RealtimeASRClient {
         threshold: Double? = nil,
         diarizationEnabled: Bool = false,
         diarizationBackend: SpeechRailDiarizationBackend? = nil,
+        diarizationMaxSpeakers: Int? = nil,
         voice: String? = nil,
         apiKey: String? = nil,
         session: URLSession = .shared,
@@ -1168,6 +1172,7 @@ public actor RealtimeASRClient {
         self.threshold = threshold ?? scenePreset.threshold
         self.diarizationEnabled = diarizationEnabled
         self.diarizationBackend = diarizationBackend
+        self.diarizationMaxSpeakers = diarizationMaxSpeakers
         self.sessionTask = scenePreset.task
         self.asrPolicy = scenePreset.policy
         self.windowScene = windowScene
@@ -1481,6 +1486,7 @@ public actor RealtimeASRClient {
             ),
             diarizationEnabled: diarizationEnabled,
             diarizationBackend: diarizationBackend,
+            diarizationMaxSpeakers: diarizationMaxSpeakers,
             asrPolicy: windowScene == nil ? asrPolicy : nil,
             windowScene: windowScene,
             expectedASRRevision: expectedASRRevision
@@ -1641,7 +1647,8 @@ public actor RealtimeASRClient {
                       let ext = session["speechrail"] as? [String: Any], let value = ext["diarization"],
                       let data = try? JSONSerialization.data(withJSONObject: value),
                       let capacity = try? JSONDecoder().decode(SpeechRailDiarizationCapacity.self, from:data),
-                      capacity.isValid, capacity.enabled, capacity.backend == diarizationBackend else {
+                      capacity.isValid, capacity.enabled, capacity.backend == diarizationBackend,
+                      capacity.acceptsRequestedMaximum(diarizationMaxSpeakers) else {
                     await rejectProtocolEvent(code:"invalid_diarization_capability"); return
                 }
                 await emit(.diarizationConfigured(capacity,serverSessionID:id))

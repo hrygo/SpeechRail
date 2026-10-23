@@ -58,25 +58,29 @@ public struct SpeakerLabelingPanel: View {
     public let sessionID: String
     /// 会中（记录已经在写）与会后（可以批量）的区别只有一处文案与拆出的可用性。
     public let isLive: Bool
+    public let transcriptRevision: UInt64
 
     @State private var editingLabel: String?
     @State private var draftName = ""
     @State private var savedNote: String?
 
-    public init(labeling: SpeakerLabeling, sessionID: String, isLive: Bool) {
+    public init(labeling: SpeakerLabeling, sessionID: String, isLive: Bool, transcriptRevision: UInt64 = 0) {
         self.labeling = labeling
         self.sessionID = sessionID
         self.isLive = isLive
+        self.transcriptRevision = transcriptRevision
     }
 
     public var body: some View {
-        switch labeling.state {
-        case .unavailable:
-            unavailable
-        case .off:
-            off
-        case .active, .degraded:
-            list
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            switch labeling.state {
+            case .unavailable: unavailable
+            case .off: off
+            case .active, .degraded: list
+            }
+            SpeakerTextSharePanel(sessionID: sessionID, names: labeling.displayNames,
+                displayOrdinals: SpeakerLabeling.displayOrdinals(for: labeling.labels),
+                revision: "\(transcriptRevision):\(labeling.attributionRevision)")
         }
     }
 

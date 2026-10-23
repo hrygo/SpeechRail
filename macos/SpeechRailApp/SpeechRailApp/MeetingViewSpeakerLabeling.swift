@@ -16,6 +16,7 @@ struct SpeakerLabelingSheet: View {
 
     let labeling: SpeakerLabeling
     let sessionID: String?
+    let transcriptRevision: UInt64
     let onClose: () -> Void
 
     var body: some View {
@@ -34,7 +35,7 @@ struct SpeakerLabelingSheet: View {
             }
             if let sessionID {
                 ScrollView(.vertical) {
-                    SpeakerLabelingPanel(labeling: labeling, sessionID: sessionID, isLive: true)
+                    SpeakerLabelingPanel(labeling: labeling, sessionID: sessionID, isLive: true, transcriptRevision: transcriptRevision)
                 }
             }
         }

@@ -256,7 +256,7 @@ struct SettingsAssistantPane: View {
                     Toggle(isOn: diarizationMeetingBinding) {
                         settingsRowLabel(
                             "会议显示说话人",
-                            caption: diarizationCaption(for: preferences.meetingDiarizationEnabled)
+                            caption: diarizationCaption(for: preferences.meetingDiarizationEnabled, isMeeting: true)
                         )
                     }
                         .modifier(settingsRowControl())
@@ -431,10 +431,10 @@ struct SettingsAssistantPane: View {
         model.creatorVoices.filter(\.available)
     }
 
-    private func diarizationCaption(for enabled: Bool) -> String {
+    private func diarizationCaption(for enabled: Bool, isMeeting: Bool = false) -> String {
         return enabled
-            ? "已开启：新会话会标出说话人，使用匿名编号。"
-            : "默认关闭；打开后新会话才会标出说话人。"
+            ? "已开启：最多区分 4 位发言人，使用匿名编号。" + (isMeeting ? "超额或不确定的发言保留为未识别。" : "")
+            : "默认关闭；最多区分 4 位发言人，打开后对新会话生效。"
     }
 
     @ViewBuilder

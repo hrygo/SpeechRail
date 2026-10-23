@@ -49,31 +49,53 @@ public final class SpeakerLabeling {
         }
     }
 
+    public private(set) var attributionRevision: UInt64 = 0
     public private(set) var maxSpeakers = 4
     private var scopeBinding: SpeakerScopeBinding?
+    private var usesStableIdentity = false
+    private var rejectsAutomaticIdentity = false
+    private var continuedConnection = false
 
     public func configureCapacity(_ capacity: SpeechRailDiarizationCapacity, recordID: String,
         generation: Int, serverSessionID: String, inputEpoch: Int) {
-        guard capacity.isValid, recordID == sessionID, let maximum = capacity.maxSpeakers else { return }
+        guard recordID == sessionID else { return }
+        if capacity.backend == .meetingDynamic { usesStableIdentity = true }
+        guard capacity.enabled, capacity.isValid,
+              let maximum = capacity.maxSpeakers else {
+            rejectsAutomaticIdentity = true
+            note = "说话人信息暂时无法确认，新发言保留为未识别。"
+            return
+        }
         maxSpeakers = maximum
-        if capacity.backend != .meetingDynamic { scopeBinding = nil; return }
-        if let scope = scopeBinding, scope.recordID == recordID,
-           scope.connectionGeneration == generation, scope.serverSessionID == serverSessionID,
-           scope.inputEpoch == inputEpoch { return }
-        scopeBinding = SpeakerScopeBinding(recordID:recordID,
-            connectionGeneration:generation,serverSessionID:serverSessionID,inputEpoch:inputEpoch)
+        guard capacity.backend == .meetingDynamic else {
+            if usesStableIdentity, scopeBinding != nil { rejectsAutomaticIdentity = true }
+            return
+        }
+        if let scope = scopeBinding {
+            if scope.recordID == recordID, scope.connectionGeneration == generation,
+               scope.serverSessionID == serverSessionID, scope.inputEpoch == inputEpoch { return }
+            rejectsAutomaticIdentity = true
+        }
+        if continuedConnection { rejectsAutomaticIdentity = true }
+        if rejectsAutomaticIdentity {
+            diagnosticCode = "speaker_continuity_unverified"
+            note = "重新连接后暂时无法确认是否为原来的说话人；新发言保留为未识别，之前的标注不变。"
+            return
+        }
+        scopeBinding = SpeakerScopeBinding(recordID: recordID,
+            connectionGeneration: generation, serverSessionID: serverSessionID, inputEpoch: inputEpoch)
     }
 
     private func localLabel(_ raw: String?) -> String? {
-        guard let raw else { return nil }
-        guard var scope = scopeBinding else { return raw }
+        guard let raw, !raw.isEmpty, !rejectsAutomaticIdentity else { return nil }
+        guard var scope = scopeBinding else { return usesStableIdentity ? nil : raw }
         do {
-            let label = try scope.serverLabel(raw,capacity:maxSpeakers)
+            let label = try scope.serverLabel(raw, capacity: maxSpeakers)
             scopeBinding = scope
             return label
         } catch SpeakerScopeBinding.Failure.capacityExceeded {
             diagnosticCode = "speaker_capacity"
-            note = "已达到本次录音的说话人数上限，新增说话人暂未确认。"
+            note = "已确认四位说话人，其余或不确定的发言保留为未识别。"
             return nil
         } catch { return nil }
     }
@@ -135,9 +157,12 @@ public final class SpeakerLabeling {
     // MARK: - 会话边界
 
     /// 新会话开始：账本归零（**不跨会话**——§14.3 的边界：不做跨会话身份）。
-    public func begin(sessionID: String, enabled: Bool) {
+    /// 会议要求稳定身份：有效 meeting_dynamic 作用域绑定前，自动归属保持未知。
+    public func begin(sessionID: String, enabled: Bool, stableIdentityRequired: Bool = false) {
         lifecycle = UUID()
         scopeBinding = nil; maxSpeakers = 4
+        usesStableIdentity = stableIdentityRequired
+        rejectsAutomaticIdentity = false; continuedConnection = false
         self.sessionID = sessionID
         labels = []
         displayNames = [:]
@@ -162,7 +187,13 @@ public final class SpeakerLabeling {
     /// 降级态也不回退：续接不治愈 degraded/unavailable，只是不擦除显示。
     public func beginNewConnection(sessionID: String) {
         lifecycle = UUID()
-        scopeBinding = nil; maxSpeakers = 4
+        continuedConnection = true
+        if usesStableIdentity {
+            rejectsAutomaticIdentity = true
+            diagnosticCode = "speaker_continuity_unverified"
+            note = "重新连接后暂时无法确认是否为原来的说话人；新发言保留为未识别，之前的标注不变。"
+        }
+        scopeBinding = nil
         self.sessionID = sessionID
         lineByUnit = [:]
         unitsByLine = [:]
@@ -318,6 +349,7 @@ public final class SpeakerLabeling {
             }
             guard ownsProjection() else { continue }
             appliedByLine[target.lineID] = .init(requested: target.units, projection: saved)
+            attributionRevision &+= 1
             confirmedLines.insert(target.lineID)
             for label in Set(saved.attributionUnits.compactMap(\.speakerLabel)) {
                 observe(label: label, ordinal: nil)
@@ -469,6 +501,7 @@ public final class SpeakerLabeling {
             }
         }
         observe(label: target, ordinal: nil)
+        attributionRevision &+= 1
         // 归属变了，依赖旧归属的纪要该提示复核。事件记在**用户动作**这一层，
         // 自动归属与用户动作分离，只有这里追加来源修订。
         do {

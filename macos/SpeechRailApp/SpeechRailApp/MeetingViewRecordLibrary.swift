@@ -29,13 +29,19 @@ extension MeetingView {
                     .help("打开完整的会议知识库，包含跨会议问答、项目分类和未完成事项")
                 }
                 if recent.isEmpty {
-                    Text("还没有会议记录。结束一场之后，它会出现在这里。")
-                        .font(SpeechRailDesignTokens.Typography.callout)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.lg)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 26))
+                            .foregroundStyle(SpeechRailDesignTokens.Color.rail.opacity(0.6))
+                        Text("暂无历史会议记录")
+                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        Text("发起会议并结束后，转写文本与整理纪要将自动归档至此。")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.xl)
                 } else {
                     ScrollView(.vertical) {
                         LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
@@ -47,8 +53,6 @@ extension MeetingView {
                                 recentMeetingRow(summary)
                             }
                             if recent.count > Self.quickAccessMeetingLimit {
-                                // 截断就**说出来**。只显示最近 8 场而不说明，
-                                // 用户会以为另外那些会议不存在（MC-52）。
                                 SessionHairline()
                                     .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
                                 Button {
@@ -89,6 +93,15 @@ extension MeetingView {
             Task { await openRecord(summary) }
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(SpeechRailDesignTokens.Color.recessedField)
+                        .frame(width: 30, height: 30)
+                    Image(systemName: summary.openInterruption != nil ? "exclamationmark.triangle.fill" : "doc.text.fill")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(summary.openInterruption != nil ? SpeechRailDesignTokens.Color.attention : SpeechRailDesignTokens.Color.rail)
+                }
+
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     Text(summary.record.title ?? "这一场会议")
                         .font(SpeechRailDesignTokens.Typography.bodyMedium)

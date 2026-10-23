@@ -178,6 +178,8 @@ def test_meeting_calibration_can_explicitly_enable_zero_vote_reembedding(
                 "ok": True,
                 "sdk_revision": "5c19d5e12320e22bbfb7a1877b089d2665a69add",
                 "model_revision": "7eab74f3463c736418d0eb10296261ae581146c9",
+                "identity_policy": "stable_four_v1",
+                "identity_capacity": 4,
                 "zero_vote_reembed": True,
             },
             b"",

@@ -84,6 +84,10 @@ extension MeetingView {
     }
 
     private var statusTitle: String {
+        if reviewRecord != nil {
+            return meeting.minutes.sessionID == pageSessionID && meeting.minutes.isBusy
+                ? "正在整理这场会议的纪要…" : "正在查看历史会议"
+        }
         switch meeting.phase {
         case .idle:
             return meeting.blocked != nil ? "这一场没有开始" : "还没有开始会议"
@@ -96,7 +100,17 @@ extension MeetingView {
             return meeting.isMicrophoneMuted ? "正在录音 · 麦克风已静音" : "正在录音"
         case .interrupted: return "录制中断"
         case .processing: return meeting.minutes.isBusy ? "正在整理会议…" : "会议收尾未完成"
-        case .archived: return "这一场已经结束"
+        case .archived:
+            if meeting.minutes.sessionID == pageSessionID {
+                switch meeting.minutes.state {
+                case .queued, .running: return "会议已结束 · 正在整理纪要…"
+                case .failed: return "会议已结束 · 纪要未生成"
+                case .submissionUnknown: return "会议已结束 · 整理结果待确认"
+                case .cancelled: return "会议已结束 · 整理已停止"
+                default: break
+                }
+            }
+            return "这一场已经结束"
         }
     }
 
@@ -107,7 +121,7 @@ extension MeetingView {
         case .recording: meeting.isPaused || meeting.isReconnectingSystemAudio ? .attention : .healthy
         case .interrupted: .attention
         case .processing: .attention
-        case .archived: .healthy
+        case .archived: meeting.minutes.isBusy ? .attention : .healthy
         }
     }
 
@@ -168,12 +182,15 @@ extension MeetingView {
     }
 
     private var statusFacts: [String] {
+        if reviewRecord != nil { return ["\(reviewLines.count) 段对话已保存"] }
         guard meeting.phase != .idle else {
             return meeting.selection.map { [$0.label] } ?? []
         }
         var facts: [String] = []
         // 来源摘要走 MA-10 的呈现门面
-        if meeting.selection != nil { facts.append(sourcePresentation.sourceSummary) }
+        if let selection = meeting.selection {
+            facts.append(meeting.phase == .archived ? selection.label : sourcePresentation.sourceSummary)
+        }
         if !meeting.labeling.labels.isEmpty {
             facts.append("\(meeting.labeling.labels.count) 位发言人")
         }

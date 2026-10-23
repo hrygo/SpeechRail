@@ -13,9 +13,11 @@ extension MeetingView {
                 // 主区说的是旧记录，右栏若还挂着这一场的说话人与纪要版本，同一屏就有两个对象
                 // ——和"导错一场"是同一类错误（2026-09-19 回读代码时发现，真机未验）。
                 reviewInspectorCard(reviewing)
+                SpeakerTextSharePanel(sessionID: reviewing.id, names: reviewSpeakerNames)
             } else if meeting.phase == .archived {
                 if let id = meeting.sessionID {
-                    SpeakerLabelingPanel(labeling: meeting.labeling, sessionID: id, isLive: false)
+                    SpeakerLabelingPanel(labeling: meeting.labeling, sessionID: id, isLive: false,
+                        transcriptRevision: meeting.transcriptPresentation.revision)
                 }
                 minutesVersionsCard
             } else if meeting.phase == .idle {

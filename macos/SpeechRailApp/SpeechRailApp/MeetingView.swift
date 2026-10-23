@@ -36,6 +36,7 @@ public struct MeetingView: View {
     /// **不写进偏好**：上一场叫什么不该替下一场预填——用户多半是在开新一场会，
     /// 带着上一场的名字开始，事后还得回来改。
     @State var titleDraft = ""
+    @State var expectedSpeakerCount: MeetingExpectedSpeakerCount = .uncertain
     @State var sourceCandidates: [SystemAudioApp] = []
     @State private var isInspectorCollapsed = false
     @FocusState private var inspectorToggleFocused: Bool
@@ -166,12 +167,17 @@ public struct MeetingView: View {
                 }
                 exportMenu(title: "导出…", helpText: "导出这一场：文字记录加已生成的纪要")
                 PageActionButton(
-                    title: "重新生成纪要",
+                    title: meeting.minutes.isBusy && meeting.minutes.sessionID == pageSessionID ? "停止整理" : "重新生成纪要",
                     systemImage: "arrow.clockwise",
                     helpText: "按现在的模型设置再整理一遍；旧版本都留着，不会覆盖"
                 ) {
-                    Task { await regenerateMinutes(for: pageSessionID) }
+                    if meeting.minutes.isBusy && meeting.minutes.sessionID == pageSessionID {
+                        meeting.minutes.stop()
+                    } else {
+                        Task { await regenerateMinutes(for: pageSessionID) }
+                    }
                 }
+                .disabled(meeting.minutes.isBusy && meeting.minutes.sessionID != pageSessionID)
             } else if meeting.phase == .idle, meeting.blocked == nil {
                 SessionHeaderKeycap("⌘⇧N")
                 PageActionButton(
@@ -279,7 +285,11 @@ public struct MeetingView: View {
             await reloadRecent()
             await reloadPostMeeting()
         }
-        .onChange(of: meeting.phase) { _, _ in
+        .onChange(of: meeting.phase) { _, phase in
+            if phase == .archived, reviewRecord == nil {
+                postTab = .minutes
+                selectedMinutesVersionID = nil
+            }
             Task { await reloadPostMeeting() }
         }
         .onChange(of: pageSessionID) { _, newValue in
@@ -302,7 +312,8 @@ public struct MeetingView: View {
         }
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
         .sheet(isPresented: $isLabelingSpeakers) {
-            SpeakerLabelingSheet(labeling: meeting.labeling, sessionID: meeting.sessionID) {
+            SpeakerLabelingSheet(labeling: meeting.labeling, sessionID: meeting.sessionID,
+                transcriptRevision: meeting.transcriptPresentation.revision) {
                 isLabelingSpeakers = false
             }
         }

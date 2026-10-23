@@ -335,6 +335,37 @@ class AttributionLedger:
         if unit.audio_span is None:
             return Attribution(unit.id, None, (), "final", "alignment_unavailable", revision)
         frames = self._intersecting_frames(unit.audio_span)
+        if self._label_mode == "meeting_dynamic":
+            # Explicit refusals are acoustic evidence, not holes to fill from
+            # adjacent text or a majority of known frames in the same word.
+            reasons = {frame.reason for frame in frames}
+            reason = next(
+                (
+                    value
+                    for value in (
+                        "speaker_capacity",
+                        "identity_uncertain",
+                        "activity_gap",
+                        "audio_expired",
+                        "model_not_ready",
+                    )
+                    if value in reasons
+                ),
+                None,
+            )
+            if any(slot >= 4 for frame in frames for slot in frame.active_slots):
+                reason = "speaker_capacity"
+            if len({slot for frame in frames for slot in frame.active_slots}) > 1:
+                reason = reason or "identity_uncertain"
+            if reason is not None:
+                return Attribution(
+                    unit.id,
+                    None,
+                    (),
+                    "final" if unit.audio_span.end <= self._stable_through else "provisional",
+                    reason,
+                    revision,
+                )
         support = {
             slot: union_support(
                 unit.audio_span,
@@ -377,6 +408,8 @@ class AttributionLedger:
             ),
             "insufficient_evidence",
         )
+        if self._label_mode == "meeting_dynamic" and speaker is None:
+            unknown_reason = "identity_uncertain"
         if speaker is None and unknown_reason == "insufficient_evidence":
             probability_winner = self._probability_winner(unit.audio_span, support, frames)
             if probability_winner is None:

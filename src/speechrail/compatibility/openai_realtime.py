@@ -510,7 +510,7 @@ def session_payload(
     if diarization_backend is not None:
         speechrail["diarization"] = {"enabled": bool(diarization_enabled),
             "backend": diarization_backend, "max_speakers": diarization_max_speakers,
-            "system_cap": 32 if diarization_backend == "meeting_dynamic" else 4}
+            "system_cap": 4}
     if endpointing is not None:
         speechrail["endpointing"] = dict(endpointing)
     if expected_asr_revision is not None:
@@ -1402,10 +1402,10 @@ def apply_session_update(
     if "diarization" in speechrail_obj:
         raw_diarization = speechrail_obj["diarization"]
         if (not isinstance(raw_diarization, dict) or "enabled" not in raw_diarization
-                or set(raw_diarization) - {"enabled", "backend"}):
+                or set(raw_diarization) - {"enabled", "backend", "max_speakers"}):
             raise RealtimeAdapterError(
                 "invalid_event",
-                "session.speechrail.diarization requires boolean enabled and optional backend",
+                "diarization requires boolean enabled and optional backend/max_speakers",
             )
         config["diarization_enabled"] = _boolean_field(
             raw_diarization["enabled"], label="speechrail.diarization.enabled"
@@ -1415,6 +1415,14 @@ def apply_session_update(
             raise RealtimeAdapterError("invalid_event", "unsupported diarization backend")
         if "backend" in raw_diarization or "diarization_backend" in config:
             config["diarization_backend"] = backend
+        limit = raw_diarization.get("max_speakers", config.get("diarization_max_speakers"))
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 4):
+            raise RealtimeAdapterError(
+                "invalid_event", "max_speakers must be null or an integer from 1 to 4"
+            )
+        if limit is not None and backend != "meeting_dynamic":
+            raise RealtimeAdapterError("invalid_event", "max_speakers requires meeting_dynamic")
+        config["diarization_max_speakers"] = limit
         diarization_explicit = True
     config["diarization_explicit"] = diarization_explicit
 

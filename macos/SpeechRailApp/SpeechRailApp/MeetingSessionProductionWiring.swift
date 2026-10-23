@@ -46,8 +46,9 @@ extension MeetingSessionDependencies {
                     port: configuration.port,
                     scenePreset: configuration.scenePreset,
                     windowScene: configuration.windowScene,
-                diarizationEnabled: configuration.diarizationEnabled,
+                    diarizationEnabled: configuration.diarizationEnabled,
                     diarizationBackend: configuration.diarizationBackend,
+                    diarizationMaxSpeakers: configuration.diarizationMaxSpeakers,
                     apiKey: configuration.apiKey,
                     expectedASRRevision: configuration.expectedASRRevision
                 )

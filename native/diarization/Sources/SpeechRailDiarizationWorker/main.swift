@@ -161,8 +161,13 @@ if argument(named: "--protocol-version") == "2" {
         guard !zeroVoteReembed || calibrationCandidatesPath != nil else {
             throw MeetingWorkerError.invalidRequest
         }
+        let requestedLimit: Int?
+        if let raw = argument(named: "--max-speakers") {
+            guard let value = Int(raw), (1...4).contains(value) else { throw MeetingWorkerError.invalidRequest }
+            requestedLimit = value
+        } else { requestedLimit = nil }
         let worker = try MeetingDiarizationWorker(modelDirectory:modelPath,policyPath:policyPath,
-            calibrationCandidatesPath:calibrationCandidatesPath,zeroVoteReembed:zeroVoteReembed)
+            calibrationCandidatesPath:calibrationCandidatesPath,zeroVoteReembed:zeroVoteReembed, maxSpeakers:requestedLimit)
         diagnosticStage = "protocol"
         while let (header,payload) = try readPacket() {
             guard try DiarizationPacketCodec.nonnegativeInteger(header["protocol_version"]) == 2,
@@ -171,6 +176,7 @@ if argument(named: "--protocol-version") == "2" {
                 try writePacket(["protocol_version":2,"backend":"meeting_dynamic","ok":true,
                     "sdk_revision":"5c19d5e12320e22bbfb7a1877b089d2665a69add",
                     "model_revision":"7eab74f3463c736418d0eb10296261ae581146c9",
+                    "identity_policy":"stable_four_v1","identity_capacity":4,"max_speakers":worker.maxSpeakers,
                     "zero_vote_reembed":zeroVoteReembed])
             } else if operation == "cancel" {
                 try writePacket(["protocol_version":2,"backend":"meeting_dynamic","ok":true]); exit(0)

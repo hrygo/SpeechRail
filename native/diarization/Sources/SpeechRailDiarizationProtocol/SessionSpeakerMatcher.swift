@@ -32,7 +32,7 @@ public struct SpeakerMatchingPolicy: Codable, Sendable {
               matchMarginMin.isFinite, (0...2).contains(matchMarginMin),
               (1500...60000).contains(minimumNewVoiceMs), (2000...60000).contains(minimumUpdateVoiceMs),
               candidateRetentionMs == 60000,
-              certifiedMaxSpeakers.map({ (5...32).contains($0) }) ?? true,
+              certifiedMaxSpeakers.map({ (1...4).contains($0) }) ?? true,
               modelSnapshot == "7eab74f3463c736418d0eb10296261ae581146c9",
               calibrationDigest.count == 64,
               calibrationDigest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
@@ -59,6 +59,20 @@ public struct SpeakerLocalCluster: Sendable {
 public struct SpeakerMatch: Sendable {
     public let slot: Int?
     public let reason: String?
+    public init(slot: Int?, reason: String?) { self.slot = slot; self.reason = reason }
+}
+
+/// A word cannot be confidently attributed when an overlapping voice was refused.
+public struct SpeakerActivityDecision: Sendable {
+    public let slots: Set<Int>
+    public let reason: String?
+    public static func resolve(_ matches: [SpeakerMatch?]) -> Self {
+        if matches.contains(where: { $0?.slot == nil || $0?.reason != nil }) {
+            return .init(slots: [], reason: matches.contains(where: { $0?.reason == "speaker_capacity" })
+                ? "speaker_capacity" : "identity_uncertain")
+        }
+        return .init(slots: Set(matches.compactMap { $0?.slot }), reason: nil)
+    }
 }
 
 /// RAM only; every retained vector and interval set has a fixed upper bound.
@@ -79,6 +93,7 @@ public struct SessionSpeakerMatcher: Sendable {
         let ordinal: Int
     }
     public let policy: SpeakerMatchingPolicy
+    public let identityCapacity: Int
     private var identities: [Identity] = []
     private var candidates: [Candidate] = []
     private var sequence = 0
@@ -88,7 +103,14 @@ public struct SessionSpeakerMatcher: Sendable {
     public var prototypeCount: Int { identities.reduce(0) { $0 + $1.representatives.count } }
     public var candidateCount: Int { candidates.count }
 
-    public init(policy: SpeakerMatchingPolicy) throws { try policy.validate(); self.policy = policy }
+    public init(policy: SpeakerMatchingPolicy, maxSpeakers: Int? = nil) throws {
+        try policy.validate()
+        guard maxSpeakers.map({ (1...4).contains($0) }) ?? true else {
+            throw MatcherError.invalidPolicy
+        }
+        self.policy = policy
+        self.identityCapacity = min(maxSpeakers ?? 4, policy.certifiedMaxSpeakers ?? 4)
+    }
 
     public mutating func assign(_ input: [SpeakerLocalCluster], through: Int) throws -> [String: SpeakerMatch] {
         // Invalid/over-capacity evidence cannot partially change identity state.
@@ -143,18 +165,25 @@ public struct SessionSpeakerMatcher: Sendable {
                 || (!cluster.anchors.isEmpty && cluster.anchors.first != best?.offset)
             var rowCosts = distances[row].enumerated().map { slot, cost in
                 !ambiguous[row] && cost <= policy.matchDistanceMax
+                    && distance(cluster.centroid, identities[slot].representatives[0].vector)
+                        <= policy.matchDistanceMax
                     && (cluster.anchors.isEmpty || cluster.anchors.contains(slot)) ? cost : 1000
             }
             rowCosts += clusters.indices.map { $0 == row ? policy.matchDistanceMax + 0.001 : 1000 }
             costs.append(rowCosts)
         }
         let assignment = minimumAssignment(costs)
-        let identityCapacity = policy.certifiedMaxSpeakers ?? 32
+        // An identity belongs to the whole session, never to a rolling window.
+        // Excess voices are refused; established slots are never recycled.
         var result: [String: SpeakerMatch] = [:]
         var usedCandidates: Set<Int> = []
         for (row, cluster) in clusters.enumerated() {
             let selected = assignment[row]
             if identities.indices.contains(selected), costs[row][selected] < 1000 {
+                guard duration(cluster.uniqueVoice) >= policy.minimumNewVoiceMs * 16 else {
+                    result[cluster.id] = SpeakerMatch(slot: nil, reason: "identity_uncertain")
+                    continue
+                }
                 result[cluster.id] = SpeakerMatch(slot: selected, reason: nil)
                 update(selected, cluster: cluster)
                 continue

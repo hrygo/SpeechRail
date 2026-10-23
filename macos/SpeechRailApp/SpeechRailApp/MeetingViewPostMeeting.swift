@@ -20,7 +20,7 @@ extension MeetingView {
                         .labelsHidden()
                         .accessibilityLabel("会后视图切换")
 
-                        if postTab == .minutes, let body = (reviewRecord != nil ? reviewMinutes?.body : displayedMinutesBody), !body.isEmpty {
+                        if postTab == .minutes, let body = displayedMinutesBody, !body.isEmpty {
                             Button {
                                 copyMinutesToPasteboard(body)
                             } label: {
@@ -108,7 +108,7 @@ extension MeetingView {
                         message: reason,
                         actionTitle: "重新生成"
                     ) {
-                        Task { await regenerateMinutes() }
+                        Task { await regenerateMinutes(for: pageSessionID) }
                     }
                 }
             case .queued, .running:
@@ -121,7 +121,7 @@ extension MeetingView {
                         Text(meeting.minutes.state.title)
                             .font(SpeechRailDesignTokens.Typography.bodyMedium)
                             .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                        Text("文字记录已全部安全封存。大语言模型正在提炼会议核心决议、讨论要点与待办事项…")
+                        Text("文字记录已全部安全封存。正在整理讨论要点、结论与待办事项，请稍候。")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
@@ -150,7 +150,7 @@ extension MeetingView {
                         + (meeting.minutes.remoteCancellationNote ?? ""),
                     actionTitle: "重新生成"
                 ) {
-                    Task { await regenerateMinutes() }
+                    Task { await regenerateMinutes(for: pageSessionID) }
                 }
             case .submissionUnknown:
                 // MC-28：远端可能已经受理，只是没拿到回执。这里**不**给"重新生成"当默认出口，
@@ -162,7 +162,13 @@ extension MeetingView {
                     message: "请求可能已经发出去了，只是没拿到回执。没法确认的时候我们不会自动重试："
                         + "再来一次可能会重复执行、重复计费。确认服务那边没有在跑之后再重新生成。"
                 )
-            default:
+            case .idle:
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Text("文字记录已保存，还没有纪要。")
+                    Button("整理纪要") { Task { await regenerateMinutes(for: pageSessionID) } }
+                        .buttonStyle(.bordered)
+                }
+            case .ready:
                 EmptyView()
             }
             // 「在看哪一版」是一个**有落点的状态**：点了版本列表里的旧版就必须换正文，
@@ -201,10 +207,7 @@ extension MeetingView {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     Spacer(minLength: 0)
                 }
-                Text(LocalizedStringKey(body))
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                MinutesMarkdownView(body)
             } else if case .ready = meeting.minutes.state {
                 Text("这一版是空的。")
                     .font(SpeechRailDesignTokens.Typography.callout)
@@ -298,6 +301,7 @@ extension MeetingView {
     /// 正文只在这一处决定：选了旧版就显示旧版，否则是当前展示版
     /// （采用版优先，其次最新可用候选；`latestBody` 只作为版本列表还没刷出来时的兜底）。
     private var displayedMinutesBody: String? {
+        guard meeting.minutes.sessionID == pageSessionID else { return reviewMinutes?.body }
         if let selectedMinutesVersion { return selectedMinutesVersion.body }
         // MC-25：已采用 v2 后 v3 失败，仍显示 v2；不把失败版的空正文当成功。
         if let accepted = meeting.minutes.versions.first(where: \.isAccepted) {
@@ -390,11 +394,10 @@ extension MeetingView {
             }
             if postTab == .transcript {
                 transcriptBody
+            } else if meeting.minutes.sessionID == record.id {
+                minutesBody
             } else if let reviewMinutes, let body = reviewMinutes.body, !body.isEmpty {
-                Text(LocalizedStringKey(body))
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                MinutesMarkdownView(body)
             } else {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text("这场历史会议尚未生成纪要，以下为当时的文字记录。")
@@ -409,11 +412,15 @@ extension MeetingView {
     func reloadPostMeeting() async {
         // 会后这一栏读的是**库里的行**，不是内存镜像：界面可能是从内存快照渲染的，
         // 而"重开 App 之后还在不在"只能由库回答（§11.2 的第二条）。
-        guard let id = meeting.sessionID else { return }
-        reviewLines = (try? await session.lines(sessionID: id)) ?? []
-        recoveryLines = (try? await session.lines(sessionID: id, includePartial: true))?
+        guard reviewRecord == nil, let id = meeting.sessionID else { return }
+        let loadedLines = (try? await session.lines(sessionID: id)) ?? []
+        let loadedRecovery = (try? await session.lines(sessionID: id, includePartial: true))?
             .filter { $0.status == .partial } ?? []
-        reviewSpeakerNames = (try? await session.speakerNames(sessionID: id)) ?? [:]
+        let loadedNames = (try? await session.speakerNames(sessionID: id)) ?? [:]
+        guard reviewRecord == nil, meeting.sessionID == id else { return }
+        reviewLines = loadedLines
+        recoveryLines = loadedRecovery
+        reviewSpeakerNames = loadedNames
         await meeting.minutes.reload(sessionID: id)
         await reloadReviewVerdicts(sessionID: id)
     }
@@ -435,20 +442,21 @@ extension MeetingView {
         reviewVerdicts = items.compactMap(\.verdict)
     }
 
-    private func regenerateMinutes() async {
-        await regenerateMinutes(for: meeting.sessionID)
-    }
-
     /// 重新生成**指定那一场**的纪要（在看旧记录时页头那颗按钮作用在旧记录上）。
     /// 生成之后回到「纪要」页签看新版；选中态清掉，否则会以为"重新生成没生效"。
     func regenerateMinutes(for sessionID: String?) async {
-        guard let id = sessionID else { return }
+        guard let id = sessionID, !meeting.minutes.isBusy else { return }
+        selectedMinutesVersionID = nil
+        postTab = .minutes
         await meeting.minutes.generate(
             sessionID: id,
             resolvedConfiguration: preferences.resolvedLLMConfiguration(for: .minutes)
         )
+        guard pageSessionID == id else { return }
         if reviewRecord?.id == id {
-            reviewMinutes = try? await session.currentMinutes(sessionID: id)
+            let loaded = try? await session.currentMinutes(sessionID: id)
+            guard reviewRecord?.id == id else { return }
+            reviewMinutes = loaded
             selectedMinutesVersionID = nil
             postTab = .minutes
             return

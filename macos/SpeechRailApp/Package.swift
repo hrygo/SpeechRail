@@ -107,6 +107,8 @@ let package = Package(
                 "TranscriptPreviewLedger.swift",
                 "TranscriptWindowLedger.swift",
                 "SpeakerScopeBinding.swift",
+                "SpeakerTextStatistics.swift",
+                "MinutesMarkdownView.swift",
                 "TranscriptWindowPersistence.swift",
                 // 助手编排层：生产 AssistantSession 本身进单测目标，
                 // 依赖的 LLM / Realtime / 播放通道由 AssistantSessionDependencies 注入。

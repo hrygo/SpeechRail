@@ -1,6 +1,6 @@
 # SpeechRail Realtime ASR/TTS 协议契约
 
-> 契约版本：`6.7.0`；生效日期：2026-10-19。唯一机器 schema 是
+> 契约版本：`7.1.0`；生效日期：2026-10-23。唯一机器 schema 是
 > [`realtime-events.schema.json`](realtime-events.schema.json)，字段责任表是
 > [`realtime-field-matrix.json`](realtime-field-matrix.json)。
 
@@ -413,21 +413,35 @@ Qwen3 适配器从已加载模型配置读取时间格点宽度。原始时间�
 ### 匿名分人后端与容量
 
 `session.speechrail.diarization` 接受 `enabled` 和可选 `backend`，后者支持
-`sortformer`、`meeting_dynamic`；省略时默认为 `sortformer`。音频输入开始后不能更换后端。
+`sortformer`、`meeting_dynamic`；省略时默认为 `sortformer`。`meeting_dynamic` 还接受
+`max_speakers`（1–4 的整数或 null），表示本连接稳定身份预算上限；省略或 null 使用
+认证容量。`sortformer` 不接受非空预算，不会静默忽略。音频输入开始后不能更换后端或预算；
+音频前修改预算会重建匹配器，不能只改变回显。
 同一次捕获仅运行所选的一种分人后端；分人不可用不会改写已确认的文字。
 
 会话更新回显包含 `enabled/backend/max_speakers/system_cap`。能力发现对每个后端分别返回
 `ready/reason/max_speakers/system_cap`，并与本地制品、对齐能力和实际准备状态一致。
-`system_cap` 是工程身份容量，不能作为准确率证明。`meeting_dynamic` 容量为 32；
-`max_speakers` 是独立质量验收通过的人数上限，未认证时为 null、生产 not-ready。
+`system_cap` 固定为 4，表示整场最多维护四位稳定匿名身份，不能作为准确率证明。
+能力发现中 `meeting_dynamic.max_speakers` 是独立质量验收通过的稳定身份上限（1–4）；
+未认证时为 null、生产 not-ready。请求预算不得超过认证容量，否则拒绝分人协商。
+会话回显 `max_speakers` 为本连接实际预算，App 与 native preflight 都核对请求值，防止
+旧制品仅回显或忽略约束。预算不修改共享认证策略或其他连接；填多不会强制创建身份，
+填少或中途新增发言人时不放宽匹配阈值、不轮换已有身份，超额声音拒识。
+它不是出席人数或实际开口人数的限制：超额与不确定声音
+保持未识别，不建立第五个身份，不回收已有身份来轮换使用。原有 5–32 身份认证配置不再
+满足该后端的生产准入；回退应使用成套旧 runtime 与匹配策略，不能只修改容量字段。
 服务不会在请求中下载制品，也不会用四槽结果冒充多人识别成功。
 
 动态活动使用私有 v2 IPC，Python 严格将全场 slot n 映射为 `S(n+1)`，不按到达顺序重新编号。
 标签只在分人 session 内有效，不表示真实身份。App 为记录、连接与输入代次绑定新的本地 scope，
-界面按首次出现显示「说话人 1、2……」，不展示内部键。重连后的 S1 不能关联到旧人的保存行。
+界面按首次出现显示「说话人 1–4」，不展示内部键。重连后的 S1 不能关联到旧人的保存行；
+没有跨连接声音匹配证明时，新增自动归属保持未识别，旧行与人工标注保留。
 原型与音频只保留在有界 RAM；不保存声纹库或跨会话身份。
 
 未知活动原因限定为 `identity_uncertain/speaker_capacity/activity_gap/audio_expired/model_not_ready`。
+任一词覆盖明确的拒识证据或跨越两位身份时，不以多数覆盖、概率或邻接文本补为已知。
+未知与已知声部重叠时，未知不能被静默丢弃。匹配需足够的独占语音证据，且声音参考更新
+和后续匹配均受最初参考约束，拒识片段不更新已确认身份。
 对齐缺失、身份不确定和后台故障分别诊断；未知不能当作正确识别，也不能默认归给第一位说话人。
 关闭等待结束不等于原生计算已停止；实际 child 回收未确认时保持资源所有权并隔离后续准入，
 由操作者恢复服务，不循环重试。

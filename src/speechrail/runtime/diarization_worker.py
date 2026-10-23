@@ -27,6 +27,23 @@ MEETING_DYNAMIC_SDK_REVISION = "5c19d5e12320e22bbfb7a1877b089d2665a69add"
 MEETING_DYNAMIC_MODEL_REVISION = "7eab74f3463c736418d0eb10296261ae581146c9"
 
 
+def validate_meeting_identity_policy(
+    response: Mapping[str, object], *, max_speakers: int | None = None
+) -> None:
+    """Reject an older native matcher even when its SDK/model pins match."""
+    if (
+        response.get("identity_policy") != "stable_four_v1"
+        or type(response.get("identity_capacity")) is not int
+        or response.get("identity_capacity") != 4
+    ):
+        raise RuntimeError("native meeting identity policy is unavailable")
+    if max_speakers is not None and (
+        type(response.get("max_speakers")) is not int
+        or response.get("max_speakers") != max_speakers
+    ):
+        raise RuntimeError("native meeting identity budget was not applied")
+
+
 def encode_message(header: Mapping[str, object], audio: bytes = b"") -> bytes:
     """Encode one local IPC packet; PCM remains binary after the JSON header."""
 
@@ -76,6 +93,7 @@ class CoreMLWorkerProcess:
     protocol_version: int = _PROTOCOL_VERSION
     backend: str = "sortformer"
     policy_path: Path | None = None
+    max_speakers: int | None = None
     calibration_candidates_path: Path | None = None
     zero_vote_reembed: bool = False
     process: asyncio.subprocess.Process | None = None
@@ -104,10 +122,18 @@ class CoreMLWorkerProcess:
         extra: list[str] = []
         if self.calibration_candidates_path is not None and self.backend != "meeting_dynamic":
             raise RuntimeError("calibration candidates are restricted to meeting diarization")
+        if self.max_speakers is not None and (
+            self.backend != "meeting_dynamic"
+            or type(self.max_speakers) is not int
+            or not 1 <= self.max_speakers <= 4
+        ):
+            raise ValueError("invalid native meeting identity budget")
         if self.backend == "meeting_dynamic":
             if self.protocol_version != 2 or self.policy_path is None:
                 raise RuntimeError("dynamic diarization requires explicit protocol and policy")
             extra = ["--backend", self.backend, "--policy", str(self.policy_path)]
+            if self.max_speakers is not None:
+                extra += ["--max-speakers", str(self.max_speakers)]
             if self.calibration_candidates_path is not None:
                 extra += ["--calibration-candidates", str(self.calibration_candidates_path)]
             if self.zero_vote_reembed:
@@ -129,6 +155,12 @@ class CoreMLWorkerProcess:
         ):
             await self.close()
             raise RuntimeError("CoreML diarization worker preflight failed")
+        if self.backend == "meeting_dynamic":
+            try:
+                validate_meeting_identity_policy(response, max_speakers=self.max_speakers)
+            except RuntimeError:
+                await self.close()
+                raise
 
     async def _launch(self, extra: list[str]) -> None:
         guard_fd = self.inherited_guard_fd

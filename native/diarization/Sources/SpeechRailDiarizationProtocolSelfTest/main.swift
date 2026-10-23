@@ -165,6 +165,26 @@ do {
         return SpeakerLocalCluster(id: name, centroid: vector,
             uniqueVoice: [SpeakerVoiceSpan(start: start, end: end)], anchors: [])
     }
+    var limited = try SessionSpeakerMatcher(policy: policy, maxSpeakers: 2)
+    let pair = try limited.assign([cluster("a",0,0,32000),cluster("b",1,0,32000)], through:32000)
+    require(pair["a"]?.slot == 0 && pair["b"]?.slot == 1, "requested pair allocation")
+    let late = try limited.assign([cluster("new",2,32000,64000)], through:64000)
+    require(late["new"]?.slot == nil && late["new"]?.reason == "speaker_capacity",
+        "underestimated count rejects late voice instead of merging")
+    let originalPair = try limited.assign([cluster("back",0,64000,96000)], through:96000)
+    require(originalPair["back"]?.slot == 0 && limited.identityCount == 2,
+        "late voice cannot evict original pair")
+    var overestimated = try SessionSpeakerMatcher(policy: policy, maxSpeakers: 4)
+    _ = try overestimated.assign([cluster("only",0,0,32000)], through:32000)
+    let interjection = try overestimated.assign([cluster("short",1,32000,38400)], through:38400)
+    require(interjection["short"]?.slot == nil && overestimated.identityCount == 1,
+        "overestimated count does not fill identities from short interjections")
+    let lateLong = try overestimated.assign([cluster("new",1,38400,70400)], through:70400)
+    require(lateLong["new"]?.slot == 1, "late supported speaker can enter available budget")
+    for bad in [0,5] {
+        do { _ = try SessionSpeakerMatcher(policy: policy, maxSpeakers: bad)
+            require(false, "invalid requested identity budget") } catch {}
+    }
     let first = try matcher.assign([cluster("left",0,0,32000), cluster("right",1,0,32000)], through: 32000)
     require(first["left"]?.slot == 0 && first["right"]?.slot == 1, "initial identities")
     let swapped = try matcher.assign([cluster("left",1,32000,64000),cluster("right",0,32000,64000)], through:64000)
@@ -186,32 +206,65 @@ do {
     do { _ = try SessionSpeakerMatcher(policy:overflowPolicy); require(false,"duration overflow rejection") } catch {}
 
     var capacity = try SessionSpeakerMatcher(policy:policy)
-    for index in 0..<32 {
+    for index in 0..<4 {
         let value = try capacity.assign([cluster("speaker",index,index*32000,(index+1)*32000)], through:(index+1)*32000)
         require(value["speaker"]?.slot == index, "monotonic identity allocator")
     }
-    let full = try capacity.assign([cluster("overflow",33,32*32000,33*32000)], through:33*32000)
+    let full = try capacity.assign([cluster("overflow",4,4*32000,5*32000)], through:5*32000)
     require(full["overflow"]?.slot == nil && full["overflow"]?.reason == "speaker_capacity", "capacity never aliases speaker")
-    require(capacity.identityCount == 32, "fixed identity cap")
+    require(capacity.identityCount == 4, "fixed four-identity cap")
+    let sixth = try capacity.assign([cluster("sixth",5,160000,192000)], through:192000)
+    require(sixth["sixth"]?.slot == nil, "sixth voice stays unknown")
+    let returns = try capacity.assign([cluster("returns",0,192000,224000)], through:224000)
+    require(returns["returns"]?.slot == 0 && capacity.identityCount == 4,
+        "extra voices cannot evict or rotate an existing identity")
+    let briefKnown = try capacity.assign([cluster("brief",0,224000,230400)], through:230400)
+    require(briefKnown["brief"]?.slot == nil && briefKnown["brief"]?.reason == "identity_uncertain",
+        "short acoustic evidence cannot borrow a known identity")
 
     var certifiedPolicy = policy
-    certifiedPolicy.certifiedMaxSpeakers = 5
+    certifiedPolicy.certifiedMaxSpeakers = 4
     certifiedPolicy.validationDigest = String(repeating: "b", count: 64)
     var certified = try SessionSpeakerMatcher(policy:certifiedPolicy)
-    for index in 0..<5 {
+    for index in 0..<4 {
         let value = try certified.assign(
             [cluster("speaker",index,index*32000,(index+1)*32000)], through:(index+1)*32000)
         require(value["speaker"]?.slot == index, "certified identity allocation")
     }
     let knownAtCapacity = try certified.assign(
         [cluster("known",4,160000,192000)], through:192000)
-    require(knownAtCapacity["known"]?.slot == 4, "certified capacity preserves known identities")
+    require(knownAtCapacity["known"]?.slot == nil, "fifth voice is rejected at certified capacity")
     let beyondCertifiedCapacity = try certified.assign(
         [cluster("sixth",5,192000,224000)], through:224000)
     require(beyondCertifiedCapacity["sixth"]?.slot == nil
         && beyondCertifiedCapacity["sixth"]?.reason == "speaker_capacity",
         "certified capacity leaves excess speakers unknown")
-    require(certified.identityCount == 5, "certified capacity never creates an extra identity")
+    require(certified.identityCount == 4, "certified capacity never creates an extra identity")
+
+    var drift = try SessionSpeakerMatcher(policy:policy)
+    _ = try drift.assign([cluster("anchor",0,0,32000)], through:32000)
+    func angled(_ degrees: Double, _ start: Int) -> SpeakerLocalCluster {
+        var vector = [Double](repeating:0,count:256)
+        vector[0] = cos(degrees * .pi / 180); vector[1] = sin(degrees * .pi / 180)
+        return .init(id:"voice",centroid:vector,
+            uniqueVoice:[.init(start:start,end:start+32000)],anchors:[])
+    }
+    _ = try drift.assign([angled(20,32000)], through:64000)
+    _ = try drift.assign([angled(40,64000)], through:96000)
+    let prototypesBeforeRefusal = drift.prototypeCount
+    let drifting = try drift.assign([angled(60,96000)], through:128000)
+    require(drifting["voice"]?.slot == nil, "representative chain cannot drift away from original anchor")
+    require(drift.prototypeCount == prototypesBeforeRefusal, "rejected voice cannot update prototypes")
+    let original = try drift.assign([cluster("original",0,128000,160000)], through:160000)
+    require(original["original"]?.slot == 0, "original identity survives rejected drift")
+
+    let mixed = SpeakerActivityDecision.resolve([
+        SpeakerMatch(slot:0,reason:nil), SpeakerMatch(slot:nil,reason:"speaker_capacity")])
+    require(mixed.slots.isEmpty && mixed.reason == "speaker_capacity",
+        "unknown overlapping voice cannot disappear behind a known voice")
+    let missing = SpeakerActivityDecision.resolve([nil])
+    require(missing.slots.isEmpty && missing.reason == "identity_uncertain",
+        "missing acoustic match must fail closed")
 
     var collision = try SessionSpeakerMatcher(policy:policy)
     _ = try collision.assign([cluster("anchor",0,0,32000)], through:32000)

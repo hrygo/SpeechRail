@@ -227,9 +227,12 @@ class OpenAIRealtimeSession:
             "alignment_enabled": bool(self._config.get("alignment_enabled", False)),
             "diarization_enabled": bool(self._auxiliary_owner.diarization_enabled),
             "diarization_backend": self._config.get("diarization_backend"),
-            "diarization_max_speakers": self._services.diarization_backend_status(
-                str(self._config.get("diarization_backend", "sortformer"))
-            )["max_speakers"],
+            "diarization_max_speakers": (
+                self._config.get("diarization_max_speakers")
+                or self._services.diarization_backend_status(
+                    str(self._config.get("diarization_backend", "sortformer"))
+                )["max_speakers"]
+            ),
             "endpointing": endpointing if isinstance(endpointing, dict) else None,
             "expected_asr_revision": (expected_asr if isinstance(expected_asr, str) else None),
             "window_scene": self._config.get("window_scene"),
@@ -328,6 +331,18 @@ class OpenAIRealtimeSession:
             "diarization_backend", "sortformer"
         ):
             raise RealtimeAdapterError("invalid_state", "diarization backend is frozen after input")
+        requested_limit = candidate.get("diarization_max_speakers")
+        if self._asr_owner.accepted_samples > 0 and requested_limit != self._config.get(
+            "diarization_max_speakers"
+        ):
+            raise RealtimeAdapterError("invalid_state", "identity budget is frozen after input")
+        if requested_limit is not None:
+            certified = self._services.diarization_backend_status(requested_backend)["max_speakers"]
+            if type(certified) is not int or requested_limit > certified:
+                raise RealtimeAdapterError(
+                    "diarization_not_available",
+                    "requested identity budget exceeds certified capacity",
+                )
         backend_engine = self._services.diarization_engine_for(requested_backend)
         if candidate.get("diarization_explicit"):
             requested_diarization = bool(candidate.get("diarization_enabled", False))
@@ -367,6 +382,7 @@ class OpenAIRealtimeSession:
             alignment=requested_alignment,
             diarization=requested_diarization,
             backend=requested_backend,
+            max_speakers=requested_limit,
         )
         self._asr_owner.apply_endpointing(endpointing)
         await self._asr_owner.configure_window(candidate)
