@@ -120,6 +120,7 @@ public struct SpeechRailSessionUpdate: Sendable {
     public let alignment: Alignment
     public let diarizationEnabled: Bool
     public let diarizationBackend: SpeechRailDiarizationBackend?
+    public let diarizationMaxSpeakers: Int?
     public let asrPolicy: SpeechRailASRPolicy?
     public let windowScene: SpeechRailWindowScene?
     /// ASR identity belongs to the connection. Voice and TTS model identity
@@ -138,6 +139,7 @@ public struct SpeechRailSessionUpdate: Sendable {
         alignment: Alignment = Alignment(enabled: false),
         diarizationEnabled: Bool = false,
         diarizationBackend: SpeechRailDiarizationBackend? = nil,
+        diarizationMaxSpeakers: Int? = nil,
         asrPolicy: SpeechRailASRPolicy? = nil,
         windowScene: SpeechRailWindowScene? = nil,
         expectedASRRevision: String? = nil,
@@ -155,6 +157,7 @@ public struct SpeechRailSessionUpdate: Sendable {
         self.alignment = alignment
         self.diarizationEnabled = diarizationEnabled
         self.diarizationBackend = diarizationBackend
+        self.diarizationMaxSpeakers = diarizationMaxSpeakers
         self.asrPolicy = asrPolicy
         self.windowScene = windowScene
         self.expectedASRRevision = expectedASRRevision
@@ -177,6 +180,11 @@ public struct SpeechRailSessionUpdate: Sendable {
         if let endpointing { speechrail["endpointing"] = endpointing.jsonObject }
         if let diarizationBackend {
             speechrail["diarization"] = ["enabled": diarizationEnabled, "backend": diarizationBackend.rawValue]
+        }
+        if diarizationEnabled, let diarizationMaxSpeakers {
+            var options = speechrail["diarization"] as? [String: Any] ?? [:]
+            options["max_speakers"] = diarizationMaxSpeakers
+            speechrail["diarization"] = options
         }
         if let windowScene {
             speechrail["window"] = ["mode": "revision_window_v1", "scene": windowScene.rawValue]
@@ -1009,8 +1017,11 @@ public struct SpeechRailDiarizationCapacity: Codable, Sendable, Equatable {
     public let maxSpeakers: Int?
     public let systemCap: Int
     enum CodingKeys: String, CodingKey { case enabled, backend; case maxSpeakers = "max_speakers", systemCap = "system_cap" }
+    public func acceptsRequestedMaximum(_ requested: Int?) -> Bool {
+        isValid && (requested == nil || requested == maxSpeakers)
+    }
     public var isValid: Bool {
-        systemCap == (backend == .meetingDynamic ? 32 : 4)
+        systemCap == 4
             && maxSpeakers.map { (1...systemCap).contains($0) } == true
     }
 }

@@ -44,7 +44,7 @@ def test_unknown_overlap_keeps_every_character_of_coarse_text():
     assert len(emitted) == 1
     assert emitted[0].text == " hello, world!"
     assert emitted[0].speaker == "unknown"
-    assert emitted[0].reason == "insufficient_evidence"
+    assert emitted[0].reason == "identity_uncertain"
     assert emitted[0].granularity == "utterance"
 
 

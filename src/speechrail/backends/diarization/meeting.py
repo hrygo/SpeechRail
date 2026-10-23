@@ -81,7 +81,7 @@ def read_matching_policy(path: Path) -> dict[str, object]:
 class MeetingDiarizationEngine:
     supports_stream = True
     backend = "meeting_dynamic"
-    system_cap = 32
+    system_cap = 4
 
     def __init__(
         self,
@@ -108,7 +108,7 @@ class MeetingDiarizationEngine:
             validation = policy.get("validation_digest")
             certified = (
                 type(count) is int
-                and 5 <= count <= 32
+                and 1 <= count <= self.system_cap
                 and isinstance(validation, str)
                 and len(validation) == 64
                 and all(c in "0123456789abcdef" for c in validation)
@@ -135,11 +135,19 @@ class MeetingDiarizationEngine:
             profile="meeting-dynamic-community1",
         )
 
-    def open(self, *, epoch: str) -> MeetingActivitySession:
+    def open(self, *, epoch: str, max_speakers: int | None = None) -> MeetingActivitySession:
         if not self.readiness.ready:
             raise DiarizationError(
                 self.readiness.message, code=self.readiness.code or "model_not_ready"
             )
+        if max_speakers is not None and (
+            type(max_speakers) is not int or not 1 <= max_speakers <= (self.max_speakers or 4)
+        ):
+            raise DiarizationError(
+                "requested identity budget exceeds certified capacity",
+                code="diarization_not_available",
+            )
+        effective_limit = max_speakers or self.max_speakers or 4
         generation = self._governor.diarization_owner.claim(epoch)
         try:
             worker = (
@@ -153,6 +161,7 @@ class MeetingDiarizationEngine:
                     policy_path=self._policy_path,
                 )
             )
+            worker.max_speakers = effective_limit
         except BaseException:
             self._governor.diarization_owner.release(generation, reaped=True)
             raise
@@ -163,6 +172,7 @@ class MeetingDiarizationEngine:
             pcm_budget=self._pcm_budget,
             metrics=self._metrics,
             generation=generation,
+            max_speakers=effective_limit,
         )
 
 
@@ -178,9 +188,13 @@ class MeetingActivitySession:
         pcm_budget: PcmBudget | None = None,
         metrics: Metrics | None = None,
         generation: int | None = None,
+        max_speakers: int = 4,
     ) -> None:
         if not epoch:
             raise ValueError("activity epoch is required")
+        if type(max_speakers) is not int or not 1 <= max_speakers <= 4:
+            raise ValueError("invalid meeting identity budget")
+        self._max_speakers = max_speakers
         self._worker, self._epoch, self._governor = worker, epoch, governor
         self._lease = DiarizationWorkerLease(
             worker=worker, governor=governor,
@@ -413,6 +427,7 @@ class MeetingActivitySession:
                 or end > processed
                 or not isinstance(slots, list)
                 or any(type(s) is not int for s in slots)
+                or any(not 0 <= s < self._max_speakers for s in slots)
                 or len(set(slots)) != len(slots)
             ):
                 raise ValueError("activity IPC coverage is invalid")
@@ -426,7 +441,11 @@ class MeetingActivitySession:
         diagnostics = response.get("diagnostics")
         counts: dict[str, int] = {}
         if diagnostics is not None:
-            limits = {"identities": 32, "prototypes": 96, "candidates": 32}
+            limits = {
+                "identities": self._max_speakers,
+                "prototypes": self._max_speakers * 3,
+                "candidates": 32,
+            }
             if not isinstance(diagnostics, dict) or set(diagnostics) != set(limits):
                 raise ValueError("invalid activity diagnostics")
             for key, maximum in limits.items():

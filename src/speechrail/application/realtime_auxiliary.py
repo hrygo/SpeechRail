@@ -146,6 +146,7 @@ class RealtimeAuxiliaryOwner:
         self._alignment_enabled = False
         self._diarization_enabled = False
         self._diarization_backend = "sortformer"
+        self._diarization_max_speakers: int | None = None
 
         self._ledger: AttributionLedger | None = None
         self._diarization_phase = "active"
@@ -186,10 +187,19 @@ class RealtimeAuxiliaryOwner:
         return self._degraded_reason
 
     async def configure(
-        self, *, alignment: bool, diarization: bool, backend: str = "sortformer"
+        self, *, alignment: bool, diarization: bool, backend: str = "sortformer",
+        max_speakers: int | None = None
     ) -> None:
         if self._diarization is not None and backend != self._diarization_backend:
             raise RealtimeAdapterError("invalid_state", "active diarization backend is frozen")
+        if self._diarization is not None and max_speakers != self._diarization_max_speakers:
+            # The adapter freezes this after input; before input a fresh matcher
+            # is required so an already-created worker cannot keep the old cap.
+            if self._diarization.accepted_samples > 0:
+                raise RealtimeAdapterError("invalid_state", "identity budget is frozen after input")
+            await self._close_diarization()
+        previous_limit = self._diarization_max_speakers
+        self._diarization_max_speakers = max_speakers
         previous_backend = self._diarization_backend
         self._diarization_backend = backend
         previous = self._diarization_enabled
@@ -201,6 +211,7 @@ class RealtimeAuxiliaryOwner:
                 await self._close_diarization()
                 self._diarization_enabled = previous
                 self._diarization_backend = previous_backend
+                self._diarization_max_speakers = previous_limit
                 raise
         else:
             await self._close_diarization()
@@ -895,9 +906,9 @@ class RealtimeAuxiliaryOwner:
                 accepted_samples=lambda: holder["session"].accepted_samples,
                 label_mode=self._diarization_backend,
             )
-            self._diarization = DiarizationSession(
-                activity=engine.open(epoch=epoch), ledger=self._ledger
-            )
+            activity = (engine.open(epoch=epoch, max_speakers=self._diarization_max_speakers)
+                        if self._diarization_max_speakers is not None else engine.open(epoch=epoch))
+            self._diarization = DiarizationSession(activity=activity, ledger=self._ledger)
             self._diarization_epoch = epoch
             holder["session"] = self._diarization
             await self._diarization.start()

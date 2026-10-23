@@ -17,7 +17,7 @@ public struct SpeakerScopeBinding: Sendable, Equatable {
     }
     public var prefix: String { "d" + scope.uuidString.replacingOccurrences(of: "-", with: "").lowercased() + ":" }
     public mutating func serverLabel(_ raw: String, capacity: Int) throws -> String {
-        guard (1...32).contains(capacity), raw.first == "S", let index = Int(raw.dropFirst()),
+        guard (1...4).contains(capacity), raw.first == "S", let index = Int(raw.dropFirst()),
               (1...capacity).contains(index), raw == "S\(index)" else { throw Failure.invalidLabel }
         let label = prefix + raw
         guard allocated.contains(label) || allocated.count < capacity else { throw Failure.capacityExceeded }
@@ -26,9 +26,9 @@ public struct SpeakerScopeBinding: Sendable, Equatable {
     }
     public mutating func allocateUserLabel(existing: Set<String>, capacity: Int) throws -> String {
         let used = allocated.union(existing.filter { $0.hasPrefix(prefix) })
-        guard (1...32).contains(capacity), used.count < capacity else { throw Failure.capacityExceeded }
-        while nextUser <= 32 && used.contains(prefix + "U\(nextUser)") { nextUser += 1 }
-        guard nextUser <= 32 else { throw Failure.capacityExceeded }
+        guard (1...4).contains(capacity), used.count < capacity else { throw Failure.capacityExceeded }
+        while nextUser <= 4 && used.contains(prefix + "U\(nextUser)") { nextUser += 1 }
+        guard nextUser <= 4 else { throw Failure.capacityExceeded }
         let label = prefix + "U\(nextUser)"
         nextUser += 1
         allocated = used.union([label])

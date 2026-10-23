@@ -210,7 +210,7 @@ def test_streaming_and_meeting_engines_share_owner_before_both_factories(tmp_pat
         meeting,
         "read_matching_policy",
         lambda _: {
-            "certified_max_speakers": 8,
+            "certified_max_speakers": 4,
             "validation_digest": "a" * 64,
         },
     )

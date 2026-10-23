@@ -26,13 +26,15 @@ final class MeetingDiarizationWorker {
         let acousticPolicy: DiarizationAcousticPolicy
         let matchingEmbeddingSpace: DiarizationMatchingEmbeddingSpace
     }
+    var maxSpeakers: Int { matcher.identityCapacity }
     private var history: [Activity] = []
 
     init(
         modelDirectory: String,
         policyPath: String,
         calibrationCandidatesPath: String? = nil,
-        zeroVoteReembed: Bool = false
+        zeroVoteReembed: Bool = false,
+        maxSpeakers: Int? = nil
     ) throws {
         guard !zeroVoteReembed || calibrationCandidatesPath != nil else {
             throw MeetingWorkerError.invalidPolicy
@@ -40,7 +42,7 @@ final class MeetingDiarizationWorker {
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
         let policy = try decoder.decode(SpeakerMatchingPolicy.self,
             from: Data(contentsOf: URL(fileURLWithPath: policyPath)))
-        self.matcher = try SessionSpeakerMatcher(policy: policy)
+        self.matcher = try SessionSpeakerMatcher(policy: policy, maxSpeakers: maxSpeakers)
         if let calibrationCandidatesPath {
             let bytes = try Data(contentsOf: URL(fileURLWithPath: calibrationCandidatesPath))
             let candidates = try DiarizationCalibrationCandidate.decodeArray(bytes)
@@ -269,13 +271,11 @@ final class MeetingDiarizationWorker {
                 frames.append(["start":previous,"end":start,"active_slots":[Int](),"reason":"activity_gap"])
             }
             for (a,b,active) in analysis.localActivity where b > max(previous,start) {
-                let slots = Set(active.compactMap { matches[$0]?.slot })
+                let decision = SpeakerActivityDecision.resolve(active.map { matches[$0] })
+                let slots = decision.slots
                 let begin = max(a,previous)
                 var frame: [String:Any] = ["start":begin,"end":b,"active_slots":slots.sorted()]
-                if slots.isEmpty && !active.isEmpty {
-                    frame["reason"] = active.contains(where:{ matches[$0]?.reason == "speaker_capacity" })
-                        ? "speaker_capacity" : "identity_uncertain"
-                }
+                if let reason = decision.reason { frame["reason"] = reason }
                 frames.append(frame); next.append(Activity(start:begin,end:b,slots:slots))
             }
             guard next.count <= 16384 else { throw MeetingWorkerError.invalidRequest }

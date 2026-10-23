@@ -69,7 +69,7 @@ class Worker:
             "stable_through": end
             if header["final"]
             else max(header["previous_stable"], end - 160000),
-            "frames": [{"start": header["previous_stable"], "end": end, "active_slots": [4]}],
+            "frames": [{"start": header["previous_stable"], "end": end, "active_slots": [3]}],
         }, b""
 
     async def close(self):

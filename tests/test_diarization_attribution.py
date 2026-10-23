@@ -441,7 +441,7 @@ def test_replacement_clips_a_crossing_frame_without_losing_the_stable_prefix() -
             step=1,
             start=0,
             end=20 * 16000,
-            frames=(ActivityFrame(SampleSpan(0, 20 * 16000), None, frozenset({4})),),
+            frames=(ActivityFrame(SampleSpan(0, 20 * 16000), None, frozenset({3})),),
             processed=20 * 16000,
             stable=10 * 16000,
         )
@@ -449,23 +449,23 @@ def test_replacement_clips_a_crossing_frame_without_losing_the_stable_prefix() -
     (first,) = ledger.register(
         "item", (TextUnit("crossing", 0, 1, SampleSpan(9 * 16000, 11 * 16000)),)
     )
-    assert first.speaker == "S5" and first.state == "provisional"
+    assert first.speaker == "S4" and first.state == "provisional"
     changed = ledger.apply(
         _update(
             step=2,
             start=10 * 16000,
             end=30 * 16000,
-            frames=(ActivityFrame(SampleSpan(10 * 16000, 30 * 16000), None, frozenset({4})),),
+            frames=(ActivityFrame(SampleSpan(10 * 16000, 30 * 16000), None, frozenset({3})),),
             processed=30 * 16000,
             stable=20 * 16000,
         )
     )
     assert len(changed) == 1
-    assert changed[0].state == "final" and changed[0].speaker == "S5"
+    assert changed[0].state == "final" and changed[0].speaker == "S4"
     (before,) = ledger.register(
         "late-fixed-text", (TextUnit("prefix", 0, 1, SampleSpan(0, 10 * 16000)),)
     )
-    assert before.speaker == "S5" and before.state == "final"
+    assert before.speaker == "S4" and before.state == "final"
 
 
 def test_duplicate_activity_step_is_idempotent_but_conflict_fails() -> None:

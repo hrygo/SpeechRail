@@ -50,186 +50,407 @@ extension MeetingView {
     /// 想连电脑里的声音一起记的人展开就有全部选择，不想的人一眼都不用扫。
     /// 2026-10-20 布局与间距优化：将「会议主题」与「音频拾音环境」收敛为紧凑的会前配置面板，
     /// 限制音源展开区的最大高度，把充足的纵向视口留给下方的「会议记录库」。
+    /// 空态（首屏）：一体化会议发起控制台（Launcher），整合主题输入、主行动点、音源与发言人快速配置及会议记录库。
     private var emptyState: some View {
         VStack(spacing: SpeechRailDesignTokens.Spacing.md) {
-            SessionConclusionBand(
-                tone: .healthy,
-                title: "直接开始就能记",
-                message: "默认从麦克风记房间里的声音。想连这台 Mac 正在放的声音（腾讯会议、"
-                    + "QQ 音乐等）一起记，在下面展开勾一个 App 就行。",
-                hint: "原始音频不留存，只有文字进记录库；本机音频不需要装虚拟声卡，"
-                    + "也不改变你听到的音量和内容。"
-            ) {
-                Button("开始会议") { Task { await start() } }
-                    .speechRailButton(.primary)
-                    .help("按当前所选音源开始录制（⌘⇧N）；首次使用麦克风会请求系统授权")
-            }
-
-            CardSurface {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    titleField
-                    SessionHairline()
-                    sourceOptions
-                }
-                .padding(SpeechRailDesignTokens.Spacing.md)
-            }
-
+            launcherCard
             libraryCard
         }
         .frame(maxHeight: .infinity, alignment: .topLeading)
     }
 
-    /// 「按什么来源记」是**可选项**，默认收起成一行。
-    ///
-    /// 理由（用户 2026-09-19：「门槛极高」）：默认就是麦克风，直接按「开始会议」即可开始。
-    /// 本机音频那 9 个 App 的清单 + 两张「来源不可用时」的处置卡摆在首屏，
-    /// 等于让人在按「开始」之前先读完一份设置手册。这里折成一行，展开才有全部选择。
-    private var sourceOptions: some View {
-        DisclosureGroup(isExpanded: $showsSourceOptions) {
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    SessionPanel { sourcesCard }
-                    if sourceCandidates.isEmpty {
-                        SessionPanel { blockedSourcesCard }
+    /// 一体化会前启动台：统一标题输入、唯一开始主按钮、横向拾音与发言人配置栏。
+    private var launcherCard: some View {
+        CardSurface {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+                // 卡片顶栏：明确意图 + 唯一的 Primary CTA
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Image(systemName: "waveform.badge.mic")
+                            .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+                            Text("快速发起会议")
+                                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                            Text("边开会边记 · 角色分离 · 自动合流 · 仅存本机")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+                    }
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.md)
+
+                    Button {
+                        Task { await start() }
+                    } label: {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                            Image(systemName: "mic.fill")
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                            Text("开始会议")
+                                .font(SpeechRailDesignTokens.Typography.calloutMedium)
+                            Text("⌘⇧N")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.rail.opacity(0.85))
+                        }
+                    }
+                    .speechRailButton(.primary)
+                    .disabled(meeting.minutes.isBusy)
+                    .help("按当前所选音源开始录制（快捷键 ⌘⇧N）")
+                }
+
+                if meeting.minutes.isBusy {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        ProgressView().controlSize(.small)
+                        Text("上一场纪要正在整理，完成后可开始新会议。")
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                        Spacer(minLength: 0)
+                        Button("停止整理") { meeting.minutes.stop() }
+                            .buttonStyle(.bordered)
                     }
                 }
-                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+
+                // 核心主题输入槽
+                titleField
+
+                // 快捷参数控制栏（横向排布）
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    audioSourceControls
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                    speakerCapacityControls
+                }
+
+                // 应用音频抽屉（折叠/展开）
+                if showsSourceOptions {
+                    sourceOptionsDrawer
+                }
+
+                // 底部轻量安全与隐私背书
+                SessionHairline()
+                privacyTrustFooter
             }
-            .frame(maxHeight: SpeechRailDesignTokens.Layout.meetingSourceOptionsMaxHeight)
-        } label: {
+            .padding(SpeechRailDesignTokens.Spacing.md)
+        }
+    }
+
+    /// 音频来源快捷胶囊（麦克风开关 + 应用音频展开）
+    private var audioSourceControls: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Button {
+                usesMicrophone.toggle()
+            } label: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Image(systemName: usesMicrophone ? "mic.fill" : "mic.slash")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(usesMicrophone ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkTertiary)
+                    Text("麦克风")
+                        .font(SpeechRailDesignTokens.Typography.calloutMedium)
+                        .foregroundStyle(usesMicrophone ? SpeechRailDesignTokens.Color.ink : SpeechRailDesignTokens.Color.inkSecondary)
+                    Circle()
+                        .fill(usesMicrophone ? SpeechRailDesignTokens.Color.ready : SpeechRailDesignTokens.Color.inkTertiary)
+                        .frame(width: 6, height: 6)
+                }
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
+                .background(usesMicrophone ? SpeechRailDesignTokens.Color.rail.opacity(0.12) : SpeechRailDesignTokens.Color.recessedField)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(usesMicrophone ? SpeechRailDesignTokens.Color.rail.opacity(0.3) : SpeechRailDesignTokens.Surface.border, lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .speechRailPointerCursor()
+            .help(usesMicrophone ? "已开启麦克风录制（点击可关闭）" : "麦克风已关闭（点击开启）")
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showsSourceOptions.toggle()
+                }
+            } label: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Image(systemName: "macbook.and.iphone")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(!systemApps.isEmpty ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkSecondary)
+                    Text(systemApps.isEmpty ? "录制应用声音…" : "已选 \(systemApps.count) 个应用声音")
+                        .font(SpeechRailDesignTokens.Typography.calloutMedium)
+                        .foregroundStyle(!systemApps.isEmpty ? SpeechRailDesignTokens.Color.ink : SpeechRailDesignTokens.Color.inkSecondary)
+                    Image(systemName: showsSourceOptions ? "chevron.up" : "chevron.down")
+                        .font(SpeechRailDesignTokens.Typography.chipIcon)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                }
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
+                .background(!systemApps.isEmpty ? SpeechRailDesignTokens.Color.rail.opacity(0.12) : SpeechRailDesignTokens.Color.recessedField)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(!systemApps.isEmpty ? SpeechRailDesignTokens.Color.rail.opacity(0.3) : SpeechRailDesignTokens.Surface.border, lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .speechRailPointerCursor()
+            .help("勾选正在发声的 App（如腾讯会议、音乐等）进行自动混音录制")
+        }
+    }
+
+    /// 发言人区分容量配置胶囊
+    private var speakerCapacityControls: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Image(systemName: "person.2.fill")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(preferences.meetingDiarizationEnabled ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkTertiary)
+            Text("发言人:")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            Picker("发言人", selection: $expectedSpeakerCount) {
+                ForEach(MeetingExpectedSpeakerCount.allCases) { count in
+                    Text(count.title).tag(count)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .disabled(!preferences.meetingDiarizationEnabled)
+            .help(!preferences.meetingDiarizationEnabled
+                ? "在设置 → 会话开启「会议显示说话人」后生效"
+                : expectedSpeakerCount == .moreThanFour
+                ? "最多区分 4 位说话人，其余或不确定的发言标为未识别；文字照常保留"
+                : "选择人数后，超出或不确定的发言会标为未识别；文字照常保留")
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+        .background(SpeechRailDesignTokens.Color.recessedField)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: 1)
+        }
+    }
+
+    /// 展开的应用音频抽屉：精炼说明 + 原生图标 App 列表
+    private var sourceOptionsDrawer: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Image(systemName: "waveform.and.mic")
-                    .font(SpeechRailDesignTokens.Typography.navigationIcon)
+                Image(systemName: "info.circle")
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                Text("音频拾音环境（可选配置）")
+                Text("勾选正在播放声音的 App，将与麦克风自动合流识别；App 退出或重启会自动接回。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer(minLength: 0)
+                Button {
+                    refreshSources()
+                } label: {
+                    HStack(spacing: 2) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                        Text("重新扫描")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                    }
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                }
+                .buttonStyle(.plain)
+                .speechRailPointerCursor()
+                .help("重新检测正在运行的音频应用程序")
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+            .padding(.top, SpeechRailDesignTokens.Spacing.micro)
+
+            if sourceCandidates.isEmpty {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Image(systemName: "waveform.slash")
+                        .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+                        Text("未检测到正在出声的普通应用程序")
+                            .font(SpeechRailDesignTokens.Typography.calloutMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        Text("请先启动会议或音乐软件并播放声音，然后点击右上角「重新扫描」。")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    }
+                    Spacer()
+                    Button("打开系统设置…") { openAudioPrivacySettings() }
+                        .speechRailButton(.secondary)
+                }
+                .padding(SpeechRailDesignTokens.Spacing.md)
+                .background(SpeechRailDesignTokens.Color.recessedField)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                ScrollView(.vertical) {
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        ForEach(sourceCandidates) { app in
+                            appAudioRow(app)
+                        }
+                    }
+                    .padding(SpeechRailDesignTokens.Spacing.micro)
+                }
+                .frame(maxHeight: SpeechRailDesignTokens.Layout.meetingSourceOptionsMaxHeight)
+                .background(SpeechRailDesignTokens.Color.recessedField)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: 1)
+                }
+            }
+        }
+        .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+    }
+
+    private func appAudioRow(_ app: SystemAudioApp) -> some View {
+        let isSelected = systemApps.contains(app)
+        return Button {
+            binding(for: app).wrappedValue.toggle()
+        } label: {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                appIconView(for: app)
+                    .frame(width: 22, height: 22)
+
+                Text(app.name)
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                StatusPill(
-                    tone: (usesMicrophone || !systemApps.isEmpty) ? .healthy : .attention,
-                    label: sourceSummaryText
-                )
-                Spacer(minLength: 0)
+                    .lineLimit(1)
+
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                if isSelected {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        Image(systemName: "checkmark")
+                            .font(SpeechRailDesignTokens.Typography.chipIcon)
+                        Text("已选录制")
+                            .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    }
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                    .padding(.vertical, 3)
+                    .background(SpeechRailDesignTokens.Color.rail.opacity(0.12))
+                    .clipShape(Capsule())
+                } else {
+                    Text("未选")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                        .padding(.vertical, 3)
+                }
             }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
+            .contentShape(Rectangle())
+            .background(isSelected ? SpeechRailDesignTokens.Color.field.opacity(0.6) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
         }
-        .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
+        .buttonStyle(.plain)
+        .speechRailPointerCursor()
     }
 
-    /// 收起时也要一眼看见「这一场到底在录什么」——所以摘要说来源名字，不说技术词。
-    private var sourceSummaryText: String {
-        var parts: [String] = []
-        if usesMicrophone { parts.append("麦克风") }
-        parts.append(contentsOf: systemApps.map(\.name))
-        guard !parts.isEmpty else { return "未选任何来源" }
-        return "当前：" + parts.joined(separator: " + ")
-    }
-
-    /// 音频来源：麦克风一行、本机音频按 App 若干行，最后一行是「自动混音」——
-    /// 它是**行为**，不是用户要选的第三个选项（`AudioSourceCoordinator.swift:12`）。
-    private var sourcesCard: some View {
-        SessionPanel {
-            SessionPanelHead(
-                title: "音频来源",
-                detail: "可同时勾选麦克风与多个正在发声的 App。多路音源同时开启时将自动混音识别，记录来源如实标记为「合流」。"
+    private func appIconView(for app: SystemAudioApp) -> some View {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleID) {
+            let icon = NSWorkspace.shared.icon(forFile: url.path)
+            return AnyView(
+                Image(nsImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
             )
-            SessionHairline()
-            SessionCheckRow(
-                tone: usesMicrophone ? .ready : .neutral,
-                name: "麦克风",
-                detail: "房间里的人。第一次开始时会请求授权；拒绝后这一行变受阻并给出出口。",
-                onSelect: { usesMicrophone.toggle() }
-            ) {
-                StatusPill(tone: usesMicrophone ? .healthy : .neutral, label: usesMicrophone ? "已选" : "未选")
+        } else {
+            return AnyView(
+                Image(systemName: "app.fill")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            )
+        }
+    }
+
+    /// 底部轻量安全与隐私背书
+    private var privacyTrustFooter: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Image(systemName: "lock.shield")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                Text("全离线安全处理，文字仅保存在本机")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
-            ForEach(sourceCandidates) { app in
-                SessionHairline()
-                SessionCheckRow(
-                    tone: systemApps.contains(app) ? .ready : .neutral,
-                    name: app.name,
-                    detail: "本机音频：抓这个 App 正在播放的声音；它退出再启动会自动接回，不用重新选。",
-                    onSelect: { binding(for: app).wrappedValue.toggle() }
-                ) {
-                    StatusPill(
-                        tone: systemApps.contains(app) ? .healthy : .neutral,
-                        label: systemApps.contains(app) ? "已选" : "未选"
-                    )
-                }
-            }
-            if !systemApps.isEmpty {
-                SessionHairline()
-                SessionCheckRow(
-                    tone: .selected,
-                    name: "自动混音",
-                    detail: "多来源同时勾选时自动合流处理；记录行上的来源会如实记为「合流」。"
-                ) {
-                    StatusPill(tone: .healthy, label: "生效中")
-                }
+            Text("·")
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Image(systemName: "waveform")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                Text("无需虚拟声卡，原始音频不存盘")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             Spacer(minLength: 0)
-            SessionHairline()
-            CardFoot(note: "来源列表只列正在出声或最近出过声的 App；列表为空时先去那个 App 里放一声。") {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button("检查麦克风音量…") { isCheckingInput = true }
-                        .speechRailButton(.secondary)
-                        .help("查看当前麦克风的实时音量反应")
-                    Button("刷新列表") { refreshSources() }
-                        .speechRailButton(.secondary)
-                }
-            }
-        }
-    }
-
-    /// 来源不可用的两种**当下就能处置**的情况。第三种（录制中来源中断）出现在录制页自己的
-    /// 中断卡上——这里不摆一个按了不动的「知道了」。
-    private var blockedSourcesCard: some View {
-        SessionPanel {
-            SessionPanelHead(
-                title: "来源不可用时",
-                detail: nil,
-                trailingDetail: "各自一行，说明影响与唯一出口；不弹对话框、不静默留空。"
-            )
-            SessionHairline()
-            SessionCheckRow(
-                tone: .attention,
-                name: "列表为空",
-                detail: "没有正在出声的 App：先去那个 App 里放一声再回来选；麦克风这一路不受影响。"
-            ) {
-                Button("重新扫描") { refreshSources() }
-                    .speechRailButton(.secondary)
-            }
-            SessionHairline()
-            SessionCheckRow(
-                tone: .attention,
-                name: "未授权",
-                detail: "本机音频：系统里没给「音频录制」权限时那一路会是空音轨——不如现在说清楚。"
-            ) {
-                Button("打开系统设置") { openAudioPrivacySettings() }
-                    .speechRailButton(.secondary)
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Image(systemName: "sparkles")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                Text("多路音源自动合流")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
             }
         }
     }
 
     var meetingInfoCard: some View {
-        SessionPanel {
-            SessionPanelHead(title: "本次会议", badge: "还没有开始")
-            SessionHairline()
-            VStack(alignment: .leading, spacing: 10) {
-                // 「档位」这个词在**会话页**叫「识别精度」（`SESSIONS-SPEC` §16.3 判据 2
-                // 的术语表）：这一页要说的是"你现在拿到的是哪一档质量"，不是"运行选择器"。
-                // 那个选择器在设置与模型页，那边仍叫「档位」。
-                SessionKVRow("识别精度", profileRowText)
-                SessionKVRow("音频来源", sourceSummary)
-                SessionKVRow("发言人区分", preferences.meetingDiarizationEnabled ? "已开启" : "未开启")
-                SessionKVRow("纪要整理", preferences.isLLMConfigured(for: .minutes) ? "结束后自动生成" : "未配置模型（仅存文字）")
-                SessionKVRow("保存位置", "记录库 · 长期保留")
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            CardSurface {
+                VStack(alignment: .leading, spacing: 0) {
+                    CardHead(
+                        title: "本次会议",
+                        detail: "会前就绪概览"
+                    ) {
+                        StatusPill(
+                            tone: (usesMicrophone || !systemApps.isEmpty) ? .healthy : .attention,
+                            label: (usesMicrophone || !systemApps.isEmpty) ? "已就绪" : "待配置"
+                        )
+                    }
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.top, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+
+                    SessionHairline()
+
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        SessionKVRow("识别精度", profileRowText)
+                        SessionKVRow("音频来源", sourceSummary)
+                        SessionKVRow("发言人区分", preferences.meetingDiarizationEnabled
+                            ? expectedSpeakerCount.title
+                            : "未开启")
+                        SessionKVRow("纪要整理", preferences.isLLMConfigured(for: .minutes) ? "结束后自动生成" : "未配置模型（仅存文字）")
+                        SessionKVRow("数据存储", "SQLite 本地库 · 长期保存")
+                    }
+                    .padding(SpeechRailDesignTokens.Spacing.md)
+                }
             }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
-            Spacer(minLength: 0)
-            SessionHairline()
-            SessionPanelActions(alignment: .spread) {
-                Button("检查麦克风音量…") { isCheckingInput = true }
-                    .speechRailButton(.secondary)
-                    .help("查看当前麦克风的实时音量反应")
+
+            CardSurface {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Image(systemName: "waveform.and.mic")
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        Text("麦克风收音检测")
+                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        Spacer()
+                    }
+
+                    Text("开会前快速确认麦克风拾音电平与反应，不录音也不留文件。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack {
+                        Spacer()
+                        Button("检查麦克风音量…") { isCheckingInput = true }
+                            .speechRailButton(.secondary)
+                            .help("查看当前麦克风的实时音量反应")
+                    }
+                    .padding(.top, SpeechRailDesignTokens.Spacing.micro)
+                }
+                .padding(SpeechRailDesignTokens.Spacing.md)
             }
         }
     }
@@ -280,30 +501,40 @@ extension MeetingView {
     /// 让用户重打一遍他没有能力消除的那个问题，是白添摩擦。
     private var titleField: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text("主题")
+            Image(systemName: "bubble.left.and.text.bubble.right")
                 .font(SpeechRailDesignTokens.Typography.callout)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            TextField("输入主题或直接回车开始（可留空）", text: $titleDraft)
+                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+
+            TextField("输入本次会议主题，如「产品规划讨论」（可留空，直接按 ↵ 开始）", text: $titleDraft)
                 .textFieldStyle(.plain)
+                .font(SpeechRailDesignTokens.Typography.body)
                 .onSubmit {
                     Task { await start() }
                 }
                 .accessibilityLabel("这场会议的标题，输入后可按回车直接开始，也可以留空")
-            Button {
-                Task { await start() }
-            } label: {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Text("开始")
-                        .font(SpeechRailDesignTokens.Typography.captionMedium)
-                    Image(systemName: "return")
-                        .font(SpeechRailDesignTokens.Typography.chipIcon)
+
+            if !titleDraft.isEmpty {
+                Button {
+                    titleDraft = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 }
-                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                .buttonStyle(.plain)
+                .speechRailPointerCursor()
+                .help("清空标题")
             }
-            .buttonStyle(.plain)
-            .speechRailPointerCursor()
-            .help("按回车或点击此按钮立即开始会议")
-            .accessibilityLabel("立即开始会议")
+
+            HStack(spacing: 2) {
+                Text("↵ 开始")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
+            .padding(.vertical, 2)
+            .background(SpeechRailDesignTokens.Color.recessedField)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
         }
         .speechRailSingleLineInput(.regular)
     }
@@ -316,7 +547,9 @@ extension MeetingView {
                 usesMicrophone: usesMicrophone,
                 systemApps: systemApps.map { MeetingAudioApp(bundleID: $0.bundleID, name: $0.name) }
             ),
-            title: titleDraft
+            title: titleDraft,
+            expectedSpeakerCount: expectedSpeakerCount
         )
+        if meeting.phase == .recording { expectedSpeakerCount = .uncertain }
     }
 }

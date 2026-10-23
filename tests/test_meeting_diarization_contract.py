@@ -1,4 +1,4 @@
-"""Backend-independent evidence supports anonymous sessions beyond four slots."""
+"""Meeting evidence identifies at most four stable anonymous speakers."""
 
 import pytest
 
@@ -7,7 +7,7 @@ from speechrail.domain.diarization.attribution import AttributionLedger
 from speechrail.domain.diarization.types import ActivityFrame, ActivityUpdate, TextUnit
 
 
-@pytest.mark.parametrize("slot", [4, 15, 31])
+@pytest.mark.parametrize("slot", [0, 1, 3])
 def test_dynamic_activity_has_no_fabricated_probability_and_stable_numeric_label(slot):
     frame = ActivityFrame(SampleSpan(0, 16000), None, frozenset({slot}))
     ledger = AttributionLedger(accepted_samples=lambda: 16000, label_mode="meeting_dynamic")

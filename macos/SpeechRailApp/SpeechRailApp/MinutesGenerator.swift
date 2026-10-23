@@ -45,6 +45,8 @@ public final class MinutesGenerator {
         }
     }
 
+    public private(set) var sessionID: String?
+    private var presentationRevision: UInt64 = 0
     public private(set) var state: State = .idle
     public private(set) var versions: [MinutesVersion] = []
     public private(set) var latestBody: String?
@@ -94,6 +96,7 @@ public final class MinutesGenerator {
     /// 在飞的那一次整理。`stop()` 取消的是它——界面上的「停止整理」要真的停下，
     /// 而不是只把按钮换掉（设计稿 `会议助手 · 会议页 · 整理中` 给出这个出口）。
     private var runTask: Task<Void, Never>?
+    private var cancellationRequested = false
     /// 在飞的那一版纪要行。停止时按它写取消请求——取消的是**指定任务**，
     /// 不影响另一场正在记录的会议，也不删旧纪要（MC-22/MC-30）。
     private var inFlightMinutesID: String?
@@ -125,6 +128,7 @@ public final class MinutesGenerator {
         resolvedConfiguration: ResolvedLLMConfiguration
     ) async {
         guard inFlight == nil else { return }
+        bindPresentation(to: sessionID)
         inFlight = sessionID
         defer { inFlight = nil }
         state = .queued
@@ -166,31 +170,50 @@ public final class MinutesGenerator {
             )
             versions = try await coordinator.minutesVersions(sessionID: sessionID)
             versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
+            if cancellationRequested {
+                guard let claimed = try await coordinator.claimMinutes(sessionID: sessionID, lease: Self.lease),
+                      claimed.id == version.id else { throw LLMError.transport("这一版未能认领，请刷新状态。") }
+                _ = try await coordinator.requestCancelMinutes(minutesID: claimed.id)
+                guard try await coordinator.cancelMinutesIfOwner(minutesID: claimed.id, expectedAttempts: claimed.attempts)
+                else { throw LLMError.transport("这一版已由其他整理任务接管，请刷新状态。") }
+                state = .cancelled
+                remoteCancellationNote = "这一次尚未发送整理请求。"
+                versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? versions
+                return
+            }
             guard !configuration.isConfigured else {
                 let task = Task { [weak self] in
-                    _ = try? await self?.run(
-                        version: version,
-                        units: units,
-                        supplements: supplements,
-                        jobConfig: jobConfig,
-                        resolvedConfiguration: resolvedConfiguration
-                    )
+                    guard let self else { return }
+                    do {
+                        try await self.run(version: version, units: units, supplements: supplements,
+                            jobConfig: jobConfig, resolvedConfiguration: resolvedConfiguration)
+                    } catch {
+                        self.state = .failed(Self.readableReason(for: error))
+                    }
                 }
                 runTask = task
+                if cancellationRequested { task.cancel() }
                 await task.value
                 runTask = nil
+                versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? versions
+                versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
                 return
             }
             // 没配大模型：文字记录已经封存好了，这一版如实失败（§9 第 18 行）。
             // `failMinutes` 自身失败不能吞：行停在 running，下次恢复会认领，
             // 但用户这一轮看到的必须是"原因"，不能是"一直转圈"。
             do {
-                try await coordinator.failMinutes(
-                    minutesID: version.id,
-                    reason: "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。"
-                )
+                guard let claimed = try await coordinator.claimMinutes(sessionID: sessionID, lease: Self.lease),
+                      claimed.id == version.id else {
+                    throw LLMError.transport("这一版未能认领，请刷新后重试。")
+                }
+                let failed = try await coordinator.failMinutesIfOwner(
+                    minutesID: claimed.id, expectedAttempts: claimed.attempts,
+                    reason: "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。")
+                guard failed else { throw LLMError.transport("这一版已由其他整理任务接管，请刷新状态。") }
             } catch {
                 Self.logger.error("failMinutes 写不进去（\(version.id)）：\(error.localizedDescription)")
+                throw error
             }
             failedOnSetup = true
             state = .failed("还没有配置对话模型。文字记录已经存好，配好之后可以重新生成。")
@@ -227,6 +250,7 @@ public final class MinutesGenerator {
         resolvedConfiguration: ResolvedLLMConfiguration
     ) async {
         guard inFlight == nil else { return }
+        bindPresentation(to: row.sessionID)
         inFlight = row.sessionID
         defer { inFlight = nil }
         state = .queued
@@ -281,6 +305,7 @@ public final class MinutesGenerator {
                 )
             }
             runTask = task
+            if cancellationRequested { task.cancel() }
             await task.value
             runTask = nil
         } catch {
@@ -298,6 +323,8 @@ public final class MinutesGenerator {
     /// 留下一条永远转圈的 `running`。停掉的这一版落成 `cancelled` 而不是"整理失败"——
     /// 用户不要了和没整理出来，下一步不一样。
     public func stop() {
+        guard inFlight != nil else { return }
+        cancellationRequested = true
         let task = runTask
         let minutesID = inFlightMinutesID
         Task { [weak self] in
@@ -310,9 +337,10 @@ public final class MinutesGenerator {
 
     /// 界面上要不要给「停止整理」这个出口。
     public var isBusy: Bool {
+        if inFlight != nil { return true }
         switch state {
-        case .queued, .running: true
-        default: false
+        case .queued, .running: return true
+        default: return false
         }
     }
 
@@ -348,6 +376,7 @@ public final class MinutesGenerator {
             state = .failed("这一版没有整理失败的窗口，不需要重试。")
             return
         }
+        bindPresentation(to: sessionID)
         inFlight = sessionID
         defer { inFlight = nil }
         state = .queued
@@ -400,6 +429,7 @@ public final class MinutesGenerator {
                 )
             }
             runTask = task
+            if cancellationRequested { task.cancel() }
             await task.value
             runTask = nil
         } catch {
@@ -409,46 +439,60 @@ public final class MinutesGenerator {
         versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
     }
 
-    /// 读库刷新（界面切换版本、重新打开这一场时调）。
+    private func bindPresentation(to id: String) {
+        cancellationRequested = false
+        lastResponseID = nil
+        inFlightResponseIDs = []
+        presentationRevision &+= 1
+        if sessionID != id {
+            versions = []
+            latestBody = nil
+            candidateReview = nil
+            coverage = nil
+            versionsNeedingReview = []
+        }
+        sessionID = id
+    }
+
+    /// 页面刷新只提交一个完整快照，不能覆盖正在运行的 owner 或较新的刷新。
     public func reload(sessionID: String) async {
-        versions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? []
-        versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
+        guard inFlight == nil else { return }
+        presentationRevision &+= 1
+        let revision = presentationRevision
+        let loadedVersions = (try? await coordinator.minutesVersions(sessionID: sessionID)) ?? []
+        let reviewIDs = await Self.reviewIDs(coordinator: coordinator, sessionID: sessionID)
         let latest = try? await coordinator.latestMinutes(sessionID: sessionID)
-        // 核对报告随版本一起存，所以重开这一场仍然知道"哪里要核对"。
-        let fallback = try? await coordinator.currentMinutes(sessionID: sessionID)
-        candidateReview = (latest ?? fallback)?.review
-        // 覆盖账本随版本一起存，所以重开这一场仍然知道"哪里没整理到"。
-        coverage = (latest ?? fallback)?.coverage
+        let current = try? await coordinator.currentMinutes(sessionID: sessionID)
+        guard inFlight == nil, presentationRevision == revision else { return }
+        if self.sessionID != sessionID { failedOnSetup = false }
+        self.sessionID = sessionID
+        versions = loadedVersions
+        versionsNeedingReview = reviewIDs
+        candidateReview = (latest ?? current)?.review
+        coverage = (latest ?? current)?.coverage
+        remoteCancellationNote = nil
         switch latest?.status {
         case .ready:
-            latestBody = latest?.body
+            latestBody = current?.body ?? latest?.body
             state = .ready
         case .running:
-            latestBody = latest?.body
+            latestBody = current?.body
             state = .running
         case .queued:
-            latestBody = latest?.body
+            latestBody = current?.body
             state = .queued
         case .failed:
-            // MC-25：新尝试失败不丢采用版正文；状态仍如实报失败，不伪装成功。
-            let current = try? await coordinator.currentMinutes(sessionID: sessionID)
             latestBody = current?.body
             state = .failed(latest?.failureReason ?? "没有可读的原因")
         case .cancelled:
-            // MC-30：停掉的这一版不算失败，正文仍按"采用版优先"回退，
-            // 远端那句"无法确认"在没有本次会话内上下文时必须原样说。
-            let current = try? await coordinator.currentMinutes(sessionID: sessionID)
             latestBody = current?.body
             remoteCancellationNote = "本地已经停下；远端有没有一起停下无法确认。"
             state = .cancelled
         case .submissionUnknown:
-            // MC-28：远端可能已经受理，本地没有回执。不自动重发，也不显示成"没整理出来"。
-            let current = try? await coordinator.currentMinutes(sessionID: sessionID)
             latestBody = current?.body
             state = .submissionUnknown
         default:
             latestBody = nil
-            remoteCancellationNote = nil
             state = .idle
         }
     }

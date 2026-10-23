@@ -345,7 +345,7 @@ class AppServices:
             "configured": engine is not None,
             "ready": ready,
             "backend": backend,
-            "system_cap": 32,
+            "system_cap": 4,
             "max_speakers": getattr(engine, "max_speakers", None),
             "code": None if ready else "diarization_not_available",
             "message": "meeting diarization is ready"

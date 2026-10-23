@@ -42,6 +42,7 @@ public final class MeetingSession {
         case noSourceSelected
         case serviceNotReady(String)
         case serviceBusy(String)
+        case minutesInProgress
         case occupiedBy(SessionKind)
         case microphoneDenied
         case systemAudioUnavailable(String)
@@ -53,6 +54,7 @@ public final class MeetingSession {
             case .noSourceSelected: "还没有选声音从哪来"
             case .serviceNotReady: "语音服务未就绪"
             case .serviceBusy: "语音服务正忙"
+            case .minutesInProgress: "上一场纪要正在整理"
             case .occupiedBy(let kind): "\(kind.title)正在使用麦克风"
             case .microphoneDenied: "麦克风未授权"
             case .systemAudioUnavailable: "本机音频拿不到"
@@ -69,6 +71,8 @@ public final class MeetingSession {
                 message
             case .serviceBusy(let message):
                 message
+            case .minutesInProgress:
+                "请等待上一场纪要完成，或先停止整理再开始新会议。文字记录和已有纪要都会保留。"
             case .occupiedBy:
                 "麦克风同一时刻只能由一个会话使用；可以先结束那个会话，或者等它说完。"
             case .microphoneDenied:
@@ -432,9 +436,15 @@ public final class MeetingSession {
     /// 清空它等于让用户把刚打的字重打一遍，而失败往往还发生在同一台机器、
     /// 同一个占着设备的应用上——他改不掉。空白按"没写"处理，不是存一个空标题。
     public private(set) var pendingTitle: String?
+    private var expectedSpeakerCount: MeetingExpectedSpeakerCount = .uncertain
 
-    public func start(selection: MeetingAudioSelection, title: String? = nil) async {
+    public func start(
+        selection: MeetingAudioSelection,
+        title: String? = nil,
+        expectedSpeakerCount: MeetingExpectedSpeakerCount = .uncertain
+    ) async {
         self.selection = selection
+        self.expectedSpeakerCount = expectedSpeakerCount
         let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         // 每次开始都重设：下一场会议不该继承上一场的名字。
         pendingTitle = (trimmed?.isEmpty ?? true) ? nil : trimmed
@@ -460,6 +470,7 @@ public final class MeetingSession {
         phase = .preparing
         blocked = nil
         do {
+            guard !minutes.isBusy else { throw Blocked(reason: .minutesInProgress) }
             guard admissionLedger.canStartNewRecord else {
                 throw Blocked(reason: .storeUnavailable("未保存的恢复记录已达到上限，请先复制恢复内容。"))
             }
@@ -480,7 +491,12 @@ public final class MeetingSession {
     }
 
     /// 结束这一场并整理：EOF 屏障 → 释放设备 → 封存 → 排纪要（§8.2 的最后三步）。
+    private var isFinishing = false
+
     public func finishAndSummarize() async {
+        guard !isFinishing else { return }
+        isFinishing = true
+        defer { isFinishing = false }
         guard sessionID != nil else {
             // 还没建记录就点结束：多半正有一段启动挂在半路（麦克风授权弹窗、
             // 服务握手还没回来）。没有记录就没有可整理的，所以走 `finalize`
@@ -696,8 +712,8 @@ public final class MeetingSession {
 
         var windowEnabled = dependencies.revisionWindowEnabled
             ?? UserDefaults.standard.bool(forKey: "speechrail.meetingRevisionWindowEnabled")
-        let dynamicDiarization = dependencies.dynamicDiarizationEnabled
-            ?? UserDefaults.standard.bool(forKey: "speechrail.meetingDynamicDiarizationEnabled")
+        // Only the identity matcher can reject an extra or uncertain voice.
+        // Its certification gate remains on the service; unavailable means text only.
         windowFallbackNote = nil
 
         func makeClient(diarizationEnabled: Bool) -> any MeetingRealtimeClient {
@@ -709,7 +725,8 @@ public final class MeetingSession {
                     diarizationEnabled: diarizationEnabled,
                     expectedASRRevision: binding?.asrModelRevision,
                     windowScene: windowEnabled ? .meeting : nil,
-                    diarizationBackend: diarizationEnabled && dynamicDiarization ? .meetingDynamic : nil
+                    diarizationBackend: diarizationEnabled ? .meetingDynamic : nil,
+                    diarizationMaxSpeakers: diarizationEnabled ? expectedSpeakerCount.maximumStableIdentities : nil
                 )
             )
         }
@@ -848,7 +865,7 @@ public final class MeetingSession {
     ) {
         guard let sessionID else { return }
         if isNewSession {
-            labeling.begin(sessionID: sessionID, enabled: enabled)
+            labeling.begin(sessionID: sessionID, enabled: enabled, stableIdentityRequired: true)
         } else {
             // Gap3：续接只重置 uid 坐标系，面板上已标出的标签/改名/计数保留。
             // 以前这里调 `begin`，中断前标的人会整屏消失，直到新归属到达。
@@ -1257,7 +1274,7 @@ public final class MeetingSession {
             owner = labeling
         } else {
             owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: dependencies.attachTranscriptAttribution)
-            owner.begin(sessionID: recordID, enabled: labelsEnabled)
+            owner.begin(sessionID: recordID, enabled: labelsEnabled, stableIdentityRequired: true)
         }
         let command = owner.freezeAttribution(units: units, lineID: lineID)
         let acoustic: ClosedRange<TimeInterval>?

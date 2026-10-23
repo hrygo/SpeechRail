@@ -1,4 +1,6 @@
 import Foundation
+import SwiftUI
+import AppKit
 import SQLite3
 import XCTest
 #if SWIFT_PACKAGE
@@ -64,6 +66,42 @@ final class MeetingMinutesJobRecoveryTests: XCTestCase {
     private func version(_ store: SessionStore, _ id: String) async throws -> MinutesVersion {
         let row = try await store.minutesVersion(id: id)
         return try XCTUnwrap(row, "纪要行必须读得到")
+    }
+
+    func testPageReloadCannotReplaceTheActiveMinutesOwner() async throws {
+        let store = try requireStore(), id = try requireSessionID()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "确定性测试正文。", source: .microphone, status: .final))
+        let other = try await store.createSession(.init(kind: .meeting, engineProfile: "test", audioSource: .microphone))
+        let generator = MinutesGenerator(coordinator: SessionCoordinator(store: store))
+        let work = Task { await generator.generate(sessionID: id, configuration: .init()) }
+        await Task.yield()
+        await generator.reload(sessionID: other.id)
+        await work.value
+        XCTAssertEqual(generator.sessionID, id, "页面刷新不能把正在整理的会议换成另一场")
+        guard case .failed = generator.state else { return XCTFail("缺配置应显示失败出口，不能被刷新成空态") }
+        let rows = try await store.minutesVersions(sessionID: id)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.status, .failed)
+        let reopened = MinutesGenerator(coordinator: SessionCoordinator(store: store))
+        await reopened.reload(sessionID: id)
+        XCTAssertEqual(reopened.sessionID, id)
+        guard case .failed = reopened.state else { return XCTFail("重新打开仍须显示可恢复的失败状态") }
+    }
+
+    func testStopWhilePreparingQueuePersistsCancellationWithoutSubmitting() async throws {
+        let store = try requireStore(), id = try requireSessionID()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "尚未提交的测试正文。", source: .microphone, status: .final))
+        let generator = MinutesGenerator(coordinator: SessionCoordinator(store: store))
+        let work = Task { await generator.generate(sessionID: id, configuration: .init()) }
+        await Task.yield()
+        generator.stop()
+        await work.value
+        XCTAssertEqual(generator.state, .cancelled)
+        let rows = try await store.minutesVersions(sessionID: id)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.status, .cancelled)
     }
 
     // MARK: - MC-27 租约过期后认领原任务
@@ -858,5 +896,42 @@ final class MeetingMinutesJobRecoveryTests: XCTestCase {
                 return
             }
         }
+    }
+}
+
+final class MinutesMarkdownTests: XCTestCase {
+    func testMeetingHeadingsListsAndQuotesAreRenderedAsBlocks() throws {
+        let source = "# 会议标题\n\n## 概述\n\n- **要点**内容\n- 第二条\n\n> 待核对引用\n\n1. 跟进\n2. 确认"
+        let blocks = MinutesMarkdownBlock.parse(source)
+        XCTAssertEqual(blocks.count, 7)
+        XCTAssertEqual(blocks.map { String($0.text.characters) },
+            ["会议标题", "概述", "要点内容", "第二条", "待核对引用", "跟进", "确认"])
+        XCTAssertEqual(blocks[0].headingLevel, 1)
+        XCTAssertEqual(blocks[1].headingLevel, 2)
+        XCTAssertEqual(blocks[2].marker, "•")
+        XCTAssertEqual(blocks[5].marker, "1.")
+        XCTAssertEqual(blocks[6].marker, "2.")
+        XCTAssertTrue(blocks[4].isQuote)
+        XCTAssertTrue(blocks[2].text.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true })
+        XCTAssertEqual(Set(blocks.map(\.id)).count, blocks.count)
+    }
+
+    @MainActor
+    func testRenderedMinutesFitANarrowOffscreenContainer() {
+        let markdown = "# 会议纪要\n\n## 待办\n\n- " + String(repeating: "窄窗口长内容应自然换行。", count: 30) + "\n\n> 引用说明。"
+        let view = NSHostingView(rootView: MinutesMarkdownView(markdown).frame(width: 280))
+        let size = view.fittingSize
+        XCTAssertEqual(size.width, 280, accuracy: 1)
+        XCTAssertTrue(size.height.isFinite)
+        XCTAssertGreaterThan(size.height, 300)
+    }
+
+    func testNestedListsCodeAndLiteralCharactersPreserveContent() {
+        let blocks = MinutesMarkdownBlock.parse("- 父项\n  1. 子项\n\n```sql\nSELECT * FROM t;\n```\n\n普通文本 #号与 100% 原样保留。")
+        XCTAssertEqual(blocks[1].listDepth, 1)
+        XCTAssertEqual(blocks[1].marker, "1.")
+        XCTAssertTrue(blocks[2].isCode)
+        XCTAssertTrue(String(blocks[2].text.characters).contains("SELECT * FROM t;"))
+        XCTAssertEqual(String(blocks.last!.text.characters), "普通文本 #号与 100% 原样保留。")
     }
 }

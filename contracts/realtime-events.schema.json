@@ -358,6 +358,12 @@
         "enabled": {
           "type": "boolean"
         },
+        "max_speakers": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 4,
+          "description": "meeting_dynamic stable identity upper bound; null uses certified capacity."
+        },
         "backend": {
           "enum": [
             "sortformer",
@@ -2258,12 +2264,11 @@
             "null"
           ],
           "minimum": 1,
-          "maximum": 32
+          "maximum": 4
         },
         "system_cap": {
           "enum": [
-            4,
-            32
+            4
           ]
         }
       }

@@ -118,6 +118,29 @@ extension RealtimeASRClient: MeetingRealtimeClient {}
 
 /// 建一条连接需要的参数。测试只看得出"建了几条、参数是什么"，
 /// 不需要真的握手。
+public enum MeetingExpectedSpeakerCount: String, CaseIterable, Sendable, Identifiable {
+    case uncertain, two, three, four, moreThanFour
+    public var id: String { rawValue }
+    public var title: String {
+        switch self {
+        case .uncertain: "不确定"
+        case .two: "2 人"
+        case .three: "3 人"
+        case .four: "4 人"
+        case .moreThanFour: "超过 4 人"
+        }
+    }
+    /// An upper bound on stable identities, never an instruction to fill slots.
+    public var maximumStableIdentities: Int? {
+        switch self {
+        case .uncertain: nil
+        case .two: 2
+        case .three: 3
+        case .four, .moreThanFour: 4
+        }
+    }
+}
+
 public struct MeetingRealtimeClientConfiguration: Sendable, Equatable {
     public var port: Int
     public var scenePreset: ASRScenePreset
@@ -126,6 +149,7 @@ public struct MeetingRealtimeClientConfiguration: Sendable, Equatable {
     public var expectedASRRevision: String?
     public var windowScene: SpeechRailWindowScene?
     public var diarizationBackend: SpeechRailDiarizationBackend?
+    public var diarizationMaxSpeakers: Int?
 
     public init(
         port: Int,
@@ -134,7 +158,8 @@ public struct MeetingRealtimeClientConfiguration: Sendable, Equatable {
         diarizationEnabled: Bool,
         expectedASRRevision: String?,
         windowScene: SpeechRailWindowScene? = nil,
-        diarizationBackend: SpeechRailDiarizationBackend? = nil
+        diarizationBackend: SpeechRailDiarizationBackend? = nil,
+        diarizationMaxSpeakers: Int? = nil
     ) {
         self.port = port
         self.scenePreset = scenePreset
@@ -143,6 +168,7 @@ public struct MeetingRealtimeClientConfiguration: Sendable, Equatable {
         self.expectedASRRevision = expectedASRRevision
         self.windowScene = windowScene
         self.diarizationBackend = diarizationBackend
+        self.diarizationMaxSpeakers = diarizationMaxSpeakers
     }
 }
 
@@ -179,7 +205,6 @@ public struct MeetingSessionDependencies: Sendable {
     public var attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)?
     public var drainTimeout: Duration
     public var revisionWindowEnabled: Bool?
-    public var dynamicDiarizationEnabled: Bool?
 
     public init(
         makeAudioSource: @escaping @MainActor () -> any MeetingAudioSource,
@@ -190,8 +215,7 @@ public struct MeetingSessionDependencies: Sendable {
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)? = nil,
         drainTimeout: Duration = .seconds(12),
-        revisionWindowEnabled: Bool? = nil,
-        dynamicDiarizationEnabled: Bool? = nil
+        revisionWindowEnabled: Bool? = nil
     ) {
         self.makeAudioSource = makeAudioSource
         self.makeRealtimeClient = makeRealtimeClient
@@ -202,7 +226,6 @@ public struct MeetingSessionDependencies: Sendable {
         self.attachTranscriptAttribution = attachTranscriptAttribution
         self.drainTimeout = drainTimeout
         self.revisionWindowEnabled = revisionWindowEnabled
-        self.dynamicDiarizationEnabled = dynamicDiarizationEnabled
     }
 
 }

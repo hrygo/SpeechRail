@@ -33,18 +33,78 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         drainTimeout: Duration = .seconds(12),
         receiverGateForFirst: ConnectGate? = nil,
         archiveDelay: Duration = .zero,
-        revisionWindowEnabled: Bool = false,
-        dynamicDiarizationEnabled: Bool = false
+        llmProvider: LLMProvider = LLMProvider(),
+        revisionWindowEnabled: Bool = false
     ) async throws -> Harness {
         let harness = try await Harness.make(
             saveLine: saveLine, attachTranscriptAttribution: attachTranscriptAttribution,
             configuration: configuration, makeRealtimeClient: makeRealtimeClient,
             drainTimeout: drainTimeout, receiverGateForFirst: receiverGateForFirst, archiveDelay: archiveDelay,
-            revisionWindowEnabled:revisionWindowEnabled,
-            dynamicDiarizationEnabled:dynamicDiarizationEnabled
+            llmProvider: llmProvider, revisionWindowEnabled:revisionWindowEnabled
         )
         self.harness = harness
         return harness
+    }
+
+    func testFinishAutomaticallyQueuesMinutesAndPreservesTranscript() async throws {
+        let h = try await makeHarness()
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        _ = try await h.store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "用于自动整理回归的正文。", source: .microphone, status: .final))
+        await h.session.requestFinish()
+        XCTAssertEqual(h.session.phase, .archived)
+        let versions = try await h.store.minutesVersions(sessionID: id)
+        XCTAssertEqual(versions.count, 1, "结束动作必须自动创建纪要尝试")
+        XCTAssertEqual(versions.first?.status, .failed, "无模型配置时给明确失败，不能静默跳过")
+        let lines = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(lines.map(\.text), ["用于自动整理回归的正文。"])
+        await h.session.requestFinish()
+        let after = try await h.store.minutesVersions(sessionID: id)
+        XCTAssertEqual(after.count, 1, "重复结束不能再提交一版")
+    }
+
+    func testConcurrentFinishActionsCreateOnlyOneMinutesAttempt() async throws {
+        let h = try await makeHarness(archiveDelay: .milliseconds(60))
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        _ = try await h.store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "并发结束仍保留正文。", source: .microphone, status: .final))
+        let first = Task { await h.session.requestFinish() }
+        try await h.settle { $0.session.phase == .processing }
+        await h.session.requestFinish()
+        await first.value
+        let versions = try await h.store.minutesVersions(sessionID: id)
+        XCTAssertEqual(versions.count, 1)
+        XCTAssertEqual(h.session.phase, .archived)
+    }
+
+    func testHistoricalMinutesCannotBeSilentlyDisplacedByANewMeeting() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PendingMinutesTransport.self]
+        let transport = URLSession(configuration: configuration)
+        defer { transport.invalidateAndCancel() }
+        let h = try await makeHarness(llmProvider: LLMProvider(session: transport))
+        let old = try await h.store.createSession(.init(kind: .meeting, engineProfile: "test", audioSource: .microphone))
+        _ = try await h.store.appendLine(.init(sessionID: old.id, role: .speaker,
+            text: "历史会议的测试正文。", source: .microphone, status: .final))
+        let work = Task { await h.session.minutes.generate(sessionID: old.id,
+            resolvedConfiguration: .init(configuration: .init(baseURL: "https://minutes.invalid/v1", model: "fake"),
+                apiKey: nil, origin: .global)) }
+        try await h.settle { $0.session.minutes.state == .running }
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.session.blocked != nil }
+        XCTAssertEqual(h.session.blocked, .minutesInProgress)
+        XCTAssertNil(h.session.sessionID)
+        XCTAssertEqual(h.clients.all.count, 0)
+        h.session.minutes.stop()
+        await work.value
+        XCTAssertEqual(h.session.minutes.state, .cancelled)
+        let rows = try await h.store.minutesVersions(sessionID: old.id)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.status, .cancelled)
     }
 
     func testLateUploadFailureCannotPolluteTheNextRecord() async throws {
@@ -198,12 +258,13 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         preferences.meetingDiarizationEnabled = true
         h.session.preferences = { preferences }
         let id = try await startRecording(h)
+        try await h.configureDynamicDiarization()
         try await h.emit(.completed(itemID: "aligned-item", transcript: "保留的会议正文"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "aligned-item", units: [
-            .init(segmentUID: "before-failure", speaker: "A", textStart: 0, textEnd: 7, timingQuality: "aligned")
+            .init(segmentUID: "before-failure", speaker: "S1", textStart: 0, textEnd: 7, timingQuality: "aligned")
         ], isFinal: true))
-        try await h.settle { $0.session.lines.first?.speakerLabel == "A" }
+        try await h.settle { $0.session.lines.first?.speakerLabel?.hasSuffix(":S1") == true }
         try await h.emit(.alignmentFailed(
             itemID: "aligned-item", code: "text_mismatch", message: "private backend detail"
         ))
@@ -224,13 +285,13 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(record?.diarizationNote, reason)
         XCTAssertEqual(h.session.lines.map(\.text), ["保留的会议正文"])
         XCTAssertEqual(h.session.phase, .recording)
-        XCTAssertEqual(h.session.lines.first?.speakerLabel, "A")
+        XCTAssertTrue(h.session.lines.first?.speakerLabel?.hasSuffix(":S1") == true)
         try await h.emit(.completed(itemID: "next-item", transcript: "后续仍能分人"))
         try await h.emit(.attribution(itemID: "next-item", units: [
-            .init(segmentUID: "after-failure", speaker: "B", textStart: 0, textEnd: 6, timingQuality: "aligned")
+            .init(segmentUID: "after-failure", speaker: "S2", textStart: 0, textEnd: 6, timingQuality: "aligned")
         ], isFinal: true))
-        try await h.settle { $0.session.lines.last?.speakerLabel == "B" }
-        XCTAssertEqual(h.session.labeling.labels, ["A", "B"])
+        try await h.settle { $0.session.lines.last?.speakerLabel?.hasSuffix(":S2") == true }
+        XCTAssertEqual(h.session.labeling.labels.compactMap { $0.split(separator: ":").last.map(String.init) }, ["S1", "S2"])
     }
 
     func testAlignmentFailureWithoutDiarizationIsNotReplacedByWindowExpiry() async throws {
@@ -277,7 +338,42 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertNil(h.session.windowCapture)
     }
 
-    func testExperimentalDiarizationDoesNotReplaceExistingBackendByDefault() async throws {
+    func testIgnoredCountHandshakeFallsBackToTextOnly() async throws {
+        let h = try await makeHarness()
+        let preferences = SessionPreferences(defaults:UserDefaults(suiteName:UUID().uuidString)!)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        h.clients.failFirstDiarizedConnect(RealtimeASRClient.Failure.serverError(
+            code:"invalid_diarization_capability",message:"identity budget not applied"))
+        await h.clients.openGate()
+        await h.session.start(selection:MeetingAudioSelection(usesMicrophone:true), expectedSpeakerCount: .two)
+        try await h.settle { $0.phase == .recording || $0.session.blocked != nil }
+        XCTAssertEqual(h.session.phase, .recording)
+        XCTAssertEqual(h.clients.madeConfigurations.map(\.diarizationMaxSpeakers), [2,nil])
+        XCTAssertFalse(h.clients.madeConfigurations.last?.diarizationEnabled ?? true)
+    }
+
+    func testExpectedCountFlowsToSessionAndNextMeetingDefaultsToUnknown() async throws {
+        let h = try await makeHarness()
+        let preferences = SessionPreferences(defaults:UserDefaults(suiteName:UUID().uuidString)!)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        await h.clients.openGate()
+        await h.session.start(selection:MeetingAudioSelection(usesMicrophone:true), expectedSpeakerCount: .two)
+        try await h.settle { $0.phase == .recording }
+        XCTAssertEqual(h.clients.madeConfigurations[0].diarizationMaxSpeakers, 2)
+        h.power.fireSleep()
+        try await h.settle { $0.phase == .interrupted }
+        await h.session.continueAfterInterruption()
+        try await h.settle { $0.phase == .recording }
+        XCTAssertEqual(h.clients.madeConfigurations.last?.diarizationMaxSpeakers, 2)
+        await h.session.finishAndSummarize()
+        await h.session.start(selection:MeetingAudioSelection(usesMicrophone:true))
+        try await h.settle { $0.phase == .recording }
+        XCTAssertNil(h.clients.madeConfigurations.last?.diarizationMaxSpeakers)
+    }
+
+    func testMeetingSelectsRejectingBackendByDefault() async throws {
         let h = try await makeHarness()
         let preferences = SessionPreferences(defaults:UserDefaults(suiteName:UUID().uuidString)!)
         preferences.meetingDiarizationEnabled = true
@@ -286,7 +382,97 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         await h.session.start(selection:MeetingAudioSelection(usesMicrophone:true))
         try await h.settle { $0.phase == .recording }
         XCTAssertTrue(h.clients.madeConfigurations[0].diarizationEnabled)
-        XCTAssertNil(h.clients.madeConfigurations[0].diarizationBackend)
+        XCTAssertEqual(h.clients.madeConfigurations[0].diarizationBackend, .meetingDynamic)
+    }
+
+    func testMeetingRejectsRawIdentityUntilValidDynamicHandshake() async throws {
+        let h = try await makeHarness()
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        let recordID = try await startRecording(h)
+        func append(_ item: String, speaker: String) async throws {
+            try await h.emit(.completed(itemID: item, transcript: "甲"))
+            try await h.emit(.attribution(itemID: item, units: [
+                .init(segmentUID: item, speaker: speaker, textStart: 0, textEnd: 1)
+            ], isFinal: true))
+            try await h.emit(.serverError(code: "test_barrier", message: item, requestID: nil))
+            try await h.settle { $0.session.lastFailure == "test_barrier：\(item)" }
+            let settlement = await h.session.waitForPendingSaves(recordID: recordID)
+            XCTAssertTrue(settlement.isComplete)
+        }
+        try await append("pre-s1", speaker: "S1")
+        try await append("pre-s5", speaker: "S5")
+        var rows = try await h.store.lines(sessionID: recordID)
+        XCTAssertTrue(rows.allSatisfy { $0.speakerLabel == nil })
+        XCTAssertTrue(h.session.labeling.labels.isEmpty)
+        let sortformer = try JSONDecoder().decode(SpeechRailDiarizationCapacity.self,
+            from: Data(#"{"enabled":true,"backend":"sortformer","max_speakers":4,"system_cap":4}"#.utf8))
+        try await h.emit(.diarizationConfigured(sortformer, serverSessionID: "wrong-backend"))
+        try await append("after-sortformer", speaker: "S1")
+        rows = try await h.store.lines(sessionID: recordID)
+        XCTAssertTrue(rows.allSatisfy { $0.speakerLabel == nil })
+        let dynamic = try JSONDecoder().decode(SpeechRailDiarizationCapacity.self,
+            from: Data(#"{"enabled":true,"backend":"meeting_dynamic","max_speakers":4,"system_cap":4}"#.utf8))
+        try await h.emit(.diarizationConfigured(dynamic, serverSessionID: "valid-backend"))
+        try await append("after-dynamic", speaker: "S1")
+        rows = try await h.store.lines(sessionID: recordID)
+        XCTAssertEqual(rows.map(\.text), ["甲", "甲", "甲", "甲"])
+        XCTAssertTrue(rows.prefix(3).allSatisfy { $0.speakerLabel == nil })
+        XCTAssertTrue(rows.last?.speakerLabel?.hasSuffix(":S1") == true)
+        XCTAssertEqual(h.session.labeling.labels.count, 1)
+    }
+
+    func testMeetingNeedsNoSpeakerCountDeclaration() async throws {
+        let h = try await makeHarness()
+        let preferences = SessionPreferences(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true))
+        try await h.settle { $0.phase == .recording }
+        let id = try XCTUnwrap(h.session.sessionID)
+        XCTAssertEqual(h.clients.madeConfigurations.map(\.diarizationEnabled), [true])
+        XCTAssertTrue(h.session.labeling.isEnabled)
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.diarization, .active)
+        XCTAssertNil(record?.diarizationNote)
+        XCTAssertTrue(preferences.meetingDiarizationEnabled, "Do not change the user's preference")
+        try await h.emit(.completed(itemID: "capacity", transcript: "合成容量边界回归"))
+        try await h.settle { $0.session.lines.count == 1 }
+        let saved = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(saved.map(\.text), ["合成容量边界回归"])
+        XCTAssertNil(saved.first?.speakerLabel)
+        XCTAssertTrue(saved.first?.attributionUnits.isEmpty == true)
+    }
+
+    func testNextMeetingPreservesPreviousRecordAndUsesRejectingBackend() async throws {
+        let h = try await makeHarness()
+        let preferences = SessionPreferences(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        let firstID = try await startRecording(h)
+        try await h.configureDynamicDiarization()
+        XCTAssertTrue(h.clients.madeConfigurations[0].diarizationEnabled)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        try await h.emit(.completed(itemID: "first", transcript: "合成历史记录"))
+        try await h.emit(.attribution(itemID: "first", units: [
+            .init(segmentUID: "first-unit", speaker: "S1", textStart: 0, textEnd: 6)
+        ], isFinal: true))
+        try await h.settle { $0.session.lines.first?.speakerLabel?.hasSuffix(":S1") == true }
+        await h.session.finishAndSummarize()
+        let original = try await h.store.lines(sessionID: firstID)
+
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true))
+        try await h.settle { $0.phase == .recording }
+        XCTAssertNotEqual(h.session.sessionID, firstID)
+        XCTAssertEqual(h.clients.madeConfigurations.map(\.diarizationEnabled), [true, true])
+        XCTAssertTrue(h.session.labeling.isEnabled)
+        let preserved = try await h.store.lines(sessionID: firstID)
+        XCTAssertEqual(preserved, original)
+        XCTAssertTrue(preserved.first?.speakerLabel?.hasSuffix(":S1") == true)
     }
 
     func testWindowSealWithoutPreviewPersistsOnceAndDrainsBeforeArchive() async throws {
@@ -327,8 +513,8 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(savedAfterRetry.count,1)
     }
 
-    func testDynamicBackendRequiresItsOwnOptInAndNeverSubstitutesFourSlots() async throws {
-        let h = try await makeHarness(dynamicDiarizationEnabled:true)
+    func testUncertifiedRejectingBackendFallsBackToTextOnly() async throws {
+        let h = try await makeHarness()
         let preferences = SessionPreferences(defaults:UserDefaults(suiteName:UUID().uuidString)!)
         preferences.meetingDiarizationEnabled = true
         h.session.preferences = { preferences }
@@ -430,17 +616,19 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         preferences.meetingDiarizationEnabled = true
         h.session.preferences = { preferences }
         let sessionID = try await startRecording(h)
+        try await h.configureDynamicDiarization()
 
         // 中断前标出一位说话人并改名。
         try await h.emit(.completed(itemID: "before", transcript: "中断前说的"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "before", units: [
-            .init(segmentUID: "unit-before", speaker: "A", textStart: 0, textEnd: 5, timingQuality: "aligned")
+            .init(segmentUID: "unit-before", speaker: "S1", textStart: 0, textEnd: 5, timingQuality: "aligned")
         ], isFinal: true))
         try await h.settle { !$0.session.labeling.labels.isEmpty }
-        await h.session.renameSpeaker(label: "A", to: "张三")
-        try await h.settle { $0.session.labeling.displayNames["A"] == "张三" }
-        XCTAssertEqual(h.session.labeling.labels, ["A"])
+        let firstLabel = try XCTUnwrap(h.session.labeling.labels.first)
+        await h.session.renameSpeaker(label: firstLabel, to: "张三")
+        try await h.settle { $0.session.labeling.displayNames[firstLabel] == "张三" }
+        XCTAssertEqual(h.session.labeling.labels, [firstLabel])
 
         // 走生产重连路径。
         h.power.fireSleep()
@@ -450,8 +638,8 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         try await h.settle { await $0.clients.all.count >= 2 }
 
         // 面板保留：标签、改名、计数都在。
-        XCTAssertEqual(h.session.labeling.labels, ["A"])
-        XCTAssertEqual(h.session.labeling.displayNames["A"], "张三")
+        XCTAssertEqual(h.session.labeling.labels, [firstLabel])
+        XCTAssertEqual(h.session.labeling.displayNames[firstLabel], "张三")
 
         // 新行从无归属起步（uid 重置的账本语义由
         // `SpeakerLabelingPersistenceTests` 直接钉住，会话层只验后果）。
@@ -652,14 +840,15 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         await h.session.start(selection: MeetingAudioSelection())
         try await h.settle { $0.phase == .recording }
         let id = try XCTUnwrap(h.session.sessionID)
+        try await h.configureDynamicDiarization()
         try await h.emit(.completed(itemID: "item", transcript: "metadata等待中的会议正文"))
         try await h.settle { $0.session.lines.count == 1 }
         try await h.emit(.attribution(itemID: "item", units: [
-            .init(segmentUID: "unit", speaker: "A", textStart: 0, textEnd: 16, timingQuality: "aligned")
+            .init(segmentUID: "unit", speaker: "S1", textStart: 0, textEnd: 16, timingQuality: "aligned")
         ], isFinal: true))
         try await h.settle { _ in await gate.entered }
         try await h.emit(.attribution(itemID: "item", units: [
-            .init(segmentUID: "unit", speaker: "B", textStart: 0, textEnd: 16, timingQuality: "aligned")
+            .init(segmentUID: "unit", speaker: "S2", textStart: 0, textEnd: 16, timingQuality: "aligned")
         ], isFinal: false))
         try await h.emit(.attribution(itemID: "item", units: [
             .init(segmentUID: "another-unit", speaker: nil, timingQuality: "unavailable")
@@ -681,8 +870,8 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         await waiter.value
         XCTAssertTrue(settled)
         let rows = try await h.store.lines(sessionID: id)
-        XCTAssertEqual(rows.first?.speakerLabel, "B", "malformed later metadata cannot erase an accepted unit revision")
-        XCTAssertEqual(h.session.lines.first?.speakerLabel, "B")
+        XCTAssertTrue(rows.first?.speakerLabel?.hasSuffix(":S2") == true, "malformed later metadata cannot erase an accepted unit revision")
+        XCTAssertTrue(h.session.lines.first?.speakerLabel?.hasSuffix(":S2") == true)
     }
 
     func testExplicitIncompleteMeetingEndPersistsRecoveryAndReleasesRejectionBudget() async throws {
@@ -1538,8 +1727,8 @@ extension MeetingSessionLifecycleTests {
             drainTimeout: Duration = .seconds(12),
             receiverGateForFirst: ConnectGate? = nil,
             archiveDelay: Duration = .zero,
-            revisionWindowEnabled: Bool = false,
-            dynamicDiarizationEnabled: Bool = false
+            llmProvider: LLMProvider = LLMProvider(),
+            revisionWindowEnabled: Bool = false
         ) async throws -> Harness {
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("meeting-lifecycle-\(UUID().uuidString)", isDirectory: true)
@@ -1565,10 +1754,9 @@ extension MeetingSessionLifecycleTests {
                 saveLine: saveLine,
                 attachTranscriptAttribution: attachTranscriptAttribution,
                 drainTimeout: drainTimeout,
-                revisionWindowEnabled:revisionWindowEnabled,
-                dynamicDiarizationEnabled:dynamicDiarizationEnabled
+                revisionWindowEnabled:revisionWindowEnabled
             )
-            let session = MeetingSession(coordinator: coordinator, dependencies: dependencies)
+            let session = MeetingSession(coordinator: coordinator, llmProvider: llmProvider, dependencies: dependencies)
             coordinator.starter = { _ in try await session.beginCapture() }
             coordinator.stopper = { _ in await session.stopCapture() }
             return Harness(
@@ -1603,6 +1791,12 @@ extension MeetingSessionLifecycleTests {
         /// 让已经在飞的东西走完一小段，而不是等某个具体状态。
         func settleBriefly() async throws {
             for _ in 0..<20 { try await Task.sleep(for: .milliseconds(5)) }
+        }
+
+        func configureDynamicDiarization() async throws {
+            let capacity = try JSONDecoder().decode(SpeechRailDiarizationCapacity.self,
+                from: Data(#"{"enabled":true,"backend":"meeting_dynamic","max_speakers":4,"system_cap":4}"#.utf8))
+            try await emit(.diarizationConfigured(capacity, serverSessionID: "test-dynamic"))
         }
 
         /// 往**当前那一代**连接投一条服务端事件。
@@ -1858,6 +2052,7 @@ extension MeetingSessionLifecycleTests {
         h.session.preferences = { preferences }
 
         let sessionID = try await startRecording(h)
+        try await h.configureDynamicDiarization()
         let client = try XCTUnwrap(h.clients.all.last)
         h.audio.emit(AudioChunk(pcm: Data([0, 1]), level: 0.2))
         h.audio.emit(AudioChunk(pcm: Data([2, 3]), level: 0.3))
@@ -1874,7 +2069,7 @@ extension MeetingSessionLifecycleTests {
                 units: [
                     RealtimeASRClient.AttributionUnit(
                         segmentUID: "tail-segment",
-                        speaker: "A",
+                        speaker: "S1",
                         textStart: 0,
                         textEnd: 6,
                         audioStartSample: 0,
@@ -1894,7 +2089,7 @@ extension MeetingSessionLifecycleTests {
         XCTAssertEqual(lines.count, 1, "drain 尾句应在归档前落库一次")
         let line = try XCTUnwrap(lines.first)
         XCTAssertEqual(line.text, "会议最后一句")
-        XCTAssertEqual(line.speakerLabel, "A", "final 之后的 drain attribution 也须写入同一行")
+        XCTAssertTrue(line.speakerLabel?.hasSuffix(":S1") == true, "final 之后的 drain attribution 也须写入同一行")
         XCTAssertEqual(try XCTUnwrap(line.tStart), 0, accuracy: 0.02)
         XCTAssertEqual(try XCTUnwrap(line.tEnd), 2, accuracy: 0.02)
         let appendedAtDrain = await client.appendedByteCountAtDrain
@@ -2373,12 +2568,12 @@ struct MeetingWindowMergeRegressionTests {
             let client = try #require(h.clients.all.last)
             let sealed = try TranscriptWindowLedgerTests().fixture("window-sealed-r6")
             let capacity = try JSONDecoder().decode(SpeechRailDiarizationCapacity.self,
-                from: Data(#"{"enabled":true,"backend":"meeting_dynamic","max_speakers":8,"system_cap":32}"#.utf8))
+                from: Data(#"{"enabled":true,"backend":"meeting_dynamic","max_speakers":4,"system_cap":4}"#.utf8))
             await client.setDrainEvents([
                 .diarizationConfigured(capacity, serverSessionID: "merge-drain"),
                 .transcriptionWindow(sealed),
                 .attribution(itemID: "item-1", units: [
-                    .init(segmentUID: "tail-unit", speaker: "S5", textStart: 0, textEnd: 9, timingQuality: "aligned")
+                    .init(segmentUID: "tail-unit", speaker: "S4", textStart: 0, textEnd: 9, timingQuality: "aligned")
                 ], isFinal: true),
                 .diarizationFinished
             ])
@@ -2394,7 +2589,7 @@ struct MeetingWindowMergeRegressionTests {
             let row = try #require(rows.first)
             #expect(rows.count == 1)
             #expect(row.text == sealed.finalUnits?.first?.text)
-            #expect(row.speakerLabel?.hasSuffix(":S5") == true)
+            #expect(row.speakerLabel?.hasSuffix(":S4") == true)
             let uploadedAtDrain = await client.appendedByteCountAtDrain
             let uploaded = await client.appendedByteCount
             #expect(uploadedAtDrain == 4)
@@ -2437,7 +2632,7 @@ struct MeetingWindowMergeRegressionTests {
         _ body: @MainActor (MeetingSessionLifecycleTests.Harness) async throws -> Void
     ) async throws {
         let h = try await MeetingSessionLifecycleTests.Harness.make(
-            revisionWindowEnabled: true, dynamicDiarizationEnabled: true)
+            revisionWindowEnabled: true)
         let suite = "meeting-window-merge-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -2560,4 +2755,12 @@ private struct DelayedMeetingArchiveWriter: SessionArchiveWriting {
         try await Task.sleep(for: delay)
         return try await store.finalizeSession(id: id, endReason: endReason, endedAt: endedAt)
     }
+}
+
+/// Holds only fake requests until cancellation; never reaches the network.
+private final class PendingMinutesTransport: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {}
+    override func stopLoading() {}
 }
