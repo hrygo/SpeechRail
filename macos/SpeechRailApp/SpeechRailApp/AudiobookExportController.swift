@@ -150,6 +150,8 @@ public struct AudiobookPreparedExport: Codable, Equatable, Sendable {
     public let expectedChapterFrameCounts: [UUID: Int64]
     public let expectsArtwork: Bool
     public var verification: AudiobookMediaVerification?
+    /// 本次导出已核验的章节时间轴投影；只有整本 M4B 在核验通过后才有值。
+    public var chapterTimeline: AudiobookChapterTimeline?
 
     public init(
         requestID: UUID,
@@ -165,7 +167,8 @@ public struct AudiobookPreparedExport: Codable, Equatable, Sendable {
         expectedSampleRate: Int = AudiobookLimits.intermediateSampleRate,
         expectedChapterFrameCounts: [UUID: Int64] = [:],
         expectsArtwork: Bool = false,
-        verification: AudiobookMediaVerification? = nil
+        verification: AudiobookMediaVerification? = nil,
+        chapterTimeline: AudiobookChapterTimeline? = nil
     ) {
         self.requestID = requestID
         self.bookID = bookID
@@ -181,6 +184,7 @@ public struct AudiobookPreparedExport: Codable, Equatable, Sendable {
         self.expectedChapterFrameCounts = expectedChapterFrameCounts
         self.expectsArtwork = expectsArtwork
         self.verification = verification
+        self.chapterTimeline = chapterTimeline
     }
 }
 
@@ -196,6 +200,8 @@ public enum AudiobookExportError: LocalizedError, Equatable, Sendable {
     case coverNotSupportedForProfile
     case coverBookMismatch
     case coverServiceUnsupported
+    case timelineUnsupportedForProfile
+    case timelineSaveFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -222,6 +228,10 @@ public enum AudiobookExportError: LocalizedError, Equatable, Sendable {
             return "所选封面不属于当前书籍；请重新选择。"
         case .coverServiceUnsupported:
             return "当前服务版本不识别带封面的导出清单；请更新 SpeechRail 服务后重试。封面不会被静默丢弃。"
+        case .timelineUnsupportedForProfile:
+            return "分章 MP3 使用章节清单文件，不提供单文件章节时间表。"
+        case let .timelineSaveFailed(detail):
+            return "章节时间表保存失败：\(detail)。已导出的音频不受影响，可只重试保存时间表。"
         }
     }
 }
@@ -521,6 +531,10 @@ public actor AudiobookExportController {
             throw AudiobookExportError.verificationFailed("实际媒体摘要与导出工具返回的 SHA-256 不一致。")
         }
         prepared.verification = verification
+        if profile == .m4b {
+            // 时间表只投影刚刚核验过的这份产物；校验不过就整体失败，不给出一份和音频对不上的目录。
+            prepared.chapterTimeline = try prepared.makeChapterTimeline()
+        }
         return prepared
     }
 
