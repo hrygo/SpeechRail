@@ -526,7 +526,7 @@ public struct AudiobookBookWorkspaceView: View {
     private var aiProviderCompactPill: some View {
         let snapshot = workflow.currentAnalysisConfigSnapshot
         if snapshot.isConfigured {
-            HStack(spacing: 4) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: "sparkles")
                     .font(.caption2)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -535,8 +535,8 @@ public struct AudiobookBookWorkspaceView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
             .background(
                 Capsule(style: .continuous)
                     .fill(SpeechRailDesignTokens.Color.recessedField)
@@ -1216,7 +1216,7 @@ public struct AudiobookBookWorkspaceView: View {
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.attention)
 
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Text("选择说话人（按数字键 1–5 快速确认并跳至下一处）：")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)

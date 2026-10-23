@@ -451,7 +451,7 @@ public struct DeveloperDocsView: View {
                 .help("复制这段示例")
             }
             // 代码用系统等宽字体：缩进与路径的对齐不能靠比例字体碰运气。
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                 ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                     Text(line.isEmpty ? " " : line)
                         .font(SpeechRailDesignTokens.Typography.code)

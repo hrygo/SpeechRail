@@ -510,7 +510,7 @@ public struct SettingsView: View {
                     : "这份备份**不能**用来恢复：上面的问题没有解决之前，换库会丢东西。"
             )
             .font(.callout)
-            .foregroundStyle(preview.isRestorable ? Color.secondary : Color.orange)
+            .foregroundStyle(preview.isRestorable ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.attention)
             .fixedSize(horizontal: false, vertical: true)
 
             HStack {
@@ -520,7 +520,7 @@ public struct SettingsView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Layout.contentPadding)
-        .frame(minWidth: 380, alignment: .leading)
+        .frame(minWidth: SpeechRailDesignTokens.Layout.Sheet.compactWidth, alignment: .leading)
     }
 
     private func restoreFact(_ label: String, _ value: Int) -> some View {

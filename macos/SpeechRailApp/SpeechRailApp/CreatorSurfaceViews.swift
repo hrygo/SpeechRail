@@ -382,7 +382,7 @@ private struct DubbingDeskComposerView: View {
         case .available:
             VStack(spacing: 0) {
                 ScrollView {
-                    LazyVStack(spacing: 2) {
+                    LazyVStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
                         ForEach(availableVoices) { voice in
                             voicePickerRow(voice)
                         }
@@ -1083,7 +1083,7 @@ public struct VoiceDesignView: View {
                 HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
                     Image(systemName: "sparkles")
                         .foregroundStyle(SpeechRailDesignTokens.Color.voice)
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                         let bookPart = ctx.bookTitle.map { "《\($0)》" } ?? "有声书"
                         let rolePart = ctx.roleDisplayName ?? "当前角色"
                         Text("正在为\(bookPart)角色「\(rolePart)」定制专属声线")

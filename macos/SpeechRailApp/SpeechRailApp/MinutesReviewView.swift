@@ -44,11 +44,11 @@ struct MinutesReviewView: View {
                 .font(.headline)
             Text("这段会作为「你补充」另存为一版。它没有转录来源，所以不会挂引用——不能当成会上说过的话。")
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             TextEditor(text: $supplementDraft)
                 .font(.body)
-                .frame(minHeight: 140)
+                .frame(minHeight: SpeechRailDesignTokens.Layout.personaEditorMinimumHeight)
                 .accessibilityLabel("补充说明正文")
             HStack {
                 Spacer()
@@ -64,7 +64,11 @@ struct MinutesReviewView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Layout.contentPadding)
-        .frame(minWidth: 420, minHeight: 300, alignment: .leading)
+        .frame(
+            minWidth: SpeechRailDesignTokens.Layout.Sheet.compactWidth,
+            minHeight: SpeechRailDesignTokens.Layout.Sheet.compactMinimumHeight,
+            alignment: .leading
+        )
     }
 
     private var header: some View {
@@ -72,25 +76,25 @@ struct MinutesReviewView: View {
             // 说出处，不用让用户猜哪一段是模型写的。
             Text(model.originSummary)
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             if model.originChanged {
                 // 改过之后出处变了，这句话必须跟着变。
                 Text("已存为新的一版，AI 原来那一版仍然保留。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             statusLine
             if let comparison = model.comparison, !comparison.isIdentical {
                 // 差异常驻，但不抢首屏：用户要回答的是"我改了什么"。
                 DisclosureGroup("与打开时的版本对比：\(comparison.summary)") {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                         ForEach(Array(comparison.lines.enumerated()), id: \.offset) { _, line in
                             diffRow(line)
                         }
                     }
                     .padding(.top, SpeechRailDesignTokens.Spacing.xs)
                 }
-                .font(.caption)
+                .font(SpeechRailDesignTokens.Typography.caption)
             }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
@@ -103,16 +107,16 @@ struct MinutesReviewView: View {
     private func diffRow(_ line: MinutesVersionDiff.LineChange) -> some View {
         switch line {
         case .unchanged(let text):
-            Text(text).foregroundStyle(.secondary)
+            Text(text).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         case .added(let text):
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text("+").foregroundStyle(.green).accessibilityHidden(true)
+            HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text("+").foregroundStyle(SpeechRailDesignTokens.Color.ready).accessibilityHidden(true)
                 Text(text)
             }
             .accessibilityLabel("新增：\(text)")
         case .removed(let text):
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text("−").foregroundStyle(.red).accessibilityHidden(true)
+            HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text("−").foregroundStyle(SpeechRailDesignTokens.Color.critical).accessibilityHidden(true)
                 Text(text)
             }
             .accessibilityLabel("删除：\(text)")
@@ -125,28 +129,28 @@ struct MinutesReviewView: View {
             // 说清当前问题和有效出口，不堆一串可能的原因。
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
                     .accessibilityHidden(true)
                 Text("没存上，你写的内容还在屏幕上。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 Button("重试") { Task { _ = await model.save() } }
                     .buttonStyle(.link)
-                    .font(.caption)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                 Spacer(minLength: 0)
                 Text(failure)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     .lineLimit(1)
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("没存上，草稿仍然保留在编辑框里。可以重试。")
         } else if model.hasUnsavedChanges {
             Text("还有改动没存。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         } else if model.isSaving {
-            Text("正在存…").font(.caption).foregroundStyle(.secondary)
+            Text("正在存…").font(SpeechRailDesignTokens.Typography.caption).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
     }
 
