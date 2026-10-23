@@ -107,6 +107,10 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 | `POST` | `/v1/speechrail/voices/{voice_id}/rollback` | 把音色别名回滚到未撤销的 revision | CAS 原子切换，不打断已获取的 lease |
 | `GET` | `/v1/speechrail/voices/clone/idempotency` | 克隆幂等状态查询 | 凭 `Idempotency-Key` 读取 durable 状态与 `result_id`，不重传素材 |
 | `GET` | `/v1/voices/clone/prompts` | 列出零样本克隆的官方推荐脚本 | 只读目录，供 App 提词与 Agent 选取参考文本 |
+| `GET` | `/v1/voices/{voice_id}/bundle/preview` | 导出前预览音色包内容 | 列出将写入的条目与永不携带的内容，不生成归档 |
+| `GET` | `/v1/voices/{voice_id}/bundle` | 导出自定义音色包 | 返回 `.srvoice`（ZIP）；系统预置音色不可导出 |
+| `POST` | `/v1/voices/bundles/inspect` | 只读音色包预检 | 校验格式、摘要与参考音频，报告能力差异，不写目录 |
+| `POST` | `/v1/voices/bundles` | 导入音色包 | 新建本地身份，绝不覆盖已有音色；导入后仍为未验证 |
 | `GET/PUT/DELETE` | `/v1/speechrail/pronunciation-sets` | 发音映射集管理（见 §5.8） | 列身份、读 revision、CAS 追加 revision、撤销与删除 |
 | `POST` | `/v1/speechrail/voices/{voice_id}/quality-runs` | 音色质量探针（带 evidence） | 同 `/v1/voices/{voice_id}/quality-runs`，另返回 `evidence` 命名空间 |
 | `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启（仅在支持分人的档位可用，见 §1.1） |
@@ -627,6 +631,32 @@ Authorization: Bearer <TOKEN>
 - 若音色正在被 TTS 使用，返回可重试的 `409 voice_in_use`，不会修改 registry 或音频；
 - metadata 已删除但音频清理失败时返回 `503 voice_store_unavailable`，调用方应保留
   `request_id` 并按运维手册处理受控目录中的残留文件。
+
+### 5.4.1 音色包导出、预检与导入
+
+自定义音色可以导出成 `.srvoice` 归档（ZIP，格式标识 `speechrail.voice-bundle`，
+`format_version: 1`），用于离线备份与换机迁移。完整字段、隐私边界与重新验证步骤见
+[音色包：备份、迁移与重新验证](voice-bundles.md)。
+
+```http
+GET /v1/voices/custom_1788583825_59b3/bundle/preview
+GET /v1/voices/custom_1788583825_59b3/bundle
+POST /v1/voices/bundles/inspect     # multipart: bundle=<file>
+POST /v1/voices/bundles             # multipart: bundle=<file>[, name=<override>]
+```
+
+- `preview` 只读：返回将写入的条目（`manifest.json`、可选的 `audio/reference.wav`）以及
+  永不携带的内容清单，供用户在下载前确认。
+- `GET .../bundle` 返回 `application/zip`，`Content-Disposition` 同时给出 ASCII 回退名与
+  RFC 5987 的 UTF-8 文件名；系统预置音色返回 `400 bundle_system_voice_not_exportable`。
+- `inspect` 不写任何存储、不加载模型：返回名称、来源、格式版本、参考音频字节数、
+  按本机规则**重新测量**的时长、所需能力与缺失能力。损坏、摘要不符、路径穿越、
+  符号链接、超限解压与未知 schema 都返回稳定的 `bundle_*` 错误码。
+- `import` 总是新建本地 id：同名音色会改名为「原名（导入）」并在 `renamed_from` 中报告，
+  重复导入产生两个独立音色，已有音色与其绑定关系不被改动。响应中的
+  `validation` 恒为 `unverified`——包内不携带验证结论，导入后必须在本机重新核验。
+
+导入是单次原子目录提交：任一步失败都不会留下半个音色或残留参考音频。
 
 ### 5.5 在语音合成中使用自定义音色
 创建成功后，自建音色的 `id` 可直接传入任何合成接口：

@@ -1047,6 +1047,179 @@ paths:
           $ref: '#/components/responses/BackendDeliveryInvalid'
         '503':
           $ref: '#/components/responses/BackendNotReady'
+  /v1/voices/bundles:
+    post:
+      operationId: importVoiceBundle
+      tags: [speech]
+      summary: Import a voice bundle as a new local voice
+      description: |
+        Imports a SpeechRail voice bundle (`speechrail.voice-bundle`, format
+        version 1) as a **new** custom voice. An existing voice is never
+        replaced: the import always mints a fresh local id, and a name that
+        collides with an existing custom voice is suffixed instead of reused,
+        with the original reported as `renamed_from`.
+
+        The bundle's own validation and quality claims are not imported. The
+        new voice starts `unverified` and has to pass this machine's gate
+        before it can be used for production work.
+
+        Import is one atomic catalog commit: on any failure nothing is
+        registered and no reference audio is left behind.
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [bundle]
+              properties:
+                bundle:
+                  type: string
+                  format: binary
+                  description: The `.srvoice` ZIP archive.
+                name:
+                  type: string
+                  description: Override the voice name stored in the manifest.
+      responses:
+        '201':
+          description: Imported voice
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceBundleImportResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: A voice with this identity already exists
+        '413':
+          $ref: '#/components/responses/AudioTooLarge'
+        '415':
+          description: Unsupported bundle format or format version
+        '422':
+          description: Bundle integrity failed (digest, asset or reference audio)
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voices/bundles/inspect:
+    post:
+      operationId: inspectVoiceBundle
+      tags: [speech]
+      summary: Verify a voice bundle without importing it
+      description: |
+        Read-only preflight. Parses and verifies the archive, re-measures the
+        reference audio against the local clone requirements, and reports the
+        name, source, format version, required capabilities and any capability
+        gap in the active tier.
+
+        Nothing is written and no model is loaded, so cancelling an import
+        after an inspection leaves the voice catalog byte-identical.
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [bundle]
+              properties:
+                bundle:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Inspection result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceBundleInspection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/AudioTooLarge'
+        '415':
+          description: Unsupported bundle format or format version
+        '422':
+          description: Bundle integrity failed (digest, asset or reference audio)
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voices/{voice_id}/bundle:
+    get:
+      operationId: exportVoiceBundle
+      tags: [speech]
+      summary: Export a custom voice as a versioned bundle
+      description: |
+        Returns a `.srvoice` ZIP containing a readable manifest and, for clone
+        voices, the reference audio. The bundle carries no absolute paths, no
+        validation verdicts, no model weights and no secrets.
+
+        Built-in preset voices ship with the service and are rejected with
+        `bundle_system_voice_not_exportable`.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The bundle archive
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Voice not found
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voices/{voice_id}/bundle/preview:
+    get:
+      operationId: previewVoiceBundle
+      tags: [speech]
+      summary: Describe what an export would contain
+      description: |
+        Lists the entries an export would produce and states explicitly what a
+        bundle never contains, so a user can confirm before downloading. No
+        archive is built and nothing is written.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Export preview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceBundlePreview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Voice not found
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
   /v1/voices/{voice_id}:
     get:
       operationId: getVoice
@@ -3748,6 +3921,120 @@ components:
           type: string
           pattern: '^[a-zA-Z0-9_-]{1,64}$'
           description: Optional identifier for the cloned voice
+    VoiceBundlePreview:
+      type: object
+      required: [voice_id, name, mode, includes_reference_audio, includes_reference_text, entries, excluded]
+      properties:
+        voice_id:
+          type: string
+        name:
+          type: string
+        mode:
+          type: string
+          enum: [clone, instruction]
+        revision:
+          type: string
+          nullable: true
+        includes_reference_audio:
+          type: boolean
+        includes_reference_text:
+          type: boolean
+        reference_audio_bytes:
+          type: integer
+        reference_audio_sha256:
+          type: string
+          nullable: true
+        entries:
+          type: array
+          items:
+            type: string
+        excluded:
+          type: array
+          description: Content a bundle never carries, stated so the user can confirm.
+          items:
+            type: string
+    VoiceBundleInspection:
+      type: object
+      required: [format, format_version, name, mode, required_capabilities, missing_capabilities, importable]
+      properties:
+        format:
+          type: string
+        format_version:
+          type: integer
+        name:
+          type: string
+        mode:
+          type: string
+          enum: [clone, instruction]
+        exported_at:
+          type: string
+        source_voice_id:
+          type: string
+        source_revision:
+          type: string
+          nullable: true
+        includes_reference_audio:
+          type: boolean
+        includes_reference_text:
+          type: boolean
+        reference_audio_bytes:
+          type: integer
+        duration_seconds:
+          type: number
+          description: Re-measured from the reference container, not read from the manifest.
+        required_capabilities:
+          type: array
+          items:
+            type: string
+        missing_capabilities:
+          type: array
+          description: Capabilities the active tier does not declare; import still succeeds.
+          items:
+            type: string
+        name_conflict:
+          type: boolean
+        importable:
+          type: boolean
+        notes:
+          type: array
+          items:
+            type: string
+    VoiceBundleImportResult:
+      type: object
+      required: [id, name, mode, validation]
+      properties:
+        id:
+          type: string
+          description: New local voice id; never an existing one.
+        name:
+          type: string
+        mode:
+          type: string
+          enum: [clone, instruction]
+        revision:
+          type: string
+          nullable: true
+        renamed_from:
+          type: string
+          nullable: true
+          description: The requested name when it collided with an existing custom voice.
+        source_voice_id:
+          type: string
+        source_revision:
+          type: string
+          nullable: true
+        validation:
+          type: string
+          enum: [unverified]
+          description: Imported voices always start unverified on this machine.
+        missing_capabilities:
+          type: array
+          items:
+            type: string
+        notes:
+          type: array
+          items:
+            type: string
     VoiceQualityReference:
       type: object
       required:

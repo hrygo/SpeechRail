@@ -34,6 +34,7 @@ graph TD
 4. **[⚡ Realtime ASR/TTS 协议契约](../../contracts/realtime-openai.md)**：定义 `/v1/realtime` 支持的 OpenAI Realtime 事件子集与 `speechrail.*` 扩展，包含 Server VAD 事实、调用方显式 TTS cancel 与 namespaced diarization opt-in。
 5. **[📑 OpenAPI 3.1 规范文档](../../contracts/openapi.yaml)**：提供标准 OpenAPI 3.1 Schema，支持直接导入 Postman、Apifox 或生成客户端 SDK。
 6. **[🧭 有效能力快照与安全音色目录](effective-capabilities.md)**：说明 `effective_capabilities_v1`、同代一致性、ETag 与安全 voice 列表投影。
+7. **[🎁 音色包：备份、迁移与重新验证](voice-bundles.md)**：`.srvoice` 的格式、包内不携带的内容、只读预检与导入后必须重新验证的边界。
 
 ---
 
