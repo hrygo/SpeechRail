@@ -13,6 +13,7 @@ import SwiftUI
 /// 高级操作（标签、项目、删除、导出）留在详情里的"更多"菜单，
 /// 首屏只留搜索、翻页和纪要/转录切换。
 struct MeetingKnowledgeLibraryView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(SessionPreferences.self) private var preferences
     @State private var model: MeetingLibraryModel
     @State private var searchText = ""
@@ -86,8 +87,92 @@ struct MeetingKnowledgeLibraryView: View {
     public var body: some View {
         NavigationSplitView {
             listColumn
+                .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 400)
         } detail: {
             detailColumn
+        }
+        .frame(
+            minWidth: 920,
+            idealWidth: 1040,
+            maxWidth: .infinity,
+            minHeight: 580,
+            idealHeight: 680,
+            maxHeight: .infinity
+        )
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    askPresented = true
+                } label: {
+                    Label("问知识库", systemImage: "sparkles")
+                }
+                .help("向知识库提问，跨会议检索答案与依据")
+
+                Button {
+                    prepPresented = true
+                    Task { await model.loadPrepDraft() }
+                } label: {
+                    Label("会前准备稿", systemImage: "doc.text")
+                }
+                .help("汇总上一场未决事项与待核对结论，辅助本次会前准备")
+
+                Menu {
+                    Button {
+                        openItemsPresented = true
+                        Task { await model.loadOpenItems(offset: 0) }
+                    } label: {
+                        Label(
+                            model.openItemCounts.total > 0
+                                ? "未完成事项 (\(model.openItemCounts.total))"
+                                : "未完成事项",
+                            systemImage: "checklist"
+                        )
+                    }
+                    Button {
+                        conflictsPresented = true
+                        Task { await model.loadConflicts() }
+                    } label: {
+                        Label(
+                            model.conflicts.isEmpty
+                                ? "跨会议冲突"
+                                : "跨会议冲突 (\(model.conflicts.count))",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                    }
+                    Divider()
+                    Button(action: chooseArchiveToImport) {
+                        Label("导入归档包…", systemImage: "square.and.arrow.down")
+                    }
+                    Divider()
+                    Button {
+                        projectNameDraft = ""
+                        newProjectPromptPresented = true
+                    } label: {
+                        Label("新建项目…", systemImage: "folder.badge.plus")
+                    }
+                    Button {
+                        manageProjectsPresented = true
+                    } label: {
+                        Label("管理项目…", systemImage: "folder")
+                    }
+                } label: {
+                    Label("更多操作", systemImage: "ellipsis.circle")
+                }
+                .menuIndicator(.hidden)
+                .help("跨会议追踪、待办事项、冲突裁决与归档包管理")
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("完成") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            ToolbarItem(placement: .cancellationAction) {
+                Button("关闭") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
         }
         .sheet(item: $reviewTarget) { target in
             reviewSheet(target)
@@ -223,68 +308,105 @@ struct MeetingKnowledgeLibraryView: View {
             Divider()
             content
         }
-        .frame(minWidth: SpeechRailDesignTokens.Layout.sidebarIdealWidth)
+        .frame(minWidth: 280)
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text("会议知识库")
-                .font(.title)
-                .accessibilityAddTraits(.isHeader)
-            // 计数与列表同源，所以这里可以直接说"共 N 场"。
-            Text(subtitle)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            searchField
-            projectMenu
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                archivedToggle
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("会议知识库")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
-                Button {
-                    openItemsPresented = true
-                    Task { await model.loadOpenItems(offset: 0) }
-                } label: {
-                    // 数字是**全量总数**，不是这一页有几个。用户问"还有多少"的时候，
-                    // 答案不能随翻页变化。
-                    Text(model.openItemCounts.total > 0
-                        ? "未完成事项 \(model.openItemCounts.total)"
-                        : "未完成事项")
-                }
-                .buttonStyle(.link)
-                .controlSize(.small)
-                .help("列出所有还没做完的事项")
-                Button {
-                    conflictsPresented = true
-                    Task { await model.loadConflicts() }
-                } label: {
-                    Text(model.conflicts.isEmpty
-                        ? "跨会议冲突"
-                        : "跨会议冲突 \(model.conflicts.count)")
-                }
-                .buttonStyle(.link)
-                .controlSize(.small)
-                .help("两场会的结论对不上时，在这里看，并决定哪一条作数")
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            searchField
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                projectMenu
+                Spacer()
+                archivedToggle
+            }
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Button {
                     askPresented = true
                 } label: {
-                    Text("问知识库")
+                    HStack(spacing: 4) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 11))
+                        Text("问知识库")
+                            .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
                 }
-                .buttonStyle(.link)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("问一句跨会议的问题，答案会标出依据的是哪几场会的哪几条")
+                .help("向知识库提问，跨会议检索答案与依据")
+
                 Button {
                     prepPresented = true
                     Task { await model.loadPrepDraft() }
                 } label: {
-                    Text("会前准备稿")
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 11))
+                        Text("会前准备稿")
+                            .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
                 }
-                .buttonStyle(.link)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("把上次没答完的、还没做的和需要先核对的结论列出来，供下一场会前准备")
-                Button("导入归档包…", action: chooseArchiveToImport)
-                    .buttonStyle(.link)
-                    .controlSize(.small)
-                    .help("把别人分享的会议归档包导入这个知识库")
+                .help("汇总上一场未决事项与待核对结论，辅助本次会前准备")
+            }
+            if model.openItemCounts.total > 0 || !model.conflicts.isEmpty {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    if model.openItemCounts.total > 0 {
+                        Button {
+                            openItemsPresented = true
+                            Task { await model.loadOpenItems(offset: 0) }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "checklist")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("\(model.openItemCounts.total) 项未完成")
+                                    .font(.caption2)
+                                    .fontWeight(.medium)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.12), in: Capsule())
+                            .foregroundStyle(.blue)
+                        }
+                        .buttonStyle(.plain)
+                        .help("查看所有尚未完成的跟进事项")
+                    }
+                    if !model.conflicts.isEmpty {
+                        Button {
+                            conflictsPresented = true
+                            Task { await model.loadConflicts() }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 10))
+                                Text("\(model.conflicts.count) 处冲突")
+                                    .font(.caption2)
+                                    .fontWeight(.medium)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.15), in: Capsule())
+                            .foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .help("查看跨会议之间对不上的结论并裁决")
+                    }
+                    Spacer()
+                }
             }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
@@ -965,11 +1087,27 @@ struct MeetingKnowledgeLibraryView: View {
         } else if model.isLoadingDetail {
             ProgressView().controlSize(.small)
         } else {
-            ContentUnavailableView(
-                "选一场会议看纪要",
-                systemImage: "doc.text.magnifyingglass",
-                description: Text("左边选一场，这里会显示它的纪要和转录。服务没启动也能看，内容都在本机。")
-            )
+            ContentUnavailableView {
+                Label("选一场会议看纪要", systemImage: "doc.text.magnifyingglass")
+            } description: {
+                Text("从左侧列表中选择一场会议，此处将展示其智能纪要、待核对结论与完整转录。数据完全保留在本机。")
+            } actions: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Button("问知识库") {
+                        askPresented = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+
+                    Button("会前准备稿") {
+                        prepPresented = true
+                        Task { await model.loadPrepDraft() }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                }
+                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+            }
             .speechRailInspectorColumn()
         }
     }
@@ -1480,42 +1618,54 @@ struct MeetingLibraryRowView: View {
     let row: MeetingLibraryRow
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(row.title)
-                .font(.body)
-                .lineLimit(1)
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                if let date = row.occurredAt {
-                    Text(date.speechRailFormatted(.date))
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.secondary.opacity(0.12))
+                    .frame(width: 28, height: 28)
+                Image(systemName: row.hasMinutes ? "doc.text.fill" : "doc.text")
+                    .font(.system(size: 13))
+                    .foregroundStyle(row.needsReviewCount > 0 ? Color.orange : Color.secondary)
+            }
+            .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.title)
+                    .font(.body)
+                    .lineLimit(1)
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    if let date = row.occurredAt {
+                        Text(date.speechRailFormatted(.date))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let project = row.projectName {
+                        Text(project).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if row.needsReviewCount > 0 {
+                        Text("\(row.needsReviewCount) 条待核对")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    if !row.hasMinutes {
+                        // 没整理过的会议照样列出来。不列的话，
+                        // 用户会以为这场会不存在。
+                        Text("未整理").font(.caption).foregroundStyle(.secondary)
+                    }
+                    // 标签要看得见：只写不读的标签等于没加。
+                    ForEach(row.tags, id: \.self) { tag in
+                        Text("#\(tag)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                // 为什么命中，当场就能看见。只给会议名的话，用户还得点进去
+                // 自己找那句话——验收 4 要的是"会议**与证据**"。
+                if let excerpt = row.matchExcerpt {
+                    Text(excerpt)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .textSelection(.disabled)
                 }
-                if let project = row.projectName {
-                    Text(project).font(.caption).foregroundStyle(.secondary)
-                }
-                if row.needsReviewCount > 0 {
-                    Text("\(row.needsReviewCount) 条待核对")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-                if !row.hasMinutes {
-                    // 没整理过的会议照样列出来。不列的话，
-                    // 用户会以为这场会不存在。
-                    Text("未整理").font(.caption).foregroundStyle(.secondary)
-                }
-                // 标签要看得见：只写不读的标签等于没加。
-                ForEach(row.tags, id: \.self) { tag in
-                    Text("#\(tag)").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            // 为什么命中，当场就能看见。只给会议名的话，用户还得点进去
-            // 自己找那句话——验收 4 要的是"会议**与证据**"。
-            if let excerpt = row.matchExcerpt {
-                Text(excerpt)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .textSelection(.disabled)
             }
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)

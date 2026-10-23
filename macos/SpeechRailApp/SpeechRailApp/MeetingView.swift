@@ -309,6 +309,7 @@ public struct MeetingView: View {
         }
         .sheet(isPresented: $showsKnowledgeLibrary) {
             MeetingKnowledgeLibraryView(coordinator: session)
+                .frame(minWidth: 920, idealWidth: 1040, minHeight: 580, idealHeight: 680)
         }
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
         .sheet(isPresented: $isLabelingSpeakers) {
