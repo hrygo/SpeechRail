@@ -340,7 +340,18 @@ public enum SpeechRailDesignTokens {
         /// 配声说明浮层固定高度；角色依据独立滚动，关闭与试听操作留在可见区域。
         public static let audiobookCastingDetailsHeight: CGFloat = 520
 
-        /// 模态弹窗与工作区 Sheet 的标准宽度阶梯。
+        /// 会议知识库工作区窗口尺寸
+        public static let meetingLibraryMinimumWidth: CGFloat = 920
+        public static let meetingLibraryIdealWidth: CGFloat = 1040
+        public static let meetingLibraryMinimumHeight: CGFloat = 580
+        public static let meetingLibraryIdealHeight: CGFloat = 680
+
+        /// 差异对比 / 决策引述标签列宽度 (48pt)
+        public static let labelledDecisionTagWidth: CGFloat = 48
+        /// 转录行序号列宽度 (24pt)
+        public static let transcriptLineNumberWidth: CGFloat = 24
+
+        /// 模态弹窗与工作区 Sheet 的标准尺寸阶梯。
         public enum Sheet {
             /// 操作结果浮层的正文滚动上限。
             public static let messageBodyMaximumHeight: CGFloat = 200
@@ -354,6 +365,12 @@ public enum SpeechRailDesignTokens {
             public static let wideWidth: CGFloat = 560
             /// 重型返修工作台（配音返修）：720pt。
             public static let prominentWidth: CGFloat = 720
+
+            /// 弹层常用最小高度阶梯
+            public static let compactMinimumHeight: CGFloat = 320
+            public static let regularMinimumHeight: CGFloat = 360
+            public static let mediumMinimumHeight: CGFloat = 380
+            public static let formMinimumHeight: CGFloat = 420
         }
     }
 

@@ -309,7 +309,12 @@ public struct MeetingView: View {
         }
         .sheet(isPresented: $showsKnowledgeLibrary) {
             MeetingKnowledgeLibraryView(coordinator: session)
-                .frame(minWidth: 920, idealWidth: 1040, minHeight: 580, idealHeight: 680)
+                .frame(
+                    minWidth: SpeechRailDesignTokens.Layout.meetingLibraryMinimumWidth,
+                    idealWidth: SpeechRailDesignTokens.Layout.meetingLibraryIdealWidth,
+                    minHeight: SpeechRailDesignTokens.Layout.meetingLibraryMinimumHeight,
+                    idealHeight: SpeechRailDesignTokens.Layout.meetingLibraryIdealHeight
+                )
         }
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
         .sheet(isPresented: $isLabelingSpeakers) {
