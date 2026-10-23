@@ -167,12 +167,10 @@ struct MeetingKnowledgeLibraryView: View {
                 }
                 .keyboardShortcut(.defaultAction)
             }
-            ToolbarItem(placement: .cancellationAction) {
-                Button("关闭") {
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-            }
+        }
+        .onKeyPress(.escape) {
+            dismiss()
+            return .handled
         }
         .sheet(item: $reviewTarget) { target in
             reviewSheet(target)
@@ -282,21 +280,18 @@ struct MeetingKnowledgeLibraryView: View {
     }
 
     private var deletionDialogTitle: String {
-        "确定要\(pendingDeletion?.mode.title ?? "删除")「\(pendingDeletion?.title ?? "")」吗？"
+        "确定删除「\(pendingDeletion?.title ?? "")」吗？"
     }
 
     /// 确认面板要说明**这一步之后还剩什么**，不只说"不可撤销"。
-    ///
-    /// 只写"不可撤销"的话，用户没法判断值不值；说清剩什么，他才判断得了。
     private func deletionDialogMessage(_ pending: PendingDeletion) -> String {
         switch pending.mode {
         case .archive:
-            return "归档之后它不再出现在搜索、导出和问答里，但数据一行不少，随时可以撤销。"
+            return "归档后它不再出现在搜索和问答中，数据完整保留，可随时恢复。"
         case .removeTranscript:
-            return "完整转录会被移除，纪要和结论留着。引用结论的原句从此读不到了，"
-                + "那些结论会被标成需要你再看一眼。这一步不能撤销。"
+            return "将永久清除录音文字记录，保留纪要与结论，此操作无法撤销。"
         case .deleteEverything:
-            return "转录、纪要、结论、引用和来源快照会一起删掉，删完就没了。这一步不能撤销。"
+            return "将永久删除该会议的全部转写、纪要、结论与关联记录，此操作无法撤销。"
         }
     }
 
@@ -328,40 +323,6 @@ struct MeetingKnowledgeLibraryView: View {
                 projectMenu
                 Spacer()
                 archivedToggle
-            }
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Button {
-                    askPresented = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 11))
-                        Text("问知识库")
-                            .font(.caption)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("向知识库提问，跨会议检索答案与依据")
-
-                Button {
-                    prepPresented = true
-                    Task { await model.loadPrepDraft() }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "doc.text")
-                            .font(.system(size: 11))
-                        Text("会前准备稿")
-                            .font(.caption)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("汇总上一场未决事项与待核对结论，辅助本次会前准备")
             }
             if model.openItemCounts.total > 0 || !model.conflicts.isEmpty {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -1056,6 +1017,25 @@ struct MeetingKnowledgeLibraryView: View {
                                 bottom: SpeechRailDesignTokens.Spacing.xs,
                                 trailing: SpeechRailDesignTokens.Spacing.md
                             ))
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    requestRowDeletion(row, mode: .deleteEverything)
+                                } label: {
+                                    Label("删除会议", systemImage: "trash")
+                                }
+                                Button {
+                                    requestRowDeletion(row, mode: .archive)
+                                } label: {
+                                    Label("归档会议", systemImage: "archivebox")
+                                }
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    requestRowDeletion(row, mode: .deleteEverything)
+                                } label: {
+                                    Label("删除", systemImage: "trash")
+                                }
+                            }
                     }
                     if model.hasMore {
                         Button("再显示 \(min(model.limit, max(0, model.counts.total - model.rows.count))) 场") {
@@ -1069,6 +1049,14 @@ struct MeetingKnowledgeLibraryView: View {
                 }
             }
             .speechRailSelectableList()
+            .onKeyPress(.delete) {
+                if let selectedID = model.selectedDocumentID,
+                   let row = model.rows.first(where: { $0.id == selectedID }) {
+                    requestRowDeletion(row, mode: .deleteEverything)
+                    return .handled
+                }
+                return .ignored
+            }
         }
     }
 
@@ -1221,7 +1209,23 @@ struct MeetingKnowledgeLibraryView: View {
                 }
             }
             Spacer(minLength: 0)
-            moreMenu(snapshot)
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Button(role: .destructive) {
+                    if let docID = model.selectedDocumentID {
+                        requestDeletion(docID, mode: .deleteEverything, snapshot)
+                    }
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("删除这场会议")
+                .accessibilityLabel("删除这场会议")
+
+                moreMenu(snapshot)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1502,9 +1506,6 @@ struct MeetingKnowledgeLibraryView: View {
         .frame(minWidth: 360, alignment: .leading)
     }
 
-    /// 要不要确认，判据是**可逆性**：归档能撤，不问；移除转录与完整删除都是单向门，
-    /// 问一句。移除转录之后这一场在列表和详情里都还在，容易让人以为"没什么大不了"——
-    /// 但原句是被永久删掉的，所以更该问。
     private func requestDeletion(
         _ documentID: String,
         mode: MeetingDeletionMode,
@@ -1515,6 +1516,17 @@ struct MeetingKnowledgeLibraryView: View {
             return
         }
         pendingDeletion = PendingDeletion(documentID: documentID, mode: mode, title: snapshot.title)
+    }
+
+    private func requestRowDeletion(
+        _ row: MeetingLibraryRow,
+        mode: MeetingDeletionMode
+    ) {
+        guard MeetingLibraryModel.requiresConfirmation(mode) else {
+            Task { await model.delete(row.id, mode: mode) }
+            return
+        }
+        pendingDeletion = PendingDeletion(documentID: row.id, mode: mode, title: row.title)
     }
 
     /// 删除和撤销回执由宿主浮层呈现，不改变详情标题的高度。
@@ -1566,9 +1578,33 @@ struct MeetingKnowledgeLibraryView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button("核对与修改") { Task { await beginReview(snapshot) } }
                 .padding(.top, SpeechRailDesignTokens.Spacing.sm)
-            Text("这场会还没整理出纪要。下面是转录里有的内容。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Image(systemName: "doc.text")
+                        .foregroundStyle(.secondary)
+                    Text("这场会议还没有整理出纪要。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Button("查看转录内容") {
+                        model.detailTab = .transcript
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button("删除空会议", role: .destructive) {
+                        if let docID = model.selectedDocumentID {
+                            requestDeletion(docID, mode: .deleteEverything, snapshot)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            .padding(SpeechRailDesignTokens.Spacing.md)
+            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
         }
         if !snapshot.items.isEmpty {
             Divider()
