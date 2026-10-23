@@ -200,7 +200,7 @@ public enum AudiobookProductionQueueStoreError: LocalizedError, Equatable, Senda
         case let .unreadable(reason):
             return "队列记录读不出来：\(reason)。请先备份或移除队列记录文件再打开队列。"
         case let .unsupportedSchema(schema):
-            return "队列记录格式不被这个版本支持，原文件没有被改动。"
+            return "队列记录格式（\(schema)）不被这个版本支持，原文件没有被改动。"
         case .atomicWriteFailed:
             return "队列记录保存失败，上一份记录仍然保留。"
         }
@@ -257,7 +257,8 @@ public final class AudiobookProductionQueueFileStore: AudiobookProductionQueuePe
         do {
             data = try encoder.encode(plan)
         } catch {
-            throw AudiobookProductionQueueStoreError.unreadable(reason: error.localizedDescription)
+            // 编码失败也是保存失败：说成「读不出来」会把用户引向一份好文件。
+            throw AudiobookProductionQueueStoreError.atomicWriteFailed
         }
         let directory = fileURL.deletingLastPathComponent()
         let temporary = directory.appendingPathComponent(".\(fileURL.lastPathComponent).\(UUID().uuidString).tmp")
@@ -387,11 +388,18 @@ public actor AudiobookProductionQueue {
     public func resume() throws {
         guard isPaused else { throw AudiobookProductionQueueError.queueNotPaused }
         isPaused = false
+        // 暂停是整队动作，继续也是：被暂停的项回到未开始，从检查点接着做。
+        // 否则暂停的项既不会自己跑（循环只挑未开始项），也没有取消或重试的
+        // 出口，会把一部作品永久留在队列里。
+        for index in plan.items.indices where plan.items[index].state == .paused {
+            plan.items[index].state = .queued
+            plan.items[index].failureReason = nil
+        }
         try persist()
         startLoopIfNeeded()
     }
 
-    /// 取消单项。跑着的那项会等收尾后标为已暂停（不冒充完成），
+    /// 取消单项。跑着的那项会等收尾后离开队列（不冒充完成，也不留在队列里占位），
     /// 并且队列随之停住，由用户决定是否继续剩下的项。
     public func cancelItem(itemID: UUID) async throws {
         guard let index = plan.items.firstIndex(where: { $0.id == itemID }) else {
@@ -403,12 +411,14 @@ public actor AudiobookProductionQueue {
             plan.items.remove(at: index)
             try persist()
         case .running, .waiting:
-            // 在跑：请求停止并等它实际收尾，再标成已暂停。队列随之停住，
-            // 剩下的项等用户明确恢复——不偷偷接着做。
+            // 在跑：请求停止并等它实际收尾，再把这一项移出队列。已提交的片段与
+            // 检查点都留在作品库里，重新入队会从那里继续；把取消的项留在队列里
+            // 只会得到一个既不会跑、也没有任何出口的状态（还会一直占着这部作品）。
             isPaused = true
             activeStopRequested = true
             await executor.cancelActive()
             await loopTask?.value
+            plan.items.removeAll { $0.id == itemID }
             try persist()
         default:
             throw AudiobookProductionQueueError.itemNotActive(itemID)

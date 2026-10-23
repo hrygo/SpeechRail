@@ -416,12 +416,14 @@ final class AudiobookProductionQueueTests: XCTestCase {
         XCTAssertEqual(snapshot.items[1].state, .queued)
         XCTAssertEqual(executor.startedItemIDs.count, 1)
 
-        // 明确恢复后才继续。
+        // 明确恢复后才继续：暂停是整队动作，继续也是——第一项回到未开始接着做，
+        // 然后才轮到第二项。
         try await queue.resume()
         await waitUntilQueueStops(queue, executor)
         let probe2 = await queueSnapshot(queue)
+        XCTAssertEqual(probe2.items[0].state, .completed)
         XCTAssertEqual(probe2.items[1].state, .completed)
-        XCTAssertEqual(executor.startedItemIDs.count, 2)
+        XCTAssertEqual(executor.startedItemIDs.count, 3)
     }
 
     func testAnUnconfirmedRemoteStopRefusesToStartTheNextItem() async throws {
@@ -461,11 +463,14 @@ final class AudiobookProductionQueueTests: XCTestCase {
         try await cancelTask.value
 
         let snapshot = await queue.snapshot()
-        XCTAssertEqual(snapshot.items[0].state, .paused)
-        XCTAssertNotEqual(snapshot.items[0].state, .completed)
-        XCTAssertEqual(snapshot.items[0].failureReason, "已取消。")
+        // 取消的项不冒充完成，也不留在队列里占位：已提交片段在作品库里，
+        // 重新入队会从检查点继续。
+        XCTAssertEqual(snapshot.items.count, 0)
         let probe4 = await queue.activeQueueItemID()
         XCTAssertNil(probe4)
+
+        // 离开队列意味着这部作品可以重新入队，不会被 duplicateBook 永久挡着。
+        try await queue.enqueue(bookID: book, title: "一", plan: makePlan(bookID: book))
     }
 
     func testCancellingAQueuedItemRemovesItFromTheQueue() async throws {
