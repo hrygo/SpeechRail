@@ -9,6 +9,7 @@ public struct ControlMenuView: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(CaptionSession.self) private var caption
     @Environment(MeetingSession.self) private var meeting
+    @Environment(DictationSession.self) private var dictation
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
     @State private var pendingServiceAction: ControlCommand?
@@ -182,6 +183,18 @@ public struct ControlMenuView: View {
                     .speechRailMenuRow()
             }
             .disabled(session.occupancy?.kind == .meeting)
+
+            // 听写不打开页面：按下后直接录，结束时写回当时的前台应用（issue #414）。
+            Button {
+                Task { await dictation.toggle() }
+            } label: {
+                Label(
+                    dictation.phase.isRecording ? "结束听写" : "开始听写",
+                    systemImage: dictation.phase.isRecording ? "mic.fill" : "mic"
+                )
+                .speechRailMenuRow()
+            }
+            .disabled(dictation.phase.isBusy)
 
             if !session.isIdle {
                 Button {

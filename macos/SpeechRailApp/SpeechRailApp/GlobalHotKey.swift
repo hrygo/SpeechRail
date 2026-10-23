@@ -8,7 +8,7 @@ import Foundation
 // 理由只有一条，但它是决定性的：Carbon 这条路**不需要辅助功能 / 输入监控授权**，
 // 于是"按一个键唤起字幕带"不会换来一个系统授权弹窗。
 //
-// 四个键与规格一致：`⌘⇧L` 字幕 · `⌘⇧N` 会议 · `⌘⇧.` 结束 · `⌘⇧I` 内心 OS。
+// 五个键与规格一致：`⌘⇧L` 字幕 · `⌘⇧N` 会议 · `⌘⇧.` 结束 · `⌘⇧I` 内心 OS · `⌘⇧D` 听写。
 //
 // 边界：热键只**发号**，不做会话判定。按下时"能不能开始"由 `SessionCoordinator` 判
 // ——热键不认识占用、不认识设备，否则同一件事会有两处实现（§5.4 的同一条理由）。
@@ -22,6 +22,8 @@ public final class GlobalHotKeyCenter {
         case startMeeting = 2
         case finishCurrent = 3
         case toggleInnerOS = 4
+        /// 听写：把已有 ASR 变成随处可用的输入入口（issue #414）。
+        case toggleDictation = 5
 
         /// 界面上与文档里都写这一份（键位只在两处声明：这里与规格 §5.2）。
         public var display: String {
@@ -30,6 +32,7 @@ public final class GlobalHotKeyCenter {
             case .startMeeting: "⌘⇧N"
             case .finishCurrent: "⌘⇧."
             case .toggleInnerOS: "⌘⇧I"
+            case .toggleDictation: "⌘⇧D"
             }
         }
 
@@ -40,6 +43,7 @@ public final class GlobalHotKeyCenter {
             case .startMeeting: UInt32(kVK_ANSI_N)
             case .finishCurrent: UInt32(kVK_ANSI_Period)
             case .toggleInnerOS: UInt32(kVK_ANSI_I)
+            case .toggleDictation: UInt32(kVK_ANSI_D)
             }
         }
 
