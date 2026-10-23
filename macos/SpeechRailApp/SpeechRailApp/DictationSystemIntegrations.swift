@@ -148,6 +148,7 @@ public struct AccessibilityDictationDeliverer: DictationTextDelivering {
         guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focusedRaw) == .success,
               let focusedRaw
         else { return .unsupportedTarget }
+        // AXUIElement 是 CoreFoundation 类型，编译器保证该转换必然成功，无需 as? 分支。
         let element = focusedRaw as! AXUIElement
 
         if AXUIElementSetAttributeValue(
