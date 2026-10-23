@@ -2,9 +2,47 @@ import Foundation
 import SpeechRailControlKit
 import XCTest
 import Synchronization
+import Testing
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
+
+struct AudiobookProductionRowSnapshotTests {
+    private func fragments(count: Int) -> [AudiobookFragment] {
+        let bookID = UUID(), chapterID = UUID(), roleID = UUID()
+        return (0..<count).map { index in
+            AudiobookFragment(bookID: bookID, chapterID: chapterID, ordinal: index,
+                roleID: roleID, sourceRange: .init(lowerBound: Int64(index), upperBound: Int64(index + 1)),
+                atomIDs: [], localAssignmentDigest: "assignment", voiceBindingDigest: "voice",
+                policyDigest: "policy", dependencyDigest: "dependency")
+        }
+    }
+
+    @Test(arguments: [0, 1, 3, 130])
+    func preservesOrderIdentityAndPredecessors(count: Int) {
+        let source = fragments(count: count)
+        let rows = AudiobookWorkspaceProjection.productionRows(source)
+        #expect(rows.map(\.id) == source.map(\.id))
+        #expect(rows.map(\.fragment) == source)
+        #expect(rows.map(\.previousFragment) == source.indices.map { $0 == 0 ? nil : source[$0 - 1] })
+    }
+
+    @Test(arguments: [0, 1, 130])
+    func deferredRowsRemainCoherentAfterSourceReplacement(replacementCount: Int) {
+        var current = fragments(count: 130)
+        let original = current
+        let rows = AudiobookWorkspaceProjection.productionRows(current)
+        // LazyVStack may still render old rows after a chapter refresh or switch.
+        let deferredRender = { rows.map { ($0.fragment, $0.previousFragment) } }
+        current = fragments(count: replacementCount)
+        let rendered = deferredRender()
+        #expect(rendered.map(\.0) == original)
+        #expect(rendered.map(\.1) == original.indices.map { $0 == 0 ? nil : original[$0 - 1] })
+        let refreshed = AudiobookWorkspaceProjection.productionRows(current)
+        #expect(refreshed.map(\.fragment) == current)
+        #expect(refreshed.map(\.previousFragment) == current.indices.map { $0 == 0 ? nil : current[$0 - 1] })
+    }
+}
 
 final class AudiobookWorkspacePerformanceTests: XCTestCase {
     private final class WorkCounter: Sendable {

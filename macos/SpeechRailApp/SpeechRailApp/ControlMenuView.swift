@@ -12,6 +12,7 @@ public struct ControlMenuView: View {
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
     @State private var pendingServiceAction: ControlCommand?
+    @State private var operationNoticeID = UUID()
 
     public init() {}
 
@@ -19,7 +20,7 @@ public struct ControlMenuView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Menu.sectionSpacing) {
             menuHeader
             if let operation = model.serviceOperation,
-               operation.phase.isActive || operation.phase == .failed
+               operation.phase.isActive
             {
                 ServiceOperationCompactStatus(operation: operation)
             }
@@ -51,6 +52,8 @@ public struct ControlMenuView: View {
         .padding(SpeechRailDesignTokens.Menu.contentPadding)
         .frame(width: SpeechRailDesignTokens.Menu.contentWidth, alignment: .leading)
         .controlSize(.regular)
+        .operationFeedback([serviceOperationFeedback])
+        .onChange(of: model.serviceOperation) { _, _ in operationNoticeID = UUID() }
         .confirmationDialog(
             confirmationTitle,
             isPresented: isConfirmingServiceAction,
@@ -78,6 +81,17 @@ public struct ControlMenuView: View {
             }
 #endif
         }
+    }
+
+    private var serviceOperationFeedback: OperationFeedback? {
+        guard let operation = model.serviceOperation,
+              operation.phase == .failed || operation.phase == .completed else { return nil }
+        let succeeded = operation.phase == .completed
+        return OperationFeedback(
+            SpeechRailOperationMessagePresentation.text(operation.message ?? (succeeded ? "服务状态已刷新。" : "服务命令未完成。")),
+            tone: succeeded ? .healthy : .critical, title: succeeded ? "服务操作已完成" : "服务操作未完成",
+            id: operationNoticeID.uuidString, autoDismiss: succeeded
+        )
     }
 
     /// 菜单栏是快速入口，不是技术看板：主层只保留身份、服务结论和档位。

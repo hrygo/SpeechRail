@@ -85,11 +85,16 @@ public struct VoiceCloneView: View {
                 }
             }
         }
-        .alert("声音目录未保存", isPresented: Binding(get: { catalogSaveError != nil }, set: { if !$0 { catalogSaveError = nil } })) {
-            Button("知道了", role: .cancel) { catalogSaveError = nil }
-        } message: {
-            Text(catalogSaveError ?? "请稍后重试。")
-        }
+        .operationFeedback([
+            OperationFeedback(catalogSaveError, title: "声音目录未保存", onDismiss: { catalogSaveError = nil }),
+            outputCheckOperationFeedback,
+            OperationFeedback(cloneRegistrationIsPending ? nil : model.cloneMessage,
+                              tone: .attention, title: "这一步没完成", onDismiss: { model.clearCloneMessage() }),
+            OperationFeedback(model.recording.message, tone: .attention, title: "录音未完成",
+                              onDismiss: { model.recording.clearMessage() },
+                              actionTitle: model.recording.permissionDenied ? "打开系统设置" : nil,
+                              action: model.recording.permissionDenied ? { openMicrophoneSettings() } : nil)
+        ])
         .onDisappear {
             model.stopAudio()
             isPlayingTake = false
@@ -760,16 +765,31 @@ public struct VoiceCloneView: View {
         VoiceWorkflowModel.cloneQualityDiagnosticMessage(for: message)
     }
 
+    /// 服务仍在处理是任务状态；其余消息是可关闭的操作反馈。
+    private var cloneRegistrationIsPending: Bool {
+        model.cloneMessage == "注册请求已送达，服务仍在处理；请稍后重新检查。"
+    }
+
+    private var outputCheckOperationFeedback: OperationFeedback? {
+        guard let voice = model.lastRegisteredCloneVoice,
+              model.voiceOutputCheck.voiceID == voice.id else { return nil }
+        switch model.voiceOutputCheck {
+        case let .error(_, _, message):
+            return OperationFeedback(message, title: "配音效果检查未完成", actionTitle: "重新检查",
+                                     action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } })
+        case .passedNotPersisted:
+            return OperationFeedback("「\(voice.name)」本次检查已通过，但结果尚未保存，请重新检查。",
+                                     tone: .attention, title: "验收结果未保存", actionTitle: "重新检查",
+                                     action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } })
+        default:
+            return nil
+        }
+    }
+
     @ViewBuilder
     private var feedback: some View {
-        if let message = model.cloneMessage ?? model.recording.message {
-            StatusBanner(
-                tone: .attention,
-                title: "这一步没完成",
-                message: message,
-                actionTitle: model.recording.permissionDenied ? "打开系统设置" : nil,
-                action: model.recording.permissionDenied ? { openMicrophoneSettings() } : nil
-            )
+        if cloneRegistrationIsPending, let message = model.cloneMessage {
+            StatusBanner(tone: .attention, title: "正在等待注册结果", message: message)
         }
         if let report = model.cloneEvaluation {
             StatusBanner(
@@ -803,15 +823,9 @@ public struct VoiceCloneView: View {
                         actionTitle: "前往音色库查看",
                         action: { navigation.request(.voiceLibrary) }
                     )
-                case .passedNotPersisted:
-                    StatusBanner(
-                        tone: .attention,
-                        title: "验收结果未保存",
-                        message: "「\(voice.name)」本次检查已通过，但结果尚未保存，请重新检查。",
-                        actionTitle: "重新检查",
-                        action: { Task { await model.checkVoiceOutput(voiceID: voice.id) } }
-                    )
-                case let .failed(_, _, message), let .error(_, _, message):
+                case .passedNotPersisted, .error:
+                    EmptyView()
+                case let .failed(_, _, message):
                     let guidance = Self.cloneQualityDiagnosticMessage(for: message)
                     let fullMessage = guidance.isEmpty
                         ? "「\(voice.name)」未达到正式制作要求：\(message)"

@@ -23,17 +23,10 @@ struct AudiobookVoicePreparationSheet: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
-            if let message = workflow.voiceCreationErrorMessage {
-                NoticeBar(tone: .warning, message: message)
-            }
             if isCreationBlocked {
                 Text("正在处理当前作品，请稍候再创建声音；资料仍可浏览。")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            }
-            if let summary = workflow.voiceCreationSummary {
-                Text(summary).font(SpeechRailDesignTokens.Typography.callout)
-                    .accessibilityIdentifier("audiobook-voice-batch-summary")
             }
             if workflow.voiceCreationDrafts.isEmpty {
                 ContentUnavailableView("暂无需要补充的声音", systemImage: "person.wave.2",
@@ -119,6 +112,10 @@ struct AudiobookVoicePreparationSheet: View {
                 }
             }
         }
+        .operationFeedback([
+            OperationFeedback(workflow.voiceCreationErrorMessage),
+            OperationFeedback(workflow.voiceCreationSummary, tone: .neutral, title: "音色创建结果")
+        ])
     }
 }
 

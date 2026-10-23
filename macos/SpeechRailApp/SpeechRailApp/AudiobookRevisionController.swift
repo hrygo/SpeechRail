@@ -8,6 +8,7 @@ public struct AudiobookResumePlan: Codable, Equatable, Sendable {
     public var damagedCandidateIDs: [UUID]
     public var readyChapterIDs: [UUID]
     public var incompleteChapterIDs: [UUID]
+    public var reviewChapterIDs: [UUID]
 
     public init(
         bookID: UUID,
@@ -15,7 +16,8 @@ public struct AudiobookResumePlan: Codable, Equatable, Sendable {
         redoFragmentIDs: [UUID],
         damagedCandidateIDs: [UUID] = [],
         readyChapterIDs: [UUID] = [],
-        incompleteChapterIDs: [UUID] = []
+        incompleteChapterIDs: [UUID] = [],
+        reviewChapterIDs: [UUID] = []
     ) {
         self.bookID = bookID
         self.reusableFragmentIDs = reusableFragmentIDs
@@ -23,6 +25,7 @@ public struct AudiobookResumePlan: Codable, Equatable, Sendable {
         self.damagedCandidateIDs = damagedCandidateIDs
         self.readyChapterIDs = readyChapterIDs
         self.incompleteChapterIDs = incompleteChapterIDs
+        self.reviewChapterIDs = reviewChapterIDs
     }
 }
 
@@ -366,6 +369,7 @@ public actor AudiobookRevisionController {
         var redoIDs: [UUID] = []
         var readyChapterIDs: [UUID] = []
         var incompleteChapterIDs: [UUID] = []
+        var reviewChapterIDs: [UUID] = []
 
         for chapter in chapters {
             let chapterAnns = annotationsByChapter[chapter.id] ?? []
@@ -422,6 +426,9 @@ public actor AudiobookRevisionController {
                 readyChapterIDs.append(chapter.id)
             } else {
                 incompleteChapterIDs.append(chapter.id)
+                if chapterAllReusable, !plannedFragments.isEmpty, chapter.currentChapterRevisionID != nil {
+                    reviewChapterIDs.append(chapter.id)
+                }
             }
         }
 
@@ -431,7 +438,8 @@ public actor AudiobookRevisionController {
             redoFragmentIDs: redoIDs,
             damagedCandidateIDs: recovery.damagedCandidateIDs,
             readyChapterIDs: readyChapterIDs,
-            incompleteChapterIDs: incompleteChapterIDs
+            incompleteChapterIDs: incompleteChapterIDs,
+            reviewChapterIDs: reviewChapterIDs
         )
     }
 

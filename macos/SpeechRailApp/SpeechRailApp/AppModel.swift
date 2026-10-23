@@ -363,6 +363,11 @@ public final class AppModel {
     }
 
     public var voiceDesignPublicationRetryActionTitle: String { voiceWorkflow.voiceDesignPublicationRetryActionTitle }
+    public var canRegenerateVoiceDesignPublication: Bool { voiceWorkflow.canRegenerateVoiceDesignPublication }
+
+    public func regenerateVoiceDesignPublication(referenceText: String) {
+        voiceWorkflow.regenerateVoiceDesignPublication(referenceText: referenceText)
+    }
 
     public func cancelVoiceDesignPublication() {
         voiceWorkflow.cancelVoiceDesignPublication()

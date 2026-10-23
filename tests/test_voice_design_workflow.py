@@ -455,6 +455,34 @@ def test_numeric_misread_fails_machine_validation_and_blocks_publication(
     assert all(profile.is_system for profile in registry.list_profiles())
 
 
+@pytest.mark.parametrize("text", ["文" * 240, "*" + "字" * 18 + "*"])
+def test_replacement_text_normalization_rejection_never_creates_a_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+) -> None:
+    client, registry, synth, _ = make_client(tmp_path, monkeypatch)
+    candidate_id, _ = create_candidate(client)
+    assert client.post(f"/v1/voice-designs/{candidate_id}/cancel").status_code == 200
+    request_count = len(synth.requests)
+    for _ in range(2):
+        rejected = client.post(
+            "/v1/voice-designs",
+            json=payload(voice_id="replacement", reference_text=text),
+            headers={"Idempotency-Key": "rejected-replacement"},
+        )
+        assert rejected.status_code == 422
+        assert rejected.json()["error"]["code"] == "invalid_ref_text"
+    repository = VoiceDesignRepository(
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
+    )
+    assert len(synth.requests) == request_count
+    assert [(item.candidate_id, item.state) for item in repository.list()] == [
+        (candidate_id, "cancelled")
+    ]
+
+
 @pytest.mark.parametrize(
     "transcript",
     [NUMERIC_MISREAD_TEXT, NUMERIC_TEST_TEXT.replace("500", "五百")],
@@ -481,6 +509,9 @@ def test_reference_confirmation_checks_numbers_without_changing_rejected_candida
         assert response.status_code == 400, response.text
         assert response.json()["error"]["code"] == "transcript_mismatch"
         assert response.headers["x-request-id"]
+        comparison = response.json()["error"]["reference_comparison"]
+        assert comparison["numbers_match"] is False
+        assert comparison["required_score"] == 0.92
         assert repository.get(candidate_id) == before
     else:
         assert response.status_code == 200, response.text
@@ -489,6 +520,37 @@ def test_reference_confirmation_checks_numbers_without_changing_rejected_candida
     assert {
         path: path.read_bytes() for path in repository.assets_dir.rglob("*.wav")
     } == files_before
+
+
+def test_confirmation_mismatch_reports_bounded_current_comparison_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, registry, synth, asr = make_client(tmp_path, monkeypatch)
+    candidate_id, created = create_candidate(client)
+    repository = VoiceDesignRepository(
+        registry.artifact_path("voice_design_candidates.json"),
+        registry.artifact_path("voice_design_candidates"),
+    )
+    before = repository.get(candidate_id)
+    # The diagnosis must come from this confirmation, not the initial ASR.
+    asr.text = "完全不同的识别内容" * 100
+    synthesis_count = len(synth.requests)
+    response = client.post(f"/v1/voice-designs/{candidate_id}/confirm", json={})
+    assert response.status_code == 400
+    diagnosis = response.json()["error"]["reference_comparison"]
+    assert diagnosis["candidate_revision"] == created["revision"]
+    assert diagnosis["match_score"] < diagnosis["required_score"] == 0.92
+    assert diagnosis["numbers_match"] is True
+    assert diagnosis["differences"]
+    assert len(diagnosis["differences"]) <= 24
+    assert all(
+        len(d["expected"]) <= 24 and len(d["recognized"]) <= 24 for d in diagnosis["differences"]
+    )
+    assert diagnosis["truncated"] is True
+    assert asr.text not in response.text
+    assert repository.get(candidate_id) == before
+    assert len(synth.requests) == synthesis_count
 
 
 def test_confirm_candidate_with_traditional_chinese_reference_succeeds(

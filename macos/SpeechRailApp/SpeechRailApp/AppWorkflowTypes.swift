@@ -412,6 +412,8 @@ struct VoiceDesignPublicationContext: Equatable, Sendable {
     var candidateID: String?
     var candidateRevision: String?
     var validationID: String?
+    var supersededCandidateID: String?
+    var creationWasRejected: Bool = false
     var autoPublish: Bool = false
 }
 
@@ -548,6 +550,8 @@ public enum VoiceDesignPublicationPhase: Equatable, Sendable {
 }
 
 public struct VoiceDesignPublicationSnapshot: Equatable, Sendable {
+    public var referenceText: String = ""
+    public var referenceComparison: VoiceDesignReferenceComparison?
     public var phase: VoiceDesignPublicationPhase
     public var candidateID: String?
     public var candidateRevision: String?

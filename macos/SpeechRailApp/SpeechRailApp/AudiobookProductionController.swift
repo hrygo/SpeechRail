@@ -10,12 +10,14 @@ public enum AudiobookProductionError: LocalizedError, Equatable, Sendable {
     case chapterBlockedByUnknownSpeakers(chapterID: UUID)
     case noReadyChaptersSelected
     case admissionBusy
+    case taskScopeChanged
     case capabilityVoiceUnavailable(voiceID: String, reason: String)
     case capabilityRevisionMismatch(voiceID: String, expected: String?, actual: String?)
     case unauthorizedService
     case transientRetriesExhausted(fragmentID: UUID, lastReason: String)
     case checkpointNotSaved(reason: String)
     case pauseWithUnconfirmedRemoteStop(fragmentID: UUID)
+    case savedAudioNeedsVerification(fragmentID: UUID)
     case cancelled
 
     public var errorDescription: String? {
@@ -30,6 +32,8 @@ public enum AudiobookProductionError: LocalizedError, Equatable, Sendable {
             return "所选章节仍包含未确认的说话人，请先确认说话人后继续。"
         case .noReadyChaptersSelected:
             return "没有已就绪的可制作章节。"
+        case .taskScopeChanged:
+            return "制作条件或原任务范围已变化，请恢复原条件或重新预览范围。已有音频保留。"
         case .admissionBusy:
             return "当前已有另一个语音制作任务正在运行，请稍候再试。"
         case let .capabilityVoiceUnavailable(voiceID, reason):
@@ -44,6 +48,8 @@ public enum AudiobookProductionError: LocalizedError, Equatable, Sendable {
             return "制作已停止，但任务记录未能保存，重新打开后可能无法接着制作。请检查磁盘空间和作品库的写入权限：\(reason)"
         case .pauseWithUnconfirmedRemoteStop:
             return "制作已暂停；当前在途片段的服务端停止状态尚未确认，稍后继续时将自动核对。"
+        case .savedAudioNeedsVerification:
+            return "音频已保存，但校验未通过。请检查音色与服务的版本信息后重新预览；按相同条件再次更新不能解决此问题。已有音频和当前采用版本均已保留。"
         case .cancelled:
             return "章节制作已暂停。"
         }
@@ -75,6 +81,8 @@ public struct AudiobookProductionProgress: Codable, Equatable, Sendable {
     public var totalFragments: Int
     public var unconfirmedRemoteStopFragmentID: UUID?
     public var lastErrorMessage: String?
+    /// A saved but unverified result requires changed conditions, not an automatic retry.
+    public var verificationFailureFragmentID: UUID?
     public var phase: AudiobookProductionPhase
     public var currentChapterOrdinal: Int?
     public var totalChapters: Int
@@ -122,7 +130,8 @@ public struct AudiobookProductionProgress: Codable, Equatable, Sendable {
     }
 
     public var statusTitle: String {
-        switch state {
+        if verificationFailureFragmentID != nil { return "音频已保存，校验未通过" }
+        return switch state {
         case .pausing: "正在暂停制作…"
         case .paused: "制作已暂停"
         case .failed: "制作遇到问题"
@@ -144,26 +153,89 @@ public struct AudiobookProductionProgress: Codable, Equatable, Sendable {
     }
 
     public var canResume: Bool {
-        state == .paused || state == .pausing || state == .running || state == .failed
+        verificationFailureFragmentID == nil && (state == .paused || state == .pausing || state == .running || state == .failed)
+    }
+
+    public var isComplete: Bool {
+        phase == .completed && verificationFailureFragmentID == nil
+            && (state == .allConfirmedChaptersProduced || state == .partialChaptersReady || state == .fullBookProduced)
     }
 }
 
-/// Only task identity, counters and timestamps are durable; audio remains in the asset journal.
-public struct AudiobookProductionCheckpoint: Codable, Equatable, Sendable {
+/// Explicit regeneration is distinct from filling missing or outdated audio.
+public enum AudiobookRegenerationScope: Codable, Equatable, Sendable {
+    case chapters
+    case fragments(Set<UUID>)
+}
+
+public enum AudiobookProductionIntent: String, Codable, Equatable, Sendable {
+    case missingOnly
+    case updateOutdated
+    case regenerate
+
+    public var title: String {
+        switch self {
+        case .missingOnly: "只补缺失音频"
+        case .updateOutdated: "更新待更新音频"
+        case .regenerate: "重新制作"
+        }
+    }
+
+    public var impact: String {
+        switch self {
+        case .missingOnly:
+            "仅为没有可用音频的片段生成声音。已有音频（包括待更新的旧声音和未采用候选）全部保留，不重新生成。缺失或损坏的文件会生成新的修复候选。"
+        case .updateOutdated:
+            "只处理已有音频且制作条件已变化的片段，不补缺失。生成新的声音候选，当前采用版本保持不变；试听并采用后才替换。"
+        case .regenerate:
+            "为所选片段生成新的声音候选，已有音频和历史版本保留。已有章节在试听并采用后才替换，尚无音频的章节可完成首次制作。"
+        }
+    }
+}
+
+/// The approved fragment identities and dependencies are also the durable resume boundary.
+public struct AudiobookProductionPlan: Codable, Equatable, Identifiable, Sendable {
+    public let id: UUID
+    public let bookID: UUID
+    public let sourceID: UUID
+    public let intent: AudiobookProductionIntent
+    public let chapterIDs: [UUID]
+    public let chapterTitles: [UUID: String]
+    public let fragments: [AudiobookFragment]
+    public let preservedAudioCount: Int
+    public let preservedOutdatedAudioCount: Int
+    public let missingAudioCount: Int
+}
+
+/// Task identity, scope, counters and timestamps are durable; audio remains in the asset journal.
+public struct AudiobookProductionCheckpoint: Codable, Equatable, Identifiable, Sendable {
+    public var id: UUID { taskID }
     public let taskID: UUID
     public let chapterIDs: [UUID]
     public let regeneratingFragmentID: UUID?
+    public let regenerationScope: AudiobookRegenerationScope?
+    public let productionPlan: AudiobookProductionPlan?
     public let sourceID: UUID?
     public let preparationVersion: String?
     public var progress: AudiobookProductionProgress
 
-    public init(taskID: UUID = UUID(), chapterIDs: [UUID], regeneratingFragmentID: UUID? = nil, progress: AudiobookProductionProgress, sourceID: UUID? = nil, preparationVersion: String? = nil) {
+    public init(taskID: UUID = UUID(), chapterIDs: [UUID], regeneratingFragmentID: UUID? = nil, progress: AudiobookProductionProgress, sourceID: UUID? = nil, preparationVersion: String? = nil, regenerationScope: AudiobookRegenerationScope? = nil, productionPlan: AudiobookProductionPlan? = nil) {
         self.taskID = taskID
         self.chapterIDs = chapterIDs
-        self.regeneratingFragmentID = regeneratingFragmentID
+        if case .fragments(let ids) = regenerationScope, ids.count == 1 {
+            self.regeneratingFragmentID = ids.first
+        } else {
+            self.regeneratingFragmentID = regeneratingFragmentID
+        }
+        self.regenerationScope = regenerationScope
+        self.productionPlan = productionPlan
         self.progress = progress
         self.sourceID = sourceID
         self.preparationVersion = preparationVersion
+    }
+
+    public var effectiveRegenerationScope: AudiobookRegenerationScope? {
+        regenerationScope ?? regeneratingFragmentID.map { .fragments([$0]) }
     }
 }
 
@@ -248,28 +320,172 @@ public actor AudiobookProductionController {
         latestProgressByBook[bookID]
     }
 
+    /// Read-only: no fragment/checkpoint writes and no online capability requests.
+    public func previewProduction(
+        bookID: UUID, chapterIDs: [UUID], intent: AudiobookProductionIntent
+    ) async throws -> AudiobookProductionPlan {
+        guard !chapterIDs.isEmpty else { throw AudiobookProductionError.noReadyChaptersSelected }
+        let snapshot = try await store.workingSourceSnapshot(bookID: bookID)
+        let book = try await store.book(id: bookID)
+        guard book.analysisState == .allWindowsValidated else { throw AudiobookProductionError.globalAnalysisNotCompleted }
+        guard try await castController.currentCastRevisionID(for: bookID) == book.confirmedCastRevisionID else {
+            throw AudiobookProductionError.castNotConfirmed
+        }
+        guard try await castController.currentVoiceSetDigest(for: bookID) == book.confirmedAuditionVoiceSetDigest else {
+            throw AudiobookProductionError.auditionNotConfirmed
+        }
+        let requested = Set(chapterIDs)
+        let chapters = try await store.chapters(for: bookID)
+            .filter { requested.contains($0.id) && !$0.isSkipped }.sorted { $0.ordinal < $1.ordinal }
+        guard !chapters.isEmpty else { throw AudiobookProductionError.noReadyChaptersSelected }
+        guard chapters.count == requested.count else { throw AudiobookProductionError.taskScopeChanged }
+        let bindings = try await store.voiceBindings(for: bookID)
+        let pronunciation = try await store.pronunciationBinding(for: bookID)
+        var fragmentsByChapter: [UUID: [AudiobookFragment]] = [:]
+        for chapter in chapters {
+            if try await castController.chapterReadiness(bookID: bookID, chapterID: chapter.id) == .blockedByUnknownSpeakers {
+                throw AudiobookProductionError.chapterBlockedByUnknownSpeakers(chapterID: chapter.id)
+            }
+            fragmentsByChapter[chapter.id] = try AudiobookFragmentPlanner.plan(chapter: chapter,
+                annotations: await store.annotations(for: bookID, chapterID: chapter.id), bindings: bindings,
+                policy: policy, source: snapshot.sourceIndex,
+                atoms: await store.atoms(for: bookID, chapterID: chapter.id), pronunciation: pronunciation)
+        }
+        // Regeneration approves text and dependencies; unrelated historical audio
+        // cannot affect its range and must not be read just to classify availability.
+        let selection: (targets: [AudiobookFragment], preserved: Int, outdated: Int, missing: Int)
+        if intent == .regenerate {
+            selection = (chapters.flatMap { fragmentsByChapter[$0.id, default: []] }, 0, 0, 0)
+        } else {
+            selection = try await classifyExistingAudio(bookID: bookID, chapterIDs: chapters.map(\.id),
+                fragmentsByChapter: fragmentsByChapter, onlyMissing: intent == .missingOnly)
+        }
+        try await store.validateWorkingSource(snapshot)
+        return .init(id: UUID(), bookID: bookID, sourceID: snapshot.sourceID, intent: intent,
+            chapterIDs: chapters.map(\.id), chapterTitles: Dictionary(uniqueKeysWithValues: chapters.map { ($0.id, $0.title) }),
+            fragments: selection.targets, preservedAudioCount: selection.preserved,
+            preservedOutdatedAudioCount: selection.outdated, missingAudioCount: selection.missing)
+    }
+
+    private func classifyExistingAudio(
+        bookID: UUID, chapterIDs: [UUID], fragmentsByChapter: [UUID: [AudiobookFragment]], onlyMissing: Bool
+    ) async throws -> (targets: [AudiobookFragment], preserved: Int, outdated: Int, missing: Int) {
+        let requested = Set(chapterIDs)
+        let candidates = try await store.candidates(for: bookID)
+        var valid: [AudiobookRenderCandidate] = []
+        for candidate in candidates where requested.contains(candidate.chapterID) {
+            try Task.checkCancellation()
+            // Missing provenance does not authorize replacing an existing playable asset.
+            if try await store.verifyCandidateAsset(candidate) { valid.append(candidate) }
+        }
+        let validByChapter = Dictionary(grouping: valid, by: \.chapterID)
+        let savedByChapter = Dictionary(grouping: try await store.fragments(for: bookID), by: \.chapterID)
+        var targets: [AudiobookFragment] = []
+        var preserved = 0, outdated = 0, missing = 0
+        for chapterID in chapterIDs {
+            let fragments = fragmentsByChapter[chapterID, default: []]
+            let audio = validByChapter[chapterID, default: []]
+            var ranges = Dictionary(uniqueKeysWithValues: savedByChapter[chapterID, default: []].map { ($0.id, $0.sourceRange) })
+            for revision in try await store.chapterRevisions(for: bookID, chapterID: chapterID) {
+                for binding in revision.orderedBindings { ranges[binding.fragmentID] = binding.sourceRange }
+            }
+            let plannedIDs = Set(fragments.map(\.id))
+            // Audio with an unknown historical range must never silently become a new gap.
+            let hasUnmappedAudio = audio.contains { ranges[$0.fragmentID] == nil && !plannedIDs.contains($0.fragmentID) }
+            for fragment in fragments {
+                let isCurrent = audio.contains {
+                    $0.fragmentID == fragment.id && $0.dependencyDigest == fragment.dependencyDigest && $0.isReceiptVerified
+                }
+                let hasAudio = hasUnmappedAudio || audio.contains { candidate in
+                    if candidate.fragmentID == fragment.id { return true }
+                    guard let range = ranges[candidate.fragmentID] else { return false }
+                    return range.lowerBound < fragment.sourceRange.upperBound && fragment.sourceRange.lowerBound < range.upperBound
+                }
+                if !hasAudio { missing += 1 }
+                if !onlyMissing, !isCurrent, audio.contains(where: {
+                    $0.fragmentID == fragment.id && $0.dependencyDigest == fragment.dependencyDigest && !$0.isReceiptVerified
+                }) {
+                    throw AudiobookProductionError.savedAudioNeedsVerification(fragmentID: fragment.id)
+                }
+                let shouldRender = onlyMissing ? !hasAudio : hasAudio && !isCurrent
+                if shouldRender { targets.append(fragment) }
+                else if hasAudio {
+                    preserved += 1
+                    if !isCurrent { outdated += 1 }
+                }
+            }
+        }
+        return (targets, preserved, outdated, missing)
+    }
+
     public func regenerateFragment(
         bookID: UUID,
         chapterID: UUID,
         fragmentID: UUID,
         resumingTaskID: UUID? = nil
     ) async throws {
-        try await produce(bookID: bookID, chapterIDs: [chapterID], regeneratingFragmentID: fragmentID, resumingTaskID: resumingTaskID)
+        try await start(bookID: bookID, chapterIDs: [chapterID], resumingTaskID: resumingTaskID, regenerationScope: .fragments([fragmentID]))
     }
 
     public func start(
         bookID: UUID,
         chapterIDs: [UUID],
-        resumingTaskID: UUID? = nil
+        resumingTaskID: UUID? = nil,
+        regenerationScope: AudiobookRegenerationScope? = nil,
+        expectedSourceID: UUID? = nil,
+        intent: AudiobookProductionIntent = .missingOnly,
+        approvedPlan: AudiobookProductionPlan? = nil
     ) async throws {
-        try await produce(bookID: bookID, chapterIDs: chapterIDs, regeneratingFragmentID: nil, resumingTaskID: resumingTaskID)
+        guard !isStartActive else { throw AudiobookProductionError.admissionBusy }
+        let plan: AudiobookProductionPlan
+        if let resumingTaskID {
+            guard let saved = try await store.productionCheckpoint(for: bookID), saved.taskID == resumingTaskID,
+                  let savedPlan = saved.productionPlan,
+                  approvedPlan == nil || approvedPlan == savedPlan else {
+                throw AudiobookProductionError.taskScopeChanged
+            }
+            if let fragmentID = saved.progress.verificationFailureFragmentID {
+                throw AudiobookProductionError.savedAudioNeedsVerification(fragmentID: fragmentID)
+            }
+            plan = savedPlan
+        } else if let approvedPlan {
+            plan = approvedPlan
+        } else {
+            let preview = try await previewProduction(bookID: bookID, chapterIDs: chapterIDs,
+                intent: regenerationScope == nil ? intent : .regenerate)
+            if case .fragments(let ids) = regenerationScope {
+                guard !ids.isEmpty else { throw AudiobookProductionError.noReadyChaptersSelected }
+                let targets = preview.fragments.filter { ids.contains($0.id) }
+                if let missing = ids.subtracting(Set(targets.map(\.id))).first {
+                    throw AudiobookRevisionError.fragmentNotFound(missing)
+                }
+                plan = .init(id: preview.id, bookID: preview.bookID, sourceID: preview.sourceID,
+                    intent: preview.intent, chapterIDs: preview.chapterIDs, chapterTitles: preview.chapterTitles,
+                    fragments: targets, preservedAudioCount: preview.preservedAudioCount,
+                    preservedOutdatedAudioCount: preview.preservedOutdatedAudioCount,
+                    missingAudioCount: preview.missingAudioCount)
+            } else {
+                plan = preview
+            }
+        }
+        guard (plan.intent == .regenerate) == (regenerationScope != nil),
+              plan.bookID == bookID, Set(plan.chapterIDs) == Set(chapterIDs),
+              Set(plan.fragments.map(\.id)).count == plan.fragments.count,
+              plan.fragments.allSatisfy({ $0.bookID == bookID && plan.chapterIDs.contains($0.chapterID) }) else {
+            throw AudiobookProductionError.taskScopeChanged
+        }
+        if plan.fragments.isEmpty { return }
+        try await produce(bookID: bookID, chapterIDs: chapterIDs, regenerationScope: regenerationScope,
+            resumingTaskID: resumingTaskID, expectedSourceID: expectedSourceID, productionPlan: plan)
     }
 
     private func produce(
         bookID: UUID,
         chapterIDs: [UUID],
-        regeneratingFragmentID: UUID?,
-        resumingTaskID: UUID?
+        regenerationScope: AudiobookRegenerationScope?,
+        resumingTaskID: UUID?,
+        expectedSourceID: UUID?,
+        productionPlan: AudiobookProductionPlan
     ) async throws {
         // Actor methods are reentrant across `await`. Reserve the run before the first
         // suspension so a second start cannot invalidate its generation or strand its lease.
@@ -296,16 +512,29 @@ public actor AudiobookProductionController {
         do {
             let snapshot = try await store.workingSourceSnapshot(bookID: bookID)
             activeWorkingSource = snapshot
+            if let expectedSourceID, snapshot.sourceID != expectedSourceID {
+                throw AudiobookStoreError.workingSourceChanged
+            }
+            if productionPlan.sourceID != snapshot.sourceID {
+                if resumingTaskID != nil { throw AudiobookStoreError.workingSourceChanged }
+                throw AudiobookProductionError.taskScopeChanged
+            }
             if let resumingTaskID {
                 guard let checkpoint = try await store.productionCheckpoint(for: bookID), checkpoint.taskID == resumingTaskID,
-                      checkpoint.sourceID == snapshot.sourceID, checkpoint.preparationVersion == snapshot.preparationVersion else {
+                      checkpoint.sourceID == snapshot.sourceID, checkpoint.preparationVersion == snapshot.preparationVersion,
+                      checkpoint.chapterIDs == chapterIDs, checkpoint.effectiveRegenerationScope == regenerationScope,
+                      checkpoint.productionPlan == productionPlan else {
                     throw AudiobookStoreError.workingSourceChanged
+                }
+                let availableIDs = Set(try await store.chapters(for: bookID).filter { !$0.isSkipped }.map(\.id))
+                guard Set(chapterIDs).isSubset(of: availableIDs) else {
+                    throw AudiobookProductionError.taskScopeChanged
                 }
             }
             try await performProduction(
                 bookID: bookID, chapterIDs: chapterIDs,
-                regeneratingFragmentID: regeneratingFragmentID, runGeneration: runGeneration,
-                taskID: resumingTaskID ?? UUID()
+                regenerationScope: regenerationScope, runGeneration: runGeneration,
+                taskID: resumingTaskID ?? UUID(), productionPlan: productionPlan
             )
         } catch {
             if let snapshot = activeWorkingSource,
@@ -313,16 +542,29 @@ public actor AudiobookProductionController {
                 updateProgress(bookID) { $0.state = .failed; $0.lastErrorMessage = error.localizedDescription }
                 throw error
             }
-            let cancelled = isPauseRequested || Task.isCancelled
-                || error is CancellationError || (error as? AudiobookProductionError) == .cancelled
+            let verificationFailureID: UUID?
+            if case let AudiobookProductionError.savedAudioNeedsVerification(fragmentID) = error {
+                verificationFailureID = fragmentID
+            } else {
+                verificationFailureID = nil
+            }
+            let cancelled = verificationFailureID == nil && (isPauseRequested || Task.isCancelled
+                || error is CancellationError || (error as? AudiobookProductionError) == .cancelled)
             if activeCheckpoint != nil || cancelled {
                 if activeCheckpoint == nil, let progress = latestProgressByBook[bookID] {
-                    activeCheckpoint = .init(taskID: resumingTaskID ?? UUID(), chapterIDs: chapterIDs, regeneratingFragmentID: regeneratingFragmentID, progress: progress, sourceID: activeWorkingSource?.sourceID, preparationVersion: activeWorkingSource?.preparationVersion)
+                    activeCheckpoint = .init(taskID: resumingTaskID ?? UUID(), chapterIDs: chapterIDs, progress: progress, sourceID: activeWorkingSource?.sourceID, preparationVersion: activeWorkingSource?.preparationVersion, regenerationScope: regenerationScope, productionPlan: productionPlan)
                 }
                 let progress = latestProgressByBook[bookID]
                 try await markBookPaused(bookID: bookID, completed: progress?.completedFragments ?? 0, total: progress?.totalFragments ?? 0)
                 if !cancelled {
                     updateProgress(bookID) { $0.lastErrorMessage = error.localizedDescription }
+                    if let fragmentID = verificationFailureID {
+                        updateProgress(bookID) {
+                            $0.state = .failed
+                            $0.verificationFailureFragmentID = fragmentID
+                        }
+                        try await persistProgress(bookID)
+                    }
                 }
             } else {
                 updateProgress(bookID) {
@@ -336,7 +578,8 @@ public actor AudiobookProductionController {
     }
 
     private func performProduction(
-        bookID: UUID, chapterIDs: [UUID], regeneratingFragmentID: UUID?, runGeneration: Int, taskID: UUID
+        bookID: UUID, chapterIDs: [UUID], regenerationScope: AudiobookRegenerationScope?, runGeneration: Int, taskID: UUID,
+        productionPlan: AudiobookProductionPlan
     ) async throws {
         try checkRunIsActive(runGeneration)
 
@@ -360,7 +603,7 @@ public actor AudiobookProductionController {
 
         let allChapters = try await store.chapters(for: bookID)
         let chaptersByID = Dictionary(uniqueKeysWithValues: allChapters.map { ($0.id, $0) })
-        let selectedChapters = try chapterIDs.map { id -> AudiobookChapter in
+        let selectedChapters = try Array(Set(chapterIDs)).map { id -> AudiobookChapter in
             guard let chapter = chaptersByID[id] else {
                 throw AudiobookStoreError.chapterNotFound(id)
             }
@@ -371,6 +614,9 @@ public actor AudiobookProductionController {
             throw AudiobookProductionError.noReadyChaptersSelected
         }
 
+        guard selectedChapters.count == Set(chapterIDs).count else {
+            throw AudiobookProductionError.noReadyChaptersSelected
+        }
         for chapter in selectedChapters {
             let readiness = try await castController.chapterReadiness(bookID: bookID, chapterID: chapter.id)
             if readiness == .blockedByUnknownSpeakers {
@@ -389,6 +635,13 @@ public actor AudiobookProductionController {
         var plannedFragmentsByChapter: [UUID: [AudiobookFragment]] = [:]
         var activeRoleIDs: Set<UUID> = []
         var totalFragmentCount = 0
+        var allPlannedFragmentsByChapter: [UUID: [AudiobookFragment]] = [:]
+        let current = try await previewProduction(bookID: bookID, chapterIDs: chapterIDs, intent: productionPlan.intent)
+        guard current.sourceID == productionPlan.sourceID else { throw AudiobookProductionError.taskScopeChanged }
+        let currentlyEligibleIDs = Set(current.fragments.map(\.id))
+        if case .fragments(let ids) = regenerationScope, ids.isEmpty {
+            throw AudiobookProductionError.noReadyChaptersSelected
+        }
 
         for chapter in selectedChapters {
             try checkRunIsActive(runGeneration)
@@ -403,17 +656,12 @@ public actor AudiobookProductionController {
                 atoms: chapterAtoms,
                 pronunciation: pronunciation
             )
-            let selectedFragments: [AudiobookFragment]
-            if let regeneratingFragmentID {
-                guard let target = fragments.first(where: { $0.id == regeneratingFragmentID }) else {
-                    throw AudiobookRevisionError.fragmentNotFound(regeneratingFragmentID)
-                }
-                selectedFragments = [target]
-            } else {
-                selectedFragments = fragments
-            }
+            let selectedFragments = productionPlan.fragments.filter { $0.chapterID == chapter.id }
+            let byID = Dictionary(uniqueKeysWithValues: fragments.map { ($0.id, $0) })
+            guard selectedFragments.allSatisfy({ byID[$0.id] == $0 }) else { throw AudiobookProductionError.taskScopeChanged }
+            allPlannedFragmentsByChapter[chapter.id] = fragments
             plannedFragmentsByChapter[chapter.id] = selectedFragments
-            activeRoleIDs.formUnion(selectedFragments.map(\.roleID))
+            activeRoleIDs.formUnion(selectedFragments.filter { currentlyEligibleIDs.contains($0.id) }.map(\.roleID))
             totalFragmentCount += selectedFragments.count
             updateProgress(bookID) {
                 $0.currentChapterID = chapter.id
@@ -421,21 +669,31 @@ public actor AudiobookProductionController {
                 $0.totalFragments = totalFragmentCount
             }
             try checkRunIsActive(runGeneration)
-            try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: fragments)
+        }
+        if case .fragments(let ids) = regenerationScope {
+            let plannedIDs = Set(plannedFragmentsByChapter.values.flatMap { $0.map(\.id) })
+            if let missing = ids.subtracting(plannedIDs).first {
+                throw AudiobookRevisionError.fragmentNotFound(missing)
+            }
+        }
+        guard totalFragmentCount > 0 else { throw AudiobookProductionError.noReadyChaptersSelected }
+        for chapter in selectedChapters {
+            try checkRunIsActive(runGeneration)
+            try await store.saveFragments(bookID: bookID, chapterID: chapter.id,
+                                          fragments: allPlannedFragmentsByChapter[chapter.id] ?? [])
         }
 
         try checkRunIsActive(runGeneration)
         if let progress = latestProgressByBook[bookID] {
-            activeCheckpoint = .init(taskID: taskID, chapterIDs: selectedChapters.map(\.id), regeneratingFragmentID: regeneratingFragmentID, progress: progress, sourceID: activeWorkingSource?.sourceID, preparationVersion: activeWorkingSource?.preparationVersion)
+            activeCheckpoint = .init(taskID: taskID, chapterIDs: selectedChapters.map(\.id), progress: progress, sourceID: activeWorkingSource?.sourceID, preparationVersion: activeWorkingSource?.preparationVersion, regenerationScope: regenerationScope, productionPlan: productionPlan)
             try await persistProgress(bookID)
         }
-        let capabilities = try await renderer.fetchEffectiveCapabilities()
+        let capabilities = activeRoleIDs.isEmpty ? nil : try await renderer.fetchEffectiveCapabilities()
         try checkRunIsActive(runGeneration)
-        try Self.verifyPinnedBindingsAgainstCapabilities(
-            bindings: frozenBindings,
-            activeRoleIDs: activeRoleIDs,
-            capabilities: capabilities
-        )
+        if let capabilities {
+            try Self.verifyPinnedBindingsAgainstCapabilities(bindings: frozenBindings,
+                activeRoleIDs: activeRoleIDs, capabilities: capabilities)
+        }
 
         book.productionState = .running
         try await store.updateBook(book)
@@ -468,11 +726,32 @@ public actor AudiobookProductionController {
                         $0.retryAttempt = 0
                     }
 
+                    // Targets can disappear after preview (another candidate was saved), never grow.
+                    if productionPlan.intent == .missingOnly {
+                        let latest = try await store.candidates(for: bookID, fragmentID: fragment.id)
+                        var hasSavedAudio = false
+                        for candidate in latest {
+                            if try await store.verifyCandidateAsset(candidate) { hasSavedAudio = true; break }
+                        }
+                        if hasSavedAudio {
+                            completedCount += 1
+                            updateProgress(bookID) { $0.completedFragments = completedCount; $0.reusedFragments += 1 }
+                            try await persistProgress(bookID)
+                            continue
+                        }
+                    }
+                    if !currentlyEligibleIDs.contains(fragment.id) {
+                        completedCount += 1
+                        updateProgress(bookID) { $0.completedFragments = completedCount; $0.reusedFragments += 1 }
+                        try await persistProgress(bookID)
+                        continue
+                    }
+
                     // Reuse already committed & verified candidate with identical dependencyDigest
                     if let reusable = existingCandidatesByFragmentID[fragment.id]?.first(where: {
                         $0.dependencyDigest == fragment.dependencyDigest
                             && $0.isReceiptVerified
-                            && (regeneratingFragmentID == nil || $0.taskID == taskID)
+                            && (regenerationScope == nil || $0.taskID == taskID)
                     }),
                        (try? await store.verifyCandidateAsset(reusable)) == true
                     {
@@ -512,8 +791,13 @@ public actor AudiobookProductionController {
                     try await store.validateWorkingSource(snapshot)
                     try await candidateCommitter(candidate, candidateWAVCache[candidate.id] ?? Data())
                     candidateWAVCache.removeValue(forKey: candidate.id)
-                    if let voice = capabilities.voices.first(where: { $0.id == binding.voiceID }), !(await voiceCatalog.refresh()).permits(voice, bookID: bookID) {
+                    if let voice = capabilities?.voices.first(where: { $0.id == binding.voiceID }), !(await voiceCatalog.refresh()).permits(voice, bookID: bookID) {
                         throw AudiobookProductionError.capabilityVoiceUnavailable(voiceID: binding.voiceID, reason: "声音归属已变化，本段已保存为待复核候选。")
+                    }
+                    if !candidate.isReceiptVerified {
+                        completedCount += 1
+                        updateProgress(bookID) { $0.completedFragments = completedCount }
+                        throw AudiobookProductionError.savedAudioNeedsVerification(fragmentID: fragment.id)
                     }
 
                     completedCount += 1
@@ -527,7 +811,7 @@ public actor AudiobookProductionController {
                 updateProgress(bookID) { $0.phase = .assemblingChapter }
                 let existingRevs = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
                 try checkRunIsActive(runGeneration)
-                if regeneratingFragmentID == nil, existingRevs.isEmpty {
+                if (regenerationScope == nil || regenerationScope == .chapters), existingRevs.isEmpty {
                     _ = try await revisionController.promoteInitialChapterIfComplete(
                         bookID: bookID,
                         chapterID: chapter.id,
@@ -541,7 +825,7 @@ public actor AudiobookProductionController {
         do {
             // Honor a pause during rendering or chapter publication before committing completion.
             try checkRunIsActive(runGeneration)
-            let updatedChapters = try await store.chapters(for: bookID)
+            let updatedChapters = try await store.chapters(for: bookID).filter { !$0.isSkipped }
             try checkRunIsActive(runGeneration)
             let readyChaptersCount = updatedChapters.filter { $0.currentChapterRevisionID != nil }.count
             let finalState: AudiobookProductionState

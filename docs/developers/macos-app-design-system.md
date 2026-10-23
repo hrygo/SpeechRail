@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.11.14"
-date: 2026-10-21
+version: "0.11.15"
+date: 2026-10-22
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -291,9 +291,11 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 表单输入与取值 | 原生 `TextField`、`SecureField`、`TextEditor`、`Picker`、`Toggle`、`Slider`、`Stepper` | 标签、帮助与错误贴近控件；**单行输入一律走 `.speechRailSingleLineInput(.compact/.regular)`**（12pt 横向内边距 + 28/34pt 最小高度 + 输入槽表面），组合式搜索条把配方接在整条容器上；多行编辑器用 `.speechRailRecessedSlot()` 自行给内边距，整卡字段用 `.speechRailEditorCard()`；保留系统键盘和焦点行为 |
 | 状态与反馈 | `StatusPill`、`NoticeBar`、`SettingsConnectionStatus` 等 | 默认、忙碌、完成、受阻、失败使用文字与图标；颜色只是补充；失败指出下一步 |
 
-有声书工坊的临时操作反馈（包括状态更新、音色登记成功、移入废纸篓与听书定位到更新章节）共用 `AudiobookTransientFeedback`，在主内容顶部以 `overlay` 展示，不参与主面板布局。提示按 `Notice.transientDisplayDuration` 显示 4 秒后自动收起；相同文案的新操作也重新计时，离开页面时取消计时。提示保留手动收起或“撤销”操作；收起仅隐藏反馈，不改变书籍、声音或音频状态，书籍仍可从废纸篓恢复。
+全 App 的操作成功、操作失败、导入导出结果、复制与保存回执使用 `OperationFeedback`，挂载到操作所属页面、Sheet、Popover 或独立舞台的完整宿主，通过 `View.operationFeedback(_:)` 呈现。反馈不参与主布局，不占列表行或正文空间；正文准备入口、任务进度、权限/能力门禁、业务结果与数据报告保留在正文。读取失败可保留简短不可用状态与常驻重试，具体错误通过浮层展示，不得将读取失败显示为“没有数据”。需要用户输入、授权或决定替换/删除的确认流程继续使用原生确认控件。
 
-需要处理的错误、尚待确认的声音与说话人、重新分析或采用候选的准备提示，以及分析和制作进度持续显示，不挂载自动收起计时。反馈用途由调用处显式声明，不按文案关键词判断；普通回执默认临时，需下一步操作的回执标记为持续提示。导入核对、服务不可用、已跳过章节和听书中断恢复等状态提示保留原有处理入口；已保存时间和任务结果摘要按状态信息展示。
+常规宿主在顶部居中覆盖展示，复用 `Layout.Sheet.formWidth`、`Layout.Sheet.messageBodyMaximumHeight` 与 `.elevated` 表面。长正文独立滚动，关闭和重试/撤销等动作位于滚动区外；宿主高度不足正文上限时使用原生 Popover 承载（例如字幕带和收起的会中抽屉），不扩大宿主窗口或挤压正文。浮层没有整页遮罩，空白区域不设置命中背景或手势；错误建立关闭按钮焦点，Escape 收起当前反馈，不取消后台任务或修改业务数据。真实窗口焦点、点击与滚动验收须单独记录，离屏尺寸检查不等同于完整交互验收。
+
+错误优先于普通结果，其余按调用方数组顺序逐条呈现。错误持续显示到手动关闭，成功是否按 `Notice.transientDisplayDuration`（4 秒）自动收起由调用处显式声明，不按文案关键词判断；带恢复动作的反馈由调用方选择持续显示。关闭只清除对应回执，先关闭旧回执再执行重试/撤销，避免把新失败一起清除。相同文案的新操作应提供新的 occurrence ID，以重新启动计时；自动关闭任务同时绑定事件 ID 与自动关闭语义，离开宿主或转为持续错误时取消旧任务。只读来源允许由宿主记住当前已关闭 ID，来源消失或宿主销毁时释放本地记忆。
 
 每个组件只实现适用的 default、hover、pressed、focus、disabled、selected、busy、error 状态。设置内联编辑的 `.small` 原生按钮、字幕带和提词舞台的紧凑控件保留各自空间合同，不强制套主窗口的高度。所有自定义动效遵守 Reduce Motion；系统强调色、Increase Contrast 和 Reduce Transparency 优先由原生控件与语义色处理。页面新增产品视觉数值时，先写入 `SpeechRailDesignTokens.swift`，再更新本文（例如 2026-10-17 提词器流线型减负新增 `Teleprompter.preparedBlockCompactMinHeight = 52`、`workbenchStageSettingsPopoverWidth = 320` 与 `privacyDisclosurePopoverWidth = 360`；2026-10-20 会议助手与会中私聊布局优化新增 `Layout.meetingSourceOptionsMaxHeight = 220`、`Layout.innerOSDraftAccentBarWidth = 3`，并将 `innerOSDrawerExpandedHeight` 与 `innerOSHistoryColumnWidth` 校准为 `240` 与 `236`）。
 
@@ -333,6 +335,12 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 Popover、Sheet 与 Inspector 中的角色列表、分析依据、错误详情和批量结果都可能持续增长。
 内容增长不得撑出可用窗口、遮挡退出入口，或让界面失去可操作性。
+
+音色候选保存弹窗使用 `Layout.Sheet.formWidth` 与
+`Layout.creatorVoiceRecoverySheetHeight`（620pt），正文独立滚动，取消与恢复操作固定在底部。
+确认失败时可试听当前候选，在“失败详情与文字差异”中查看有界比对结果；
+“重新校验”复用音频，“修改参考文案”配合“用此文案重新生成”创建新候选并重新检查。
+文案编辑不会改变当前音频或原候选的证据，界面不得将识别差异直接表述为已确认的发音错误。
 
 - **容器有界，正文可滚动**：尺寸上限同时服从产品 Token 与宿主可用空间。长正文和列表放入独立滚动区，保留完整内容；不以裁剪、截断或撑高整个浮层代替滚动。内容与操作复杂度超出浮层承载能力时，按现有页面合同选择 Sheet 或 Inspector。
 - **关键动作固定可达**：标题、关闭及必要的确认、取消或任务操作位于长内容滚动区外。首屏和滚动到底时都能退出或继续，不依赖 hover、拖大窗口或先滚完整份说明。

@@ -2217,6 +2217,203 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertNil(reopenedWorkflow.errorMessage)
     }
 
+    func testMissingAudioPreviewDoesNotRenderUntilConfirmedAndCancelledPreviewIsReadOnly() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "missing-preview.txt", text: "第一章 渡口\n风吹过港口。")
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        await workflow.prepareProduction(intent: .missingOnly)
+        let draft = try XCTUnwrap(workflow.productionDraft)
+        XCTAssertFalse(draft.fragments.isEmpty)
+        XCTAssertFalse(workflow.isProducing)
+        let checkpoint = try await store.productionCheckpoint(for: imported.bookID)
+        let candidates = try await store.candidates(for: imported.bookID)
+        XCTAssertNil(checkpoint)
+        XCTAssertTrue(candidates.isEmpty)
+        workflow.productionDraft = nil
+        XCTAssertFalse(workflow.isProducing)
+        await workflow.prepareProduction(intent: .missingOnly)
+        let confirmed = try XCTUnwrap(workflow.productionDraft)
+        workflow.confirmProduction(confirmed)
+        await waitForProductionToFinish(workflow)
+        XCTAssertNil(workflow.errorMessage)
+        let made = try await store.candidates(for: imported.bookID)
+        XCTAssertEqual(made.count, confirmed.fragments.count)
+        await workflow.prepareProduction(intent: .missingOnly)
+        XCTAssertTrue(workflow.productionDraft?.fragments.isEmpty == true)
+        await workflow.shutdown()
+    }
+
+    func testEmptyMissingPreviewOpensScopedUpdatePreviewWithoutChangingSavedWork() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "empty-missing.txt",
+            text: "第一章 渡口\n风吹过港口。\n第二章 归途\n风吹过归途。")
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        workflow.makeConfirmedChapters()
+        await waitForProductionToFinish(workflow)
+        try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: imported.bookID),
+            revision: "pr_changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: imported.bookID)
+        await workflow.openBook(imported.bookID)
+        let first = try XCTUnwrap(imported.chapterIDs.first)
+        await workflow.prepareProduction(intent: .missingOnly, chapterIDs: [first])
+        let empty = try XCTUnwrap(workflow.productionDraft)
+        XCTAssertTrue(empty.fragments.isEmpty)
+        XCTAssertGreaterThan(empty.preservedOutdatedAudioCount, 0)
+        let candidatesBefore = try await store.candidates(for: imported.bookID)
+        let chaptersBefore = try await store.chapters(for: imported.bookID)
+        let checkpointBefore = try await store.productionCheckpoint(for: imported.bookID)
+
+        await workflow.previewOutdatedAudio(from: empty)
+
+        let update = try XCTUnwrap(workflow.productionDraft)
+        XCTAssertNotEqual(update.id, empty.id)
+        XCTAssertEqual(update.intent, .updateOutdated)
+        XCTAssertEqual(update.chapterIDs, [first], "查看更新不能扩大本次检查的章节范围")
+        XCTAssertFalse(update.fragments.isEmpty)
+        XCTAssertFalse(workflow.isProducing, "查看只打开独立预览，不能隐式确认更新")
+        let candidatesAfter = try await store.candidates(for: imported.bookID)
+        let chaptersAfter = try await store.chapters(for: imported.bookID)
+        let checkpointAfter = try await store.productionCheckpoint(for: imported.bookID)
+        XCTAssertEqual(candidatesAfter, candidatesBefore)
+        XCTAssertEqual(chaptersAfter, chaptersBefore)
+        XCTAssertEqual(checkpointAfter, checkpointBefore)
+        workflow.productionDraft = nil // 完成/取消预览同样不写作品。
+        await workflow.previewOutdatedAudio(from: empty)
+        XCTAssertNil(workflow.productionDraft, "已关闭的旧预览不能重新打开更新")
+        await workflow.shutdown()
+    }
+
+    func testCompletedJourneyExcludesSkippedChaptersAndValidatesRegenerationScope() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "scope.txt",
+            text: "第一章 渡口\n风吹过港口。\n第二章 归途\n夜色深沉。\n第三章 致谢\n感谢阅读。")
+        let skippedID = try XCTUnwrap(imported.chapterIDs.last)
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        try await store.setChapterSkipped(bookID: imported.bookID, chapterID: skippedID, skipped: true)
+        await workflow.openBook(imported.bookID)
+        workflow.makeConfirmedChapters()
+        await waitForProductionToFinish(workflow)
+        XCTAssertTrue(workflow.isProductionComplete)
+        XCTAssertEqual(workflow.selectedBookPrimaryAction, .continueListening)
+        XCTAssertNil(workflow.productionBlocker)
+        let summary = try XCTUnwrap(workflow.shelfBooks.first { $0.id == imported.bookID })
+        XCTAssertEqual(summary.totalChapterCount, 2, "书架制作总数排除跳过章节")
+        XCTAssertEqual(summary.completedChapterCount, 2)
+        let originalChapters = try await store.chapters(for: imported.bookID)
+        let originalCandidates = try await store.candidates(for: imported.bookID)
+        await workflow.prepareRegeneration()
+        let draft = try XCTUnwrap(workflow.regenerationDraft)
+        XCTAssertEqual(draft.chapters.count, 2)
+        workflow.confirmRegeneration(draft: draft, chapterIDs: [])
+        XCTAssertFalse(workflow.isProducing)
+        XCTAssertNotNil(workflow.errorMessage)
+        let targetID = draft.defaultChapterID
+        workflow.confirmRegeneration(draft: draft, chapterIDs: [targetID])
+        await waitForProductionToFinish(workflow)
+        let after = try await store.candidates(for: imported.bookID)
+        let added = after.filter { c in !originalCandidates.contains { $0.id == c.id } }
+        XCTAssertFalse(added.isEmpty)
+        XCTAssertEqual(Set(added.map(\.chapterID)), [targetID])
+        let chaptersAfter = try await store.chapters(for: imported.bookID)
+        XCTAssertEqual(chaptersAfter.map(\.currentChapterRevisionID), originalChapters.map(\.currentChapterRevisionID))
+        XCTAssertTrue(workflow.bannerRequiresAction)
+        XCTAssertTrue(workflow.bannerMessage?.contains("采用") == true)
+        await workflow.shutdown()
+        let (reopened, _) = makeWorkflow(store: store)
+        await reopened.openBook(imported.bookID)
+        XCTAssertTrue(reopened.isProductionComplete)
+        reopened.makeConfirmedChapters()
+        XCTAssertFalse(reopened.isProducing)
+        XCTAssertNil(reopened.errorMessage)
+        await reopened.shutdown()
+    }
+
+    func testAllSkippedChaptersAreNotReportedAsCompleted() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "all-skipped.txt", text: "第一章\n感谢阅读。")
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        for id in imported.chapterIDs { try await store.setChapterSkipped(bookID: imported.bookID, chapterID: id, skipped: true) }
+        await workflow.openBook(imported.bookID)
+        XCTAssertFalse(workflow.isProductionComplete)
+        XCTAssertNotEqual(workflow.selectedBookPrimaryAction, .continueListening)
+        workflow.makeConfirmedChapters(chapterIDs: [])
+        XCTAssertFalse(workflow.isProducing)
+        await workflow.shutdown()
+    }
+
+    func testOtherBlockedChapterDoesNotPreventRemakingCompletedChapter() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "partial-remake.txt",
+            text: "第一章 渡口\n风吹过港口。\n第二章 归途\n夜色深沉。")
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        let first = try XCTUnwrap(imported.chapterIDs.first)
+        let second = try XCTUnwrap(imported.chapterIDs.last)
+        workflow.makeConfirmedChapters(chapterIDs: [first])
+        await waitForProductionToFinish(workflow)
+        let annotations = try await store.annotations(for: imported.bookID, chapterID: second)
+        var unknown = try XCTUnwrap(annotations.first)
+        unknown.assignment = .unknown(reason: "待确认", candidateRoleIDs: [])
+        try await store.saveAnnotations(bookID: imported.bookID, annotations: [unknown])
+        await workflow.openBook(imported.bookID)
+        workflow.selectedChapterID = first
+        await workflow.prepareRegeneration()
+        XCTAssertNotNil(workflow.regenerationDraft, "其他章节未准备好，当前成品也应可以打开范围选择")
+        guard let draft = workflow.regenerationDraft else { await workflow.shutdown(); return }
+        workflow.confirmRegeneration(draft: draft, chapterIDs: [first])
+        await waitForProductionToFinish(workflow)
+        XCTAssertNil(workflow.errorMessage)
+        let checkpoint = try await store.productionCheckpoint(for: imported.bookID)
+        XCTAssertEqual(checkpoint?.chapterIDs, [first])
+        await workflow.shutdown()
+    }
+
+    func testUpdatedCandidatesGuideAdoptionInsteadOfRepeatingProduction() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "adoption.txt", text: "第一章\n风吹过港口。")
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        workflow.makeConfirmedChapters()
+        await waitForProductionToFinish(workflow)
+        try await store.savePronunciationBinding(.init(setID: AudiobookPronunciationBinding.makeSetID(bookID: imported.bookID),
+            revision: "pr_changed", entries: [.init(id: "wind", surface: "风", spoken: "fēng")]), bookID: imported.bookID)
+        await workflow.openBook(imported.bookID)
+        await workflow.prepareProduction(intent: .updateOutdated)
+        let updateDraft = try XCTUnwrap(workflow.productionDraft)
+        workflow.confirmProduction(updateDraft)
+        await waitForProductionToFinish(workflow)
+        XCTAssertEqual(workflow.selectedBookPrimaryAction?.title, "试听并采用新候选")
+        XCTAssertTrue(workflow.bannerRequiresAction)
+        let checkpoint = try await store.productionCheckpoint(for: imported.bookID)
+        workflow.makeConfirmedChapters()
+        XCTAssertFalse(workflow.isProducing)
+        await waitForProductionToFinish(workflow)
+        let after = try await store.productionCheckpoint(for: imported.bookID)
+        XCTAssertEqual(after, checkpoint)
+        XCTAssertTrue(workflow.bannerMessage?.contains("采用") == true)
+        await workflow.shutdown()
+    }
+
+    func testCompletedProductionClickDoesNotStartAnotherTask() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(into: workflow, fileName: "completed.txt", text: "第一章 渡口\n风吹过港口。")
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        workflow.makeConfirmedChapters()
+        await waitForProductionToFinish(workflow)
+        let checkpoint = try await store.productionCheckpoint(for: imported.bookID)
+        workflow.makeConfirmedChapters(chapterIDs: imported.chapterIDs)
+        XCTAssertFalse(workflow.isProducing, "完成章节普通点击应直接引导收听")
+        await waitForProductionToFinish(workflow)
+        let after = try await store.productionCheckpoint(for: imported.bookID)
+        XCTAssertEqual(after, checkpoint)
+        XCTAssertNil(workflow.errorMessage)
+        await workflow.shutdown()
+    }
+
     func testFinalProductionRefreshPublishesCandidatesWithoutDependingOnIntermediateProgress() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let (workflow, _) = makeWorkflow(store: store)
@@ -3608,8 +3805,8 @@ final class AudiobookWorkflowTests: XCTestCase {
         await workflow.openBook(bookID)
         XCTAssertEqual(
             workflow.chapterProductionButtonTitle(for: updatedChapters[0].id),
-            "更新本章音频",
-            "AC-6.4: 已有成片的章节主按钮应动态切换为「更新本章音频」"
+            "更新受影响内容",
+            "已有音频但不符合当前制作条件时应明确更新受影响内容"
         )
     }
 

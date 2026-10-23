@@ -299,6 +299,9 @@ public struct SessionLibraryView: View {
     @State private var knowledgeHits: [SessionStore.KnowledgeHit] = []
     @State private var knowledgeError: String?
     @State private var loadFailure: String?
+    @State private var operationError: String?
+    @State private var recoveryFeedback: OperationFeedback?
+    @State private var operationNotice: String?
     @State private var pendingRemoval: SessionSummary?
     @State private var isShowingDataDirectoryHint = false
     /// 前置检查态那一栏「本次字幕」收起了没有（与语音助手、会议页同一套规矩）。
@@ -330,7 +333,8 @@ public struct SessionLibraryView: View {
                         records: caption.saveRecoveryRecords,
                         preview: { caption.unsavedTranscriptText(recordID: $0) },
                         retry: { await caption.retryPendingSaves(recordID: $0) },
-                        finishIncomplete: { await caption.endIncompleteRecord($0) }
+                        finishIncomplete: { await caption.endIncompleteRecord($0) },
+                        onFeedback: { recoveryFeedback = $0 }
                     )
                 }
                 if kind == .captions, let failure = caption.completionFailure {
@@ -345,12 +349,12 @@ public struct SessionLibraryView: View {
                     .accessibilityIdentifier("caption-completion-failure")
                 }
 
-                if let loadFailure {
+                if loadFailure != nil {
                     StatusBanner(
                         kind: .standard,
                         tone: .critical,
                         title: "记录库不可用",
-                        message: loadFailure,
+                        message: "暂时无法读取记录，请重试。",
                         actionTitle: "重试",
                         action: { Task { await reload() } }
                     )
@@ -422,6 +426,17 @@ public struct SessionLibraryView: View {
         } message: { summary in
             Text(removalMessage(for: summary))
         }
+        .operationFeedback([
+            recoveryFeedback,
+            OperationFeedback(operationError, onDismiss: { operationError = nil }),
+            OperationFeedback(loadFailure, title: "记录库未读取"),
+            OperationFeedback(detailLoad.failure, title: "记录未打开"),
+            OperationFeedback(knowledgeError.map { "全文检索没能完成：\($0)" }, title: "检索未完成",
+                              onDismiss: { knowledgeError = nil }),
+            OperationFeedback(kind == .captions ? caption.exportFailure : nil, title: "字幕未导出", onDismiss: { caption.clearExportFailure() }),
+            OperationFeedback(operationNotice, tone: .healthy, title: "已完成", autoDismiss: true,
+                              onDismiss: { operationNotice = nil })
+        ])
     }
 
     private var refreshToken: String {
@@ -538,17 +553,21 @@ public struct SessionLibraryView: View {
     /// 但导出物该是库里的定稿内容（`includePartial == false`），两者不该因为一次选中而耦合。
     private func export(_ summary: SessionSummary, as format: SessionExportFormat) {
         Task {
-            let payload = await exportPayload(for: summary)
-            SessionExportPanel.write(payload, as: format)
+            do {
+                let payload = try await exportPayload(for: summary)
+                try SessionExportPanel.write(payload, as: format)
+            } catch {
+                operationError = "导出失败：\(error.localizedDescription)"
+            }
         }
     }
 
-    private func exportPayload(for summary: SessionSummary) async -> SessionExportPayload {
-        let rows = (try? await session.lines(sessionID: summary.id)) ?? []
-        let names = (try? await session.speakerNames(sessionID: summary.id)) ?? [:]
+    private func exportPayload(for summary: SessionSummary) async throws -> SessionExportPayload {
+        let rows = try await session.lines(sessionID: summary.id)
+        let names = try await session.speakerNames(sessionID: summary.id)
         // MC-25：导出当前展示版（采用版优先）；最新尝试失败时不让纪要章节凭空消失。
         // 无可用版时为 nil，导出物只出转录。
-        let minutes = try? await session.currentMinutes(sessionID: summary.id)
+        let minutes = try await session.currentMinutes(sessionID: summary.id)
         return SessionExportPayload(
             record: summary.record,
             lines: rows,
@@ -832,19 +851,14 @@ public struct SessionLibraryView: View {
                         // 回车触发全文检索：标题过滤搜不到正文，这一步查转录与纪要。
                         Task { await runKnowledgeSearch() }
                     }
-                // 全文检索命中数与失败提示；无命中时回到标题过滤，不清空列表。
+                // 全文检索命中数；无命中时回到标题过滤，不清空列表。
                 if !knowledgeHits.isEmpty {
                     Text("全文找到 \(knowledgeHits.count) 条")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
                         .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
-                } else if let knowledgeError {
-                    Text("全文检索没能完成：\(knowledgeError)")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
-                        .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+
                 }
 
                 Divider()
@@ -954,11 +968,11 @@ public struct SessionLibraryView: View {
                 if detailLoad.isLoading {
                     ProgressView("正在打开记录…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let failure = detailLoad.failure {
+                } else if detailLoad.failure != nil {
                     ContentUnavailableView {
                         Label("记录暂时没能打开", systemImage: "exclamationmark.triangle")
                     } description: {
-                        Text(failure)
+                        Text("暂时无法读取这条记录，请重试。")
                     } actions: {
                         Button("重试") { Task { await loadLines() } }
                     }
@@ -1142,19 +1156,29 @@ public struct SessionLibraryView: View {
     }
 
     private func copyTranscript(of summary: SessionSummary) async {
-        let rows = (try? await session.lines(sessionID: summary.id)) ?? []
-        let text = rows.map { "\(speakerText(for: $0))  \($0.text)" }.joined(separator: "\n")
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        do {
+            let rows = try await session.lines(sessionID: summary.id)
+            let text = rows.map { "\(speakerText(for: $0))  \($0.text)" }.joined(separator: "\n")
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            guard pasteboard.setString(text, forType: .string) else {
+                operationError = "文字暂时未能复制，请重试。"
+                return
+            }
+            operationNotice = "已复制文字记录。"
+        } catch {
+            operationError = "复制失败：\(error.localizedDescription)"
+        }
     }
 
     private func remove(_ summary: SessionSummary) async {
         pendingRemoval = nil
-        try? await session.removeSession(id: summary.id)
-        if selectedID == summary.id {
-            selectedID = nil
+        do {
+            try await session.removeSession(id: summary.id)
+            if selectedID == summary.id { selectedID = nil }
+            await reload()
+        } catch {
+            operationError = "移除失败：\(error.localizedDescription)"
         }
-        await reload()
     }
 }

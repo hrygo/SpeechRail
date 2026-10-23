@@ -26,6 +26,8 @@ public struct InnerOSDrawer: View {
     /// 多数答案用户就是想整条写进，逐句勾选属于高级操作。
     @State private var pickingSentencesFor: InnerOSExchange?
     @State private var pickedSentences: Set<Int> = []
+    @State private var copyFailure: String?
+    @State private var copyNoticeID = UUID()
     @State private var copiedFeedback: (exchangeID: String, label: String)?
     @FocusState private var isQuestionFieldFocused: Bool
 
@@ -71,6 +73,12 @@ public struct InnerOSDrawer: View {
         .sheet(item: $pickingSentencesFor) { exchange in
             sentencePicker(for: exchange)
         }
+        .operationFeedback([
+            OperationFeedback(session.supplementError, title: "纪要未更新"),
+            OperationFeedback(copyFailure, title: "复制未完成", onDismiss: { copyFailure = nil }),
+            OperationFeedback(copiedFeedback?.label, tone: .healthy, title: "已复制", id: copyNoticeID.uuidString, autoDismiss: true,
+                              onDismiss: { copiedFeedback = nil })
+        ])
         .accessibilityElement(children: .contain)
         .accessibilityLabel("会中私聊。会议中随时私下向助手提问，仅你看得到：这里的提问与回答不会进入会议录音、文字记录或纪要。")
         .onChange(of: session.exchanges.count) { oldCount, newCount in
@@ -368,12 +376,6 @@ public struct InnerOSDrawer: View {
                 }
                 .frame(maxHeight: .infinity)
 
-                if let error = session.supplementError {
-                    Text(error)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                        .accessibilityLabel("写进纪要失败：\(error)")
-                }
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -482,7 +484,6 @@ public struct InnerOSDrawer: View {
     }
 
     private func draftCalloutCard(exchange: InnerOSExchange, draft: String) -> some View {
-        let isCopied = copiedFeedback?.exchangeID == exchange.id && copiedFeedback?.label == "已复制措辞"
         return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
             RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.compact, style: .continuous)
                 .fill(SpeechRailDesignTokens.Color.rail)
@@ -498,12 +499,12 @@ public struct InnerOSDrawer: View {
                         copyText(draft, exchangeID: exchange.id, feedbackLabel: "已复制措辞")
                     } label: {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
-                            Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                            Image(systemName: "doc.on.doc")
                                 .font(SpeechRailDesignTokens.Typography.chipIcon)
-                            Text(isCopied ? "已复制措辞" : "复制措辞")
+                            Text("复制措辞")
                                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                         }
-                        .foregroundStyle(isCopied ? SpeechRailDesignTokens.Color.ready : SpeechRailDesignTokens.Color.rail)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                     }
                     .buttonStyle(.plain)
                     .speechRailPointerCursor()
@@ -525,12 +526,11 @@ public struct InnerOSDrawer: View {
     }
 
     private func actions(_ exchange: InnerOSExchange) -> some View {
-        let isFullCopied = copiedFeedback?.exchangeID == exchange.id && copiedFeedback?.label == "已复制"
         return HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             Button {
                 copy(exchange)
             } label: {
-                Label(isFullCopied ? "已复制" : "复制", systemImage: isFullCopied ? "checkmark" : "doc.on.doc")
+                Label("复制", systemImage: "doc.on.doc")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -752,14 +752,12 @@ public struct InnerOSDrawer: View {
     private func copyText(_ text: String, exchangeID: String, feedbackLabel: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-        copiedFeedback = (exchangeID, feedbackLabel)
-        Task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            if copiedFeedback?.exchangeID == exchangeID, copiedFeedback?.label == feedbackLabel {
-                copiedFeedback = nil
-            }
+        guard pasteboard.setString(text, forType: .string) else {
+            copyFailure = "文字暂时未能复制，请重试。"
+            return
         }
+        copyNoticeID = UUID()
+        copiedFeedback = (exchangeID, feedbackLabel)
     }
 
     private static func timecode(_ seconds: TimeInterval) -> String {

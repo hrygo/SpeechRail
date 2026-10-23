@@ -392,6 +392,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
         lastPublishedDesignedVoice = nil
         lastPublishedDesignedSeed = nil
         voiceDesignPublication = VoiceDesignPublicationSnapshot(phase: .creatingCandidate)
+        voiceDesignPublication.referenceText = candidate.referenceTextSnapshot.trimmingCharacters(in: .whitespacesAndNewlines)
         voiceDesignErrorMessage = nil
         voiceDesignSuccessMessage = nil
         voiceDesignSavingSlot = candidate.slot
@@ -442,6 +443,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
             return
         }
         voiceDesignPublication.message = nil
+        voiceDesignPublication.referenceComparison = nil
         voiceDesignErrorMessage = nil
         let step: VoiceDesignPublicationTaskStep
         switch retryStep {
@@ -476,9 +478,47 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
     /// `failed` 是候选终态：此时唯一有效的动作是重新生成候选，而不是重复一次
     /// 必然被服务拒绝的复验。UI 据此显示正确按钮，避免展示无效重试。
     public var voiceDesignPublicationRetryActionTitle: String {
-        voiceDesignPublicationRetryStep == .regenerateCandidate
-            ? "重新生成候选"
-            : "重试这一步"
+        switch voiceDesignPublicationRetryStep {
+        case .regenerateCandidate: "重新生成候选"
+        case .confirmReference: "重新校验"
+        case .validate, .revalidate: "重新检查配音效果"
+        default: "重试这一步"
+        }
+    }
+
+    public var canRegenerateVoiceDesignPublication: Bool {
+        guard voiceDesignPublication.phase == .failed, voiceDesignSaveTask == nil else { return false }
+        return voiceDesignPublicationRetryStep == .confirmReference
+            || voiceDesignPublicationRetryStep == .regenerateCandidate
+            || voiceDesignPublicationRetryStep == .revalidate
+            || (voiceDesignPublicationRetryStep == .createCandidate
+                && voiceDesignPublicationContext?.creationWasRejected == true)
+    }
+
+    public func regenerateVoiceDesignPublication(referenceText: String) {
+        guard canRegenerateVoiceDesignPublication,
+              let previous = voiceDesignPublicationContext else { return }
+        let text = referenceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (SpeechRailCreatorLimits.referenceTextMinimumLength...SpeechRailCreatorLimits.referenceTextMaximumLength)
+            .contains(text.count) else {
+            voiceDesignPublication.message = "参考文案需要 20–240 个字符，请调整后重新生成。"
+            return
+        }
+        stopAudio()
+        voiceDesignPublicationGeneration &+= 1
+        voiceDesignPublicationContext = VoiceDesignPublicationContext(
+            slot: previous.slot, name: previous.name, instruction: previous.instruction,
+            referenceText: text, seed: previous.seed,
+            voiceID: "voice_design_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+            idempotencyKey: "voice-design-" + UUID().uuidString.lowercased(),
+            supersededCandidateID: previous.candidateID,
+            autoPublish: previous.autoPublish
+        )
+        voiceDesignPublicationRetryStep = nil
+        voiceDesignPublication = VoiceDesignPublicationSnapshot(phase: .creatingCandidate)
+        voiceDesignPublication.referenceText = text
+        voiceDesignErrorMessage = nil
+        scheduleVoiceDesignPublicationTask(.createCandidate, generation: voiceDesignPublicationGeneration)
     }
 
     public func cancelVoiceDesignPublication() {
@@ -566,6 +606,16 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
         case .createCandidate:
             voiceDesignPublication.phase = .creatingCandidate
             do {
+                if let supersededID = context.supersededCandidateID {
+                    let cancelled = try await requireCreatorCapability(voiceDesignClient).cancelVoiceDesignCandidate(id: supersededID)
+                    guard isCurrentVoiceDesignPublication(generation) else { return }
+                    guard cancelled.knownState == .cancelled else { throw ServiceAPIClientError.invalidResponse }
+                    context.supersededCandidateID = nil
+                    voiceDesignPublicationContext = context
+                }
+                // A new attempt can lose its response even after an earlier rejection.
+                context.creationWasRejected = false
+                voiceDesignPublicationContext = context
                 let candidate = try await requireCreatorCapability(voiceDesignClient).createVoiceDesignCandidate(
                     voiceID: context.voiceID,
                     name: context.name,
@@ -626,6 +676,16 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                     await loadVoiceDesignReferenceAudio(context, generation: generation)
                 }
             } catch {
+                // These boundary errors occur before allocating a candidate. Other
+                // failures may hide a committed create and must retain its identity.
+                if isCurrentVoiceDesignPublication(generation),
+                   context.supersededCandidateID == nil,
+                   case let ServiceAPIClientError.http(status, code, _, _, retryable) = error,
+                   status == 422, !retryable,
+                   code == "invalid_ref_text" || code == "validation_error" {
+                    context.creationWasRejected = true
+                    voiceDesignPublicationContext = context
+                }
                 failVoiceDesignPublication(
                     error,
                     retryStep: .createCandidate,
@@ -673,6 +733,11 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
                 }
                 await validateVoiceDesignCandidate(context, generation: generation)
             } catch {
+                if let mismatch = error as? VoiceDesignReferenceMismatch,
+                   mismatch.comparison.candidateRevision == context.candidateRevision,
+                   isCurrentVoiceDesignPublication(generation) {
+                    voiceDesignPublication.referenceComparison = mismatch.comparison
+                }
                 failVoiceDesignPublication(
                     error,
                     retryStep: .confirmReference,
@@ -815,7 +880,20 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
         guard isCurrentVoiceDesignPublication(generation) else { return }
         var context = initialContext
         do {
+            if let supersededID = context.supersededCandidateID {
+                // Replacement creation has not started while retirement is pending.
+                // Cancelling here must never synthesize an unwanted replacement.
+                let cancelled = try await requireCreatorCapability(voiceDesignClient).cancelVoiceDesignCandidate(id: supersededID)
+                guard isCurrentVoiceDesignPublication(generation) else { return }
+                guard cancelled.knownState == .cancelled else { throw ServiceAPIClientError.invalidResponse }
+                finishVoiceDesignCancellation(generation: generation)
+                return
+            }
             if context.candidateID == nil {
+                if context.creationWasRejected {
+                    finishVoiceDesignCancellation(generation: generation)
+                    return
+                }
                 // Recover a create whose response raced with cancellation by
                 // replaying the same logical request with its original key.
                 let recovered = try await requireCreatorCapability(voiceDesignClient).createVoiceDesignCandidate(
@@ -2118,7 +2196,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
     }
 
     public func playVoiceDesignReferenceAudio() {
-        guard voiceDesignPublication.phase == .awaitingReferenceReview,
+        guard (voiceDesignPublication.phase == .awaitingReferenceReview || voiceDesignPublication.phase == .failed),
               let candidateID = voiceDesignPublication.candidateID,
               let revision = voiceDesignPublication.candidateRevision,
               let audio = voiceDesignPublication.referenceAudioData
@@ -2136,7 +2214,7 @@ public final class VoiceWorkflowModel: CreatorVoiceReading {
     }
 
     public func playVoiceDesignValidationAudio() {
-        guard voiceDesignPublication.phase == .awaitingValidationReview,
+        guard (voiceDesignPublication.phase == .awaitingValidationReview || voiceDesignPublication.phase == .failed),
               let candidateID = voiceDesignPublication.candidateID,
               let revision = voiceDesignPublication.candidateRevision,
               let validationID = voiceDesignPublication.validationID,

@@ -587,11 +587,24 @@ public final class ServiceAPIClient: @unchecked Sendable {
         id: String,
         referenceText: String?
     ) async throws -> VoiceDesignCandidate {
-        let response: VoiceDesignCandidateEnvelope = try await postJSON(
-            path: try voiceDesignPath(id: id) + "/confirm",
-            body: VoiceDesignConfirmRequestBody(referenceText: referenceText)
+        var request = try makeRequest(
+            path: try voiceDesignPath(id: id) + "/confirm", method: "POST",
+            accept: "application/json"
         )
-        return response.candidate
+        request.timeoutInterval = Self.longRunningRequestTimeout
+        request.httpBody = try JSONEncoder().encode(VoiceDesignConfirmRequestBody(referenceText: referenceText))
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let response = try await transport.execute(request)
+        if response.metadata.statusCode == 400,
+           let failure = try? JSONDecoder().decode(VoiceDesignReferenceErrorEnvelope.self, from: response.data),
+           failure.error.code == "transcript_mismatch" {
+            throw VoiceDesignReferenceMismatch(comparison: failure.error.referenceComparison)
+        }
+        let decoded: ServiceConditionalResponse<VoiceDesignCandidateEnvelope> = try ServiceResponseDecoder.decode(
+            response.data, statusCode: response.metadata.statusCode, headers: response.metadata.headers
+        )
+        guard let candidate = decoded.value?.candidate else { throw ServiceAPIClientError.invalidResponse }
+        return candidate
     }
 
     public func validateVoiceDesignCandidate(
@@ -1211,6 +1224,18 @@ private struct ClonePromptListResponse: Decodable {
 private struct PronunciationSetListResponse: Decodable {
     let object: String
     let data: [PronunciationSetSummary]
+}
+
+private struct VoiceDesignReferenceErrorEnvelope: Decodable {
+    struct Payload: Decodable {
+        let code: String
+        let referenceComparison: VoiceDesignReferenceComparison
+        enum CodingKeys: String, CodingKey {
+            case code
+            case referenceComparison = "reference_comparison"
+        }
+    }
+    let error: Payload
 }
 
 private struct VoiceDesignCandidateEnvelope: Decodable {

@@ -7,10 +7,17 @@ public struct AudiobookWorkshopView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(AppNavigationState.self) private var navigation
 
+    @State private var acknowledgedProductionErrorID: String?
+
     public init() {}
 
     private var workflow: AudiobookWorkflowModel {
         appModel.audiobookWorkflow
+    }
+
+    private var productionErrorID: String? {
+        guard let progress = workflow.productionProgress, let message = progress.lastErrorMessage else { return nil }
+        return "production:\(progress.bookID):\(progress.updatedAt.timeIntervalSinceReferenceDate):\(message)"
     }
 
     public var body: some View {
@@ -21,41 +28,6 @@ public struct AudiobookWorkshopView: View {
             layout: .fill(minimumHeight: SpeechRailDesignTokens.Layout.audiobookWorkbenchMinimumHeight),
             content: {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                if workflow.voiceReturnRequiresAction, let voiceMsg = workflow.voiceReturnBannerMessage {
-                    StatusBanner(
-                        kind: .standard,
-                        tone: .attention,
-                        title: "音色需要确认",
-                        message: voiceMsg,
-                        actionTitle: "知道了"
-                    ) {
-                        workflow.dismissVoiceReturnBanner()
-                    }
-                }
-
-                if let errorMsg = workflow.errorMessage {
-                    StatusBanner(
-                        kind: .standard,
-                        tone: .critical,
-                        title: "操作未完成",
-                        message: errorMsg,
-                        actionTitle: "知道了"
-                    ) {
-                        workflow.errorMessage = nil
-                    }
-                }
-                if workflow.bannerRequiresAction, let bannerMsg = workflow.bannerMessage {
-                    StatusBanner(
-                        kind: .standard,
-                        tone: .attention,
-                        title: "下一步",
-                        message: bannerMsg,
-                        actionTitle: "收起"
-                    ) {
-                        workflow.bannerMessage = nil
-                    }
-                }
-
                 if workflow.surfaceMode != .shelf, workflow.requiresWorkingTextPreparation {
                     StatusBanner(kind: .standard, tone: .attention,
                         title: workflow.isPreparingWorkingText ? "正在整理正文…" : "准备正文后继续制作",
@@ -80,50 +52,43 @@ public struct AudiobookWorkshopView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .overlay(alignment: .top) {
-                VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    if !workflow.voiceReturnRequiresAction, let message = workflow.voiceReturnBannerMessage {
-                        AudiobookTransientFeedback(
-                            id: workflow.voiceReturnNoticeID,
-                            tone: .healthy,
-                            title: "音色已更新",
-                            message: message,
-                            onDismiss: workflow.dismissVoiceReturnBanner
-                        )
-                    }
-                    if !workflow.bannerRequiresAction, let message = workflow.bannerMessage {
-                        AudiobookTransientFeedback(
-                            id: workflow.bannerNoticeID,
-                            tone: .healthy,
-                            title: "状态更新",
-                            message: message,
-                            onDismiss: { workflow.bannerMessage = nil }
-                        )
-                    }
-                    if workflow.surfaceMode == .listening,
-                       let listening = workflow.listeningController,
-                       let message = listening.chapterUpdatedBannerMessage {
-                        AudiobookTransientFeedback(
-                            id: listening.chapterUpdatedNoticeID,
-                            tone: .healthy,
-                            title: "章节已更新",
-                            message: message,
-                            onDismiss: listening.dismissChapterUpdatedNotice
-                        )
-                    }
-                    if let message = workflow.trashUndoMessage {
-                        AudiobookTransientFeedback(
-                            id: workflow.trashUndoNoticeID,
-                            tone: .neutral,
-                            title: "已移入废纸篓",
-                            message: message,
-                            actionTitle: "撤销",
-                            action: { Task { await workflow.undoLastTrash() } },
-                            onDismiss: workflow.dismissTrashUndoMessage
-                        )
-                    }
-                }
-            }
+            .operationFeedback([
+                OperationFeedback(workflow.errorMessage, id: workflow.errorNoticeID.uuidString,
+                    onDismiss: {
+                        if workflow.errorMessage == workflow.productionProgress?.lastErrorMessage {
+                            acknowledgedProductionErrorID = productionErrorID
+                        }
+                        workflow.errorMessage = nil
+                    }),
+                OperationFeedback(workflow.errorMessage == nil
+                    && acknowledgedProductionErrorID != productionErrorID
+                    ? workflow.productionProgress?.lastErrorMessage : nil,
+                    id: productionErrorID, onDismiss: {
+                        acknowledgedProductionErrorID = productionErrorID
+                    }),
+                OperationFeedback(workflow.voiceReturnBannerMessage,
+                    tone: workflow.voiceReturnRequiresAction ? .attention : .healthy,
+                    title: workflow.voiceReturnRequiresAction ? "音色需要确认" : "音色已更新",
+                    id: workflow.voiceReturnNoticeID.uuidString,
+                    autoDismiss: !workflow.voiceReturnRequiresAction,
+                    onDismiss: workflow.dismissVoiceReturnBanner),
+                OperationFeedback(workflow.bannerMessage,
+                    tone: workflow.bannerRequiresAction ? .attention : .healthy,
+                    title: workflow.bannerRequiresAction ? "下一步" : "状态更新",
+                    id: workflow.bannerNoticeID.uuidString,
+                    autoDismiss: !workflow.bannerRequiresAction,
+                    onDismiss: { workflow.bannerMessage = nil }),
+                OperationFeedback(workflow.surfaceMode == .listening
+                    ? workflow.listeningController?.chapterUpdatedBannerMessage : nil,
+                    tone: .healthy, title: "章节已更新",
+                    id: workflow.listeningController?.chapterUpdatedNoticeID.uuidString,
+                    autoDismiss: true,
+                    onDismiss: { workflow.listeningController?.dismissChapterUpdatedNotice() }),
+                OperationFeedback(workflow.trashUndoMessage, tone: .neutral, title: "已移入废纸篓",
+                    id: workflow.trashUndoNoticeID.uuidString,
+                    onDismiss: workflow.dismissTrashUndoMessage,
+                    actionTitle: "撤销", action: { Task { await workflow.undoLastTrash() } })
+            ])
             },
             trailing: {
                 toolbarActions
@@ -240,37 +205,6 @@ public struct AudiobookWorkshopView: View {
     }
 }
 
-/// 有声书各页面共用的临时反馈；宿主通过 overlay 放置，不占用正文空间。
-struct AudiobookTransientFeedback: View {
-    let id: UUID
-    let tone: StatusTone
-    let title: String
-    let message: String
-    var actionTitle: String? = nil
-    var action: (() -> Void)? = nil
-    let onDismiss: () -> Void
-
-    var body: some View {
-        StatusBanner(
-            kind: .standard,
-            tone: tone,
-            title: title,
-            message: message,
-            actionTitle: actionTitle ?? "收起",
-            action: action ?? onDismiss
-        )
-        .task(id: id) {
-            do {
-                try await Task.sleep(for: SpeechRailDesignTokens.Notice.transientDisplayDuration)
-                try Task.checkCancellation()
-            } catch {
-                return
-            }
-            onDismiss()
-        }
-    }
-}
-
 // MARK: - Import Preview Sheet
 
 struct AudiobookImportPreviewSheet: View {
@@ -288,13 +222,6 @@ struct AudiobookImportPreviewSheet: View {
                 detail: "格式探测已完成。先核对整理后的段落和目录，确认后再进入角色分析。原始文件会完整保留，整理在本地完成。"
             )
 
-            if let importError = workflow.importErrorMessage {
-                NoticeBar(
-                    tone: .critical,
-                    message: importError,
-                    actionTitle: "知道了"
-                ) { workflow.importErrorMessage = nil }
-            }
 
             if let preview = workflow.importPreview {
                 if preview.isEPUB {
@@ -465,6 +392,10 @@ struct AudiobookImportPreviewSheet: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.gutter)
         .frame(width: SpeechRailDesignTokens.Layout.Sheet.prominentWidth)
+        .operationFeedback([
+            OperationFeedback(workflow.importErrorMessage, title: "导入未完成",
+                onDismiss: { workflow.importErrorMessage = nil })
+        ])
     }
 }
 
@@ -484,13 +415,6 @@ struct AudiobookExportSheet: View {
                 detail: "整本 M4B 包含章节轨与书名元数据；分章节 MP3 允许仅导出已完成的章节并附带遗漏说明清单。"
             )
 
-            if let exportError = workflow.exportErrorMessage {
-                NoticeBar(
-                    tone: .critical,
-                    message: exportError,
-                    actionTitle: "知道了"
-                ) { workflow.clearExportError() }
-            }
 
             if !workflow.exportCapabilities.available {
                 StatusBanner(
@@ -555,11 +479,6 @@ struct AudiobookExportSheet: View {
                                 }
                                 .speechRailButton(.quiet)
                             }
-                        }
-                        if let coverError = workflow.exportCoverErrorMessage {
-                            Text(coverError)
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
                     }
                     .padding(SpeechRailDesignTokens.Spacing.sm)
@@ -691,6 +610,11 @@ struct AudiobookExportSheet: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.gutter)
         .frame(width: SpeechRailDesignTokens.Layout.Sheet.wideWidth)
+        .operationFeedback([
+            OperationFeedback(workflow.exportErrorMessage, title: "导出未完成",
+                onDismiss: workflow.clearExportError),
+            OperationFeedback(workflow.exportCoverErrorMessage, title: "封面未更新")
+        ])
         .onAppear {
             workflow.preparedExport = nil
             selectedChapterIDs = Set(workflow.exportReadyChapters.map(\.id))

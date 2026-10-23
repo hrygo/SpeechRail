@@ -169,8 +169,14 @@ def _validate_owned_relative_path(
             error_code="invalid_request",
         )
 
-    expected_prefix = ("books", str(book_id), "audio")
-    if tuple(parts[:3]) != expected_prefix or len(parts) != 4 or not parts[3].endswith(".wav"):
+    # UUID spelling differs between Swift and Python; preserve the actual path.
+    if (
+        len(parts) != 4
+        or parts[0] != "books"
+        or parts[1].lower() != str(book_id)
+        or parts[2] != "audio"
+        or not parts[3].endswith(".wav")
+    ):
         raise MediaManifestError(
             "media input must reside inside the book's owned audio directory",
             error_code="invalid_request",
@@ -213,7 +219,9 @@ def _validate_owned_cover_path(
 
     if (
         len(parts) != 4
-        or tuple(parts[:3]) != ("books", str(book_id), _COVER_DIRECTORY_NAME)
+        or parts[0] != "books"
+        or parts[1].lower() != str(book_id)
+        or parts[2] != _COVER_DIRECTORY_NAME
         or Path(parts[3]).stem != _COVER_FILENAME_STEM
         or Path(parts[3]).suffix.lower() not in _ALLOWED_COVER_SUFFIXES
     ):

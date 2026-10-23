@@ -31,16 +31,14 @@ public struct ServiceStatusView: View {
                         || model.isRefreshingService
                         || !model.controlAgentStatus.allowsMutation
                 )
-                if let message = model.message {
-                    Text(SpeechRailOperationMessagePresentation.text(message))
-                        .font(SpeechRailDesignTokens.Typography.secondary)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.critical)
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         // 卡片内容内边距按 4x 帧实测统一（稿 `18 → Layout.cardInset）。
         .padding(SpeechRailDesignTokens.Layout.cardInset)
         .speechRailContentSurface()
+        .operationFeedback([
+            OperationFeedback(model.message.map(SpeechRailOperationMessagePresentation.text))
+        ])
     }
 }

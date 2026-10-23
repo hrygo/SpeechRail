@@ -13,7 +13,6 @@ struct SettingsAssistantPane: View {
     @Binding private var moduleKeyDrafts: [String: String]
     @Binding private var moduleKeySaved: Set<String>
     @Binding private var connectionResult: LLMConnectionResult?
-    @Binding private var keySaveError: String?
     @Binding private var isChecking: Bool
     @Binding private var checkedModule: LLMModule?
     @Binding private var isAdvancedLLMConfigurationExpanded: Bool
@@ -32,7 +31,6 @@ struct SettingsAssistantPane: View {
         moduleKeyDrafts: Binding<[String: String]>,
         moduleKeySaved: Binding<Set<String>>,
         connectionResult: Binding<LLMConnectionResult?>,
-        keySaveError: Binding<String?>,
         isChecking: Binding<Bool>,
         checkedModule: Binding<LLMModule?>,
         isAdvancedLLMConfigurationExpanded: Binding<Bool>,
@@ -48,7 +46,6 @@ struct SettingsAssistantPane: View {
         self._moduleKeyDrafts = moduleKeyDrafts
         self._moduleKeySaved = moduleKeySaved
         self._connectionResult = connectionResult
-        self._keySaveError = keySaveError
         self._isChecking = isChecking
         self._checkedModule = checkedModule
         self._isAdvancedLLMConfigurationExpanded = isAdvancedLLMConfigurationExpanded
@@ -167,9 +164,7 @@ struct SettingsAssistantPane: View {
                         }
 
                         SettingsConnectionStatus(
-                            result: checkedModule == nil ? connectionResult : nil,
-                            isChecking: checkedModule == nil && isChecking,
-                            saveError: checkedModule == nil ? keySaveError : nil
+                            isChecking: checkedModule == nil && isChecking
                         )
                         if checkedModule == nil, connectionResult == nil, !isChecking {
                             Text(
@@ -540,10 +535,7 @@ struct SettingsAssistantPane: View {
                             .help(moduleActionHelp(for: module))
                             .disabled(moduleCheckDisabled(for: module))
                         SettingsConnectionStatus(
-                            result: checkedModule == module ? connectionResult : nil,
-                            isChecking: checkedModule == module && isChecking,
-                            saveError: checkedModule == module ? keySaveError : nil,
-                            saveFailurePrefix: "连接已通过，但专用密钥未保存"
+                            isChecking: checkedModule == module && isChecking
                         )
                     }
                 }

@@ -140,68 +140,21 @@ enum SettingsConnectionPresentation {
         }
     }
 
-    static func toneColor(for result: LLMConnectionResult) -> Color {
-        result.isReady ? .green : .orange
-    }
 }
 
+/// Connection checks stay inline while running; their results belong to the settings overlay.
 struct SettingsConnectionStatus: View {
-    let result: LLMConnectionResult?
     let isChecking: Bool
-    let saveError: String?
-    let saveFailurePrefix: String
-
-    init(
-        result: LLMConnectionResult?,
-        isChecking: Bool,
-        saveError: String?,
-        saveFailurePrefix: String = "连接已通过，但密钥未保存"
-    ) {
-        self.result = result
-        self.isChecking = isChecking
-        self.saveError = saveError
-        self.saveFailurePrefix = saveFailurePrefix
-    }
 
     var body: some View {
-        Group {
-            if isChecking {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("正在检查连接")
-                }
-            } else if let result {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Label {
-                        Text(SettingsConnectionPresentation.title(for: result))
-                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                    } icon: {
-                        Image(systemName: result.isReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                            .foregroundStyle(SettingsConnectionPresentation.toneColor(for: result))
-                    }
-
-                    Text(
-                        saveError.map { "\(saveFailurePrefix)：\($0)" }
-                            ?? result.detail
-                    )
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilitySummary)
-    }
-
-    private var accessibilitySummary: String {
         if isChecking {
-            return "正在检查连接"
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在检查连接")
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("正在检查连接")
         }
-        guard let result else { return "" }
-        let title = SettingsConnectionPresentation.title(for: result)
-        let detail = saveError.map { "\(saveFailurePrefix)：\($0)" } ?? result.detail
-        return "\(title)。\(detail)"
     }
 }

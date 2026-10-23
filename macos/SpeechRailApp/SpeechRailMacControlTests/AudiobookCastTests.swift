@@ -3405,7 +3405,13 @@ final class AudiobookCastTests: XCTestCase {
         while workflow.isProducing {
             try await Task.sleep(for: .milliseconds(20))
         }
-        XCTAssertNil(workflow.errorMessage)
+        let savedCandidates = try await store.candidates(for: fixture.bookID)
+        XCTAssertEqual(savedCandidates.count, 1, "校验失败后停止制作，已保存候选保留")
+        let savedCandidate = try XCTUnwrap(savedCandidates.first)
+        XCTAssertFalse(savedCandidate.isReceiptVerified)
+        XCTAssertEqual(workflow.errorMessage, AudiobookProductionError.savedAudioNeedsVerification(fragmentID: savedCandidate.fragmentID).localizedDescription)
+        XCTAssertEqual(workflow.productionProgress?.state, .failed)
+        XCTAssertFalse(workflow.productionProgress?.isComplete ?? true)
         let updatedCh0 = try await store.chapters(for: fixture.bookID).first(where: { $0.id == chapters[0].id })
         XCTAssertNil(updatedCh0?.currentChapterRevisionID, "缺少实际声音身份的候选必须留待复核，不能自动采用")
     }

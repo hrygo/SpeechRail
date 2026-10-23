@@ -58,6 +58,9 @@ public struct MeetingView: View {
     @State var adoptConflictNotice: String?
     /// 纪要一键复制反馈。
     @State var copiedNotice: String?
+    @State var copiedNoticeID = UUID()
+    @State var operationError: String?
+    @State var recoveryFeedback: OperationFeedback?
     /// 文字记录搜索过滤关键字。
     @State var transcriptSearchText = ""
     /// 录制中打开「标注说话人」面板（稿 `screenMeetingRecording` 表头那一颗）。
@@ -81,6 +84,7 @@ public struct MeetingView: View {
     @State var transcriptUserScrollActive = false
     @State var transcriptVisibleLineIDs: [String] = []
     @State var transcriptCopyMessage: String?
+    @State var transcriptCopyNoticeID = UUID()
 
     enum PostTab: String, CaseIterable, Identifiable {
         case minutes
@@ -106,7 +110,8 @@ public struct MeetingView: View {
                         records: meeting.saveRecoveryRecords,
                         preview: { meeting.unsavedTranscriptText(recordID: $0) },
                         retry: { await meeting.retryPendingSaves(recordID: $0) },
-                        finishIncomplete: { await meeting.endIncompleteRecord($0) }
+                        finishIncomplete: { await meeting.endIncompleteRecord($0) },
+                        onFeedback: { recoveryFeedback = $0 }
                     )
                 }
                 if meeting.phase == .processing, !meeting.minutes.isBusy,
@@ -301,6 +306,19 @@ public struct MeetingView: View {
                 isLabelingSpeakers = false
             }
         }
+        .operationFeedback([
+            recoveryFeedback,
+            OperationFeedback(operationError, onDismiss: { operationError = nil }),
+            OperationFeedback(adoptConflictNotice, title: "纪要未采用", onDismiss: { adoptConflictNotice = nil }),
+            OperationFeedback(transcriptCopyMessage,
+                              tone: transcriptCopyMessage == "已复制全文" ? .healthy : .critical,
+                              title: transcriptCopyMessage == "已复制全文" ? "已复制" : "复制未完成",
+                              id: transcriptCopyNoticeID.uuidString,
+                              autoDismiss: transcriptCopyMessage == "已复制全文",
+                              onDismiss: { transcriptCopyMessage = nil }),
+            OperationFeedback(copiedNotice, tone: .healthy, title: "已复制", id: copiedNoticeID.uuidString, autoDismiss: true,
+                              onDismiss: { copiedNotice = nil })
+        ])
     }
 
     private var shouldShowInnerOSDrawer: Bool {

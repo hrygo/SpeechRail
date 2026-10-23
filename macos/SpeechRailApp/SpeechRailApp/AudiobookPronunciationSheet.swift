@@ -19,6 +19,7 @@ struct AudiobookPronunciationSheet: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .frame(minWidth: 720, idealWidth: 780, minHeight: 460, idealHeight: 560)
+        .operationFeedback([OperationFeedback(controller.errorMessage, onDismiss: controller.clearError)])
         .confirmationDialog(
             "清除本书的全部发音规则？",
             isPresented: $isConfirmingDeleteAll,
@@ -68,11 +69,6 @@ struct AudiobookPronunciationSheet: View {
                 actionTitle: "刷新"
             ) {
                 Task { await controller.refresh(bookID: bookID) }
-            }
-        }
-        if let error = controller.errorMessage {
-            NoticeBar(tone: .critical, message: error, actionTitle: "知道了") {
-                controller.clearError()
             }
         }
         if let lastSavedAt = controller.lastSavedAt {

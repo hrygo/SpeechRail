@@ -582,6 +582,39 @@ public enum VoiceDesignValidationMode: Sendable, Equatable {
     case manualReview(VoiceDesignHumanReview)
 }
 
+/// Local, bounded comparison returned only by reference confirmation failure.
+public struct VoiceDesignReferenceComparison: Codable, Equatable, Sendable {
+    public struct Difference: Codable, Equatable, Sendable {
+        public let expected: String
+        public let recognized: String
+    }
+    public let candidateRevision: String
+    public let matchScore: Double
+    public let requiredScore: Double
+    public let numbersMatch: Bool
+    public let differences: [Difference]
+    public let truncated: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case candidateRevision = "candidate_revision"
+        case matchScore = "match_score"
+        case requiredScore = "required_score"
+        case numbersMatch = "numbers_match"
+        case differences, truncated
+    }
+}
+
+public struct VoiceDesignReferenceMismatch: Error, LocalizedError, Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible {
+    public let comparison: VoiceDesignReferenceComparison
+    // Generic error logging must not print the locally displayed text fragments.
+    public var description: String { "VoiceDesignReferenceMismatch" }
+    public var debugDescription: String { description }
+    public var errorDescription: String? {
+        "音频与参考文案不一致。可先试听并查看差异，再重新校验或修改文案重新生成。"
+    }
+}
+
 public struct VoiceDesignReference: Codable, Equatable, Sendable {
     public let audioSHA256: String
     public let textSHA256: String
