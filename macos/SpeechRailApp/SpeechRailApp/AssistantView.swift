@@ -571,7 +571,7 @@ public struct AssistantView: View {
                     liveChatWorkbenchCard
                 }
             }
-            .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(minWidth: SpeechRailDesignTokens.Layout.assistantWorkbenchMinimumWidth, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             if !isInspectorCollapsed {
                 inspectorColumn
@@ -808,7 +808,7 @@ public struct AssistantView: View {
                                 Task { await model.previewVoice(voice) }
                             }
                         } label: {
-                            HStack(spacing: 3) {
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.compact) {
                                 if isLoading {
                                     ProgressView()
                                         .controlSize(.mini)
@@ -991,7 +991,7 @@ public struct AssistantView: View {
             ) { timeline in
                 let date = timeline.date.timeIntervalSinceReferenceDate
                 let heights = resolvedHeights
-                HStack(alignment: .center, spacing: 3) {
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.compact) {
                     ForEach(0..<Self.baseHeights.count, id: \.self) { index in
                         let base = heights[index]
                         let factor: CGFloat = {
@@ -1023,13 +1023,13 @@ public struct AssistantView: View {
                             guard isPlaying, progress > 0 else { return true }
                             return Double(index + 1) / Double(Self.baseHeights.count) <= progress + 0.08
                         }()
-                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Layout.captionBandLevelBarCornerRadius, style: .continuous)
                             .fill(
                                 isPlaying
                                     ? SpeechRailDesignTokens.Color.voice
                                     : (isLoading ? SpeechRailDesignTokens.Color.rail.opacity(0.8) : SpeechRailDesignTokens.Color.rail)
                             )
-                            .frame(width: 3, height: barHeight)
+                            .frame(width: SpeechRailDesignTokens.Layout.captionBandLevelBarWidth, height: barHeight)
                             .opacity(
                                 isPlaying
                                     ? (isPlayed ? 0.95 : 0.35)
@@ -1123,7 +1123,7 @@ public struct AssistantView: View {
                                     in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                                 )
 
-                            VStack(alignment: .leading, spacing: 3) {
+                            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.compact) {
                                 Text(item.title)
                                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
@@ -1424,7 +1424,7 @@ public struct AssistantView: View {
                 Button {
                     previewSelectedVoice()
                 } label: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.compact) {
                         Image(systemName: "speaker.wave.2")
                             .font(SpeechRailDesignTokens.Typography.captionRegular)
                         Text("无需大模型：先试听音色原声")
@@ -3152,7 +3152,7 @@ public struct AssistantView: View {
                         voicePageIndex -= 1
                     }
                 } label: {
-                    HStack(spacing: 2) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
                         Image(systemName: "chevron.left")
                             .font(SpeechRailDesignTokens.Typography.caption)
                         Text("上一页")
@@ -3179,7 +3179,7 @@ public struct AssistantView: View {
                         voicePageIndex += 1
                     }
                 } label: {
-                    HStack(spacing: 2) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
                         Text("下一页")
                         Image(systemName: "chevron.right")
                             .font(SpeechRailDesignTokens.Typography.caption)
@@ -3312,7 +3312,7 @@ public struct AssistantView: View {
                     }
                     Spacer()
                 }
-                .frame(maxWidth: .infinity, minHeight: 220)
+                .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.assistantHistoryEmptyMinimumHeight)
             } else if filteredVoiceRows.isEmpty {
                 VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                     Spacer()
@@ -3329,7 +3329,7 @@ public struct AssistantView: View {
                     .speechRailButton(.secondary)
                     Spacer()
                 }
-                .frame(maxWidth: .infinity, minHeight: 220)
+                .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.assistantHistoryEmptyMinimumHeight)
             } else {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(pagedVoiceRows.enumerated()), id: \.element.id) { index, voice in
@@ -3337,7 +3337,7 @@ public struct AssistantView: View {
                         voiceRow(voice)
                     }
                 }
-                .frame(minHeight: 220, alignment: .top)
+                .frame(minHeight: SpeechRailDesignTokens.Layout.assistantHistoryEmptyMinimumHeight, alignment: .top)
 
                 SessionHairline()
                 voicePaginationBar
@@ -3370,7 +3370,7 @@ public struct AssistantView: View {
 
     /// 紧凑角色说明区：告知用户角色在新轮次前已定，而音色随时可换且下一句生效。
     private var personaLockBlock: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Image(systemName: "lock.fill")
                     .font(SpeechRailDesignTokens.Typography.calloutRegular)
@@ -3408,7 +3408,7 @@ public struct AssistantView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.voice)
             }
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text(name)
                         .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -3435,7 +3435,7 @@ public struct AssistantView: View {
                             .controlSize(.mini)
                             .frame(width: SpeechRailDesignTokens.Layout.iconSlotSize, height: SpeechRailDesignTokens.Layout.iconSlotSize)
                     } else {
-                        HStack(spacing: 3) {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.compact) {
                             Image(systemName: isPlaying ? "stop.fill" : "play.fill")
                                 .font(SpeechRailDesignTokens.Typography.captionBold)
                             Text(isPlaying ? "停止" : "试听")
@@ -3481,13 +3481,13 @@ public struct AssistantView: View {
                 .frame(maxWidth: .infinity)
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         ForEach(recent.prefix(8)) { summary in
                             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                                 Button {
                                     Task { await openRecord(summary) }
                                 } label: {
-                                    VStack(alignment: .leading, spacing: 4) {
+                                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                                             Text(summary.record.title ?? "未命名对话")
                                                 .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -3856,7 +3856,7 @@ public struct AssistantView: View {
                         .disabled(review == nil)
                 }
             }
-            .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+            .frame(minWidth: SpeechRailDesignTokens.Layout.assistantInspectorDetailMinimumWidth, maxWidth: .infinity, maxHeight: .infinity)
             .disabled(reviewLoad.isLoading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -4432,7 +4432,7 @@ struct InputLevelSheet: View {
                                     ? SpeechRailDesignTokens.Color.voice
                                     : SpeechRailDesignTokens.Surface.border
                             )
-                            .frame(width: 3, height: max(3, 20 * shape))
+                            .frame(width: SpeechRailDesignTokens.Layout.captionBandLevelBarWidth, height: max(SpeechRailDesignTokens.Layout.captionBandLevelBarWidth, 20 * shape))
                     }
                 }
                 .frame(height: SpeechRailDesignTokens.Layout.inputLevelMeterHeight)

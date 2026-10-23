@@ -147,14 +147,17 @@ extension MeetingView {
                         .foregroundStyle(usesMicrophone ? SpeechRailDesignTokens.Color.ink : SpeechRailDesignTokens.Color.inkSecondary)
                     Circle()
                         .fill(usesMicrophone ? SpeechRailDesignTokens.Color.ready : SpeechRailDesignTokens.Color.inkTertiary)
-                        .frame(width: 6, height: 6)
+                        .frame(
+                            width: SpeechRailDesignTokens.Icon.liveIndicatorDotSize,
+                            height: SpeechRailDesignTokens.Icon.liveIndicatorDotSize
+                        )
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
                 .background(usesMicrophone ? SpeechRailDesignTokens.Color.rail.opacity(0.12) : SpeechRailDesignTokens.Color.recessedField)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .clipShape(SpeechRailDesignTokens.Corner.controlShape)
                 .overlay {
-                    RoundedRectangle(cornerRadius: 6)
+                    SpeechRailDesignTokens.Corner.controlShape
                         .stroke(usesMicrophone ? SpeechRailDesignTokens.Color.rail.opacity(0.3) : SpeechRailDesignTokens.Surface.border, lineWidth: 1)
                 }
             }
@@ -181,9 +184,9 @@ extension MeetingView {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
                 .background(!systemApps.isEmpty ? SpeechRailDesignTokens.Color.rail.opacity(0.12) : SpeechRailDesignTokens.Color.recessedField)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .clipShape(SpeechRailDesignTokens.Corner.controlShape)
                 .overlay {
-                    RoundedRectangle(cornerRadius: 6)
+                    SpeechRailDesignTokens.Corner.controlShape
                         .stroke(!systemApps.isEmpty ? SpeechRailDesignTokens.Color.rail.opacity(0.3) : SpeechRailDesignTokens.Surface.border, lineWidth: 1)
                 }
             }
@@ -219,9 +222,9 @@ extension MeetingView {
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
         .background(SpeechRailDesignTokens.Color.recessedField)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .clipShape(SpeechRailDesignTokens.Corner.controlShape)
         .overlay {
-            RoundedRectangle(cornerRadius: 6)
+            SpeechRailDesignTokens.Corner.controlShape
                 .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: 1)
         }
     }
@@ -240,7 +243,7 @@ extension MeetingView {
                 Button {
                     refreshSources()
                 } label: {
-                    HStack(spacing: 2) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
                         Image(systemName: "arrow.clockwise")
                             .font(SpeechRailDesignTokens.Typography.caption)
                         Text("重新扫描")
@@ -274,7 +277,7 @@ extension MeetingView {
                 }
                 .padding(SpeechRailDesignTokens.Spacing.md)
                 .background(SpeechRailDesignTokens.Color.recessedField)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipShape(SpeechRailDesignTokens.Corner.controlShape)
             } else {
                 ScrollView(.vertical) {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -286,9 +289,9 @@ extension MeetingView {
                 }
                 .frame(maxHeight: SpeechRailDesignTokens.Layout.meetingSourceOptionsMaxHeight)
                 .background(SpeechRailDesignTokens.Color.recessedField)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipShape(SpeechRailDesignTokens.Corner.controlShape)
                 .overlay {
-                    RoundedRectangle(cornerRadius: 8)
+                    SpeechRailDesignTokens.Corner.controlShape
                         .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: 1)
                 }
             }
@@ -303,7 +306,10 @@ extension MeetingView {
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 appIconView(for: app)
-                    .frame(width: 22, height: 22)
+                    .frame(
+                        width: SpeechRailDesignTokens.Layout.badgeCompactSize,
+                        height: SpeechRailDesignTokens.Layout.badgeCompactSize
+                    )
 
                 Text(app.name)
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -321,7 +327,7 @@ extension MeetingView {
                     }
                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                    .padding(.vertical, 3)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
                     .background(SpeechRailDesignTokens.Color.rail.opacity(0.12))
                     .clipShape(Capsule())
                 } else {
@@ -329,14 +335,14 @@ extension MeetingView {
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                        .padding(.vertical, 3)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
                 }
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
             .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
             .contentShape(Rectangle())
             .background(isSelected ? SpeechRailDesignTokens.Color.field.opacity(0.6) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(SpeechRailDesignTokens.Corner.controlShape)
         }
         .buttonStyle(.plain)
         .speechRailPointerCursor()
@@ -526,15 +532,15 @@ extension MeetingView {
                 .help("清空标题")
             }
 
-            HStack(spacing: 2) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
                 Text("↵ 开始")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
-            .padding(.vertical, 2)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
             .background(SpeechRailDesignTokens.Color.recessedField)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .clipShape(SpeechRailDesignTokens.Corner.compactShape)
         }
         .speechRailSingleLineInput(.regular)
     }

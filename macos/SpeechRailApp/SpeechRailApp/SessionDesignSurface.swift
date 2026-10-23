@@ -484,7 +484,7 @@ public struct SessionTurnRow: View {
             }
             .padding(.top, SpeechRailDesignTokens.Spacing.tight)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 // 助手头部标识行
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text(who)
@@ -507,7 +507,7 @@ public struct SessionTurnRow: View {
                 }
 
                 // 助手正文气泡容器
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                     Text(text)
                         .font(SpeechRailDesignTokens.Typography.body)
                         .foregroundStyle(isPartial ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.ink)
@@ -518,10 +518,10 @@ public struct SessionTurnRow: View {
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.cozy)
                 .background(
                     SpeechRailDesignTokens.Color.field,
-                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
+                    in: SpeechRailDesignTokens.Corner.containerShape
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
+                    SpeechRailDesignTokens.Corner.containerShape
                         .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
                 )
                 .contextMenu {
@@ -560,9 +560,9 @@ public struct SessionTurnRow: View {
     // MARK: - 用户消息气泡（靠右）
 
     private var userBubble: some View {
-        VStack(alignment: .trailing, spacing: 4) {
+        VStack(alignment: .trailing, spacing: SpeechRailDesignTokens.Spacing.micro) {
             // 用户发言气泡容器
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(text)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(isPartial ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.ink)
@@ -573,10 +573,10 @@ public struct SessionTurnRow: View {
             .padding(.vertical, SpeechRailDesignTokens.Spacing.cozy)
             .background(
                 SpeechRailDesignTokens.Color.rail.opacity(0.14),
-                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
+                in: SpeechRailDesignTokens.Corner.containerShape
             )
             .overlay(
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
+                SpeechRailDesignTokens.Corner.containerShape
                     .stroke(SpeechRailDesignTokens.Color.rail.opacity(0.24), lineWidth: SpeechRailDesignTokens.Stroke.hairline)
             )
             .contextMenu {
@@ -585,7 +585,7 @@ public struct SessionTurnRow: View {
 
             // 用户气泡底部标签与时间
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Spacer(minLength: 4)
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.micro)
 
                 if !actions.isEmpty {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {

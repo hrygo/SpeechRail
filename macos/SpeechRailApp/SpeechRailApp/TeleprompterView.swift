@@ -1583,7 +1583,7 @@ public struct TeleprompterView: View {
     private var workbenchPreparedContent: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
             HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Text("AI 朗读候选稿")
                             .font(SpeechRailDesignTokens.Typography.sectionTitle)

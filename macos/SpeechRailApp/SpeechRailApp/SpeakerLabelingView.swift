@@ -210,7 +210,7 @@ public struct SpeakerLabelingPanel: View {
                 TextField("这位是谁？", text: $draftName)
                     .textFieldStyle(.plain)
                     .speechRailSingleLineInput(.regular)
-                    .frame(minWidth: 120)
+                    .frame(minWidth: SpeechRailDesignTokens.Layout.speakerNameFieldMinimumWidth)
                     .onSubmit { Task { await save(speaker) } }
                 Button("保存") { Task { await save(speaker) } }
                     .buttonStyle(.borderedProminent)

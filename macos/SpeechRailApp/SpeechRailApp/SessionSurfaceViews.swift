@@ -191,7 +191,7 @@ struct LevelMeterBar: View {
     let level: Double
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
             ForEach(0..<12, id: \.self) { index in
                 let threshold = Double(index + 1) / 12
                 Capsule()
@@ -200,7 +200,7 @@ struct LevelMeterBar: View {
                             ? SpeechRailDesignTokens.Color.rail
                             : SpeechRailDesignTokens.Color.inkTertiary.opacity(0.25)
                     )
-                    .frame(width: 3, height: 4 + CGFloat(index) * 0.6)
+                    .frame(width: SpeechRailDesignTokens.Layout.captionBandLevelBarWidth, height: 4 + CGFloat(index) * 0.6)
             }
         }
         .accessibilityHidden(true)

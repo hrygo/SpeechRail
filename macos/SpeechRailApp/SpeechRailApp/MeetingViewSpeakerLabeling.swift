@@ -40,7 +40,11 @@ struct SpeakerLabelingSheet: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.gutter)
-        .frame(width: 460, height: 520, alignment: .topLeading)
+        .frame(
+            width: SpeechRailDesignTokens.Layout.Sheet.regularWidth,
+            height: SpeechRailDesignTokens.Layout.Sheet.regularHeight,
+            alignment: .topLeading
+        )
     }
 
     private func close() {

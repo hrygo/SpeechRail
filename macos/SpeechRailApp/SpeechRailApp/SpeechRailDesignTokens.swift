@@ -350,6 +350,16 @@ public enum SpeechRailDesignTokens {
         public static let labelledDecisionTagWidth: CGFloat = 48
         /// 转录行序号列宽度 (24pt)
         public static let transcriptLineNumberWidth: CGFloat = 24
+        /// 说话人名称输入框最小宽度 (120pt)
+        public static let speakerNameFieldMinimumWidth: CGFloat = 120
+        /// 会中私聊句子选择器最大高度 (260pt)
+        public static let innerOSSentencePickerMaxHeight: CGFloat = 260
+        /// 语音助手工作台主区最小宽度 (500pt)
+        public static let assistantWorkbenchMinimumWidth: CGFloat = 500
+        /// 语音助手历史记录空态最小高度 (220pt)
+        public static let assistantHistoryEmptyMinimumHeight: CGFloat = 220
+        /// 语音助手右栏详情最小宽度 (460pt)
+        public static let assistantInspectorDetailMinimumWidth: CGFloat = 460
 
         /// 模态弹窗与工作区 Sheet 的标准尺寸阶梯。
         public enum Sheet {
@@ -366,11 +376,12 @@ public enum SpeechRailDesignTokens {
             /// 重型返修工作台（配音返修）：720pt。
             public static let prominentWidth: CGFloat = 720
 
-            /// 弹层常用最小高度阶梯
+            /// 弹层常用高度与最小高度阶梯
             public static let compactMinimumHeight: CGFloat = 320
             public static let regularMinimumHeight: CGFloat = 360
             public static let mediumMinimumHeight: CGFloat = 380
             public static let formMinimumHeight: CGFloat = 420
+            public static let regularHeight: CGFloat = 520
         }
     }
 
@@ -1335,6 +1346,14 @@ public enum SpeechRailDesignTokens {
             darkHex: 0x3D2F16,
             hcLightHex: 0xFBEEDA,
             hcDarkHex: 0x3D2F16
+        )
+        /// Figma `surface/criticalTint`（脚本色板 `#FDE8E8` / `#3D1A1A`）：警示/分歧/错误标注胶囊底色。
+        public static let criticalTint = dynamicColor(
+            named: "CriticalTint",
+            lightHex: 0xFDE8E8,
+            darkHex: 0x3D1A1A,
+            hcLightHex: 0xFDE8E8,
+            hcDarkHex: 0x3D1A1A
         )
         /// Figma `Status Pill` 的语义色底色；状态色本身带图标与文字，颜色只是补充。
         public static let statusTintOpacity: Double = 0.14

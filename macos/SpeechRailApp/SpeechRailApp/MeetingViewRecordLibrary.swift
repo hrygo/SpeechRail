@@ -31,7 +31,7 @@ extension MeetingView {
                 if recent.isEmpty {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 26))
+                            .font(SpeechRailDesignTokens.Typography.sessionEmptyIcon)
                             .foregroundStyle(SpeechRailDesignTokens.Color.rail.opacity(0.6))
                         Text("暂无历史会议记录")
                             .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -94,9 +94,12 @@ extension MeetingView {
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 6)
+                    SpeechRailDesignTokens.Corner.controlShape
                         .fill(SpeechRailDesignTokens.Color.recessedField)
-                        .frame(width: 30, height: 30)
+                        .frame(
+                            width: SpeechRailDesignTokens.Layout.badgeMediumSize,
+                            height: SpeechRailDesignTokens.Layout.badgeMediumSize
+                        )
                     Image(systemName: summary.openInterruption != nil ? "exclamationmark.triangle.fill" : "doc.text.fill")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(summary.openInterruption != nil ? SpeechRailDesignTokens.Color.attention : SpeechRailDesignTokens.Color.rail)

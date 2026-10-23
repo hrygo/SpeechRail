@@ -2138,7 +2138,7 @@ private struct ArtifactChoiceRow: View {
 
                     // 第一列是「机器名 + 模型名」两行：key 留着（它是与诊断输出对照的
                     // 锚点），下面这行才是用户要认的模型本身，并按它所属的档位上色。
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.hairline) {
                         Text(artifact.key)
                             .font(SpeechRailDesignTokens.Typography.body)
                             .foregroundStyle(SpeechRailDesignTokens.Color.ink)

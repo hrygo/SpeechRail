@@ -379,21 +379,24 @@ extension MeetingView {
                     }
                 }
             } label: {
-                HStack(spacing: 2) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
                     Image(systemName: "person.badge.plus")
                         .font(SpeechRailDesignTokens.Typography.chipIcon)
                     Text("未确认说话人")
                         .font(SpeechRailDesignTokens.Typography.caption)
                 }
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary.opacity(0.8))
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                .padding(.vertical, 2)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                 .background(
                     SpeechRailDesignTokens.Color.field,
                     in: Capsule()
                 )
                 .overlay(
-                    Capsule().strokeBorder(SpeechRailDesignTokens.Color.separator.opacity(0.6), lineWidth: 0.5)
+                    Capsule().strokeBorder(
+                        SpeechRailDesignTokens.Color.separator,
+                        lineWidth: SpeechRailDesignTokens.Stroke.hairline
+                    )
                 )
             }
             .menuStyle(.borderlessButton)

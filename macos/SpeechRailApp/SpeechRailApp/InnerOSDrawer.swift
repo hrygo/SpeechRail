@@ -485,7 +485,7 @@ public struct InnerOSDrawer: View {
 
     private func draftCalloutCard(exchange: InnerOSExchange, draft: String) -> some View {
         return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.compact, style: .continuous)
+            SpeechRailDesignTokens.Corner.compactShape
                 .fill(SpeechRailDesignTokens.Color.rail)
                 .frame(width: SpeechRailDesignTokens.Layout.innerOSDraftAccentBarWidth)
 
@@ -583,7 +583,7 @@ public struct InnerOSDrawer: View {
                                 .font(SpeechRailDesignTokens.Typography.technicalValue)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
-                                .padding(.vertical, 1)
+                                .padding(.vertical, SpeechRailDesignTokens.Spacing.hairline)
                                 .background(
                                     SpeechRailDesignTokens.Color.recessedField,
                                     in: SpeechRailDesignTokens.Corner.compactShape
@@ -659,7 +659,7 @@ public struct InnerOSDrawer: View {
                 .font(.headline)
             Text("只勾你想要的句子。没勾的不会进纪要，也不会写进这次会议的存档。")
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             ScrollView {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -679,7 +679,7 @@ public struct InnerOSDrawer: View {
                     }
                 }
             }
-            .frame(maxHeight: 260)
+            .frame(maxHeight: SpeechRailDesignTokens.Layout.innerOSSentencePickerMaxHeight)
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Button(pickedSentences.count == sentences.count ? "取消全选" : "全选") {
                     pickedSentences = pickedSentences.count == sentences.count
