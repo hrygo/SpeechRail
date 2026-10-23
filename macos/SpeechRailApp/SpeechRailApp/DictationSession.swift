@@ -47,6 +47,7 @@ public final class DictationSession {
     private let targets: any DictationTargetResolving
     private let deliverer: any DictationTextDelivering
     private let clipboard: any DictationClipboardStaging
+    private let admission: any DictationAdmitting
     private var sessionID = UUID()
 
     public init(
@@ -54,13 +55,15 @@ public final class DictationSession {
         transcriber: any DictationTranscribing,
         targets: any DictationTargetResolving,
         deliverer: any DictationTextDelivering,
-        clipboard: any DictationClipboardStaging
+        clipboard: any DictationClipboardStaging,
+        admission: any DictationAdmitting = AllowAllDictationAdmission()
     ) {
         self.audio = audio
         self.transcriber = transcriber
         self.targets = targets
         self.deliverer = deliverer
         self.clipboard = clipboard
+        self.admission = admission
     }
 
     /// 热键与菜单的唯一入口：空闲时开始，录制中结束，识别中只提示。
@@ -80,6 +83,11 @@ public final class DictationSession {
         notice = nil
         lastOutcome = nil
         lastFailure = nil
+        // 先看准入：会议/字幕正在用麦克风时，连目标都不必解析，也不碰设备。
+        if let refusal = admission.refusal() {
+            fail(refusal)
+            return
+        }
         guard let target = await targets.currentTarget() else {
             fail(.noTarget)
             return

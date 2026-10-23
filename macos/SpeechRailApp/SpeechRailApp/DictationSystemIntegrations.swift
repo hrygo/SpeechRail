@@ -221,6 +221,26 @@ public struct PasteboardDictationClipboard: DictationClipboardStaging {
     }
 }
 
+// MARK: - 准入
+
+/// 复用会话层的占用结论：麦克风被会议 / 字幕 / 助手 / 提词器拿着时，听写不另开一条。
+///
+/// 这里**只读** `occupancy`，不抢、不排队、不中断别的会话——要不要抢占是
+/// `SessionCoordinator` 的事，听写只服从它的结论。
+@MainActor
+public struct SessionCoordinatorDictationAdmission: DictationAdmitting {
+    private let coordinator: SessionCoordinator
+
+    public init(coordinator: SessionCoordinator) {
+        self.coordinator = coordinator
+    }
+
+    public func refusal() -> DictationFailure? {
+        guard let occupancy = coordinator.occupancy else { return nil }
+        return .sessionBusy("「\(occupancy.kind.shortTitle)」")
+    }
+}
+
 // MARK: - 识别
 
 /// 批量识别：停止后整段上传，只取正式文字。

@@ -232,7 +232,9 @@ hypothesis 时清空本地播放队列并显式发送 `speechrail.tts.cancel`；
   恢复会冲掉用户后来复制的东西。
 
 **上限与拒绝。** 单段 5 分钟（`DictationLimits.maximumDuration`）；采集侧攒到 `maximumByteCount` 就停采并
-报 `tooLong`，不截断成一段「看起来完整」的录音。没有前台目标时不占用麦克风。识别走
+报 `tooLong`，不截断成一段「看起来完整」的录音。没有前台目标时不占用麦克风。会议 / 字幕 / 助手 / 提词器
+拿着麦克风时，`SessionCoordinatorDictationAdmission` 只读 `SessionCoordinator.occupancy` 就拒绝，
+并说明是谁在占用——不抢、不排队、不中断别的会话。识别走
 `ServiceAPIClient.transcribe`，与字幕/会议同一条服务准入：409 / 503 / `backend_busy` 翻译成
 `serviceBusy`，提示等当前会话结束，不重试、不降级到别的模型。
 

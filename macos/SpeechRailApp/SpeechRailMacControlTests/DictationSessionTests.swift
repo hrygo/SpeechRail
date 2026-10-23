@@ -99,6 +99,12 @@ final class DictationSessionTests: XCTestCase {
         func stage(_ text: String) async { staged.append(text) }
     }
 
+    private final class FakeAdmission: DictationAdmitting {
+        var refusalValue: DictationFailure?
+        init(refusal: DictationFailure? = nil) { refusalValue = refusal }
+        func refusal() -> DictationFailure? { refusalValue }
+    }
+
     private struct TestError: LocalizedError {
         var errorDescription: String? { "识别服务不可用" }
     }
@@ -108,14 +114,16 @@ final class DictationSessionTests: XCTestCase {
         transcriber: FakeTranscriber = FakeTranscriber(),
         targets: FakeTargets? = nil,
         deliverer: FakeDeliverer = FakeDeliverer(),
-        clipboard: FakeClipboard = FakeClipboard()
+        clipboard: FakeClipboard = FakeClipboard(),
+        admission: any DictationAdmitting = AllowAllDictationAdmission()
     ) -> (DictationSession, FakeCapture, FakeTranscriber, FakeDeliverer, FakeClipboard) {
         let session = DictationSession(
             audio: capture,
             transcriber: transcriber,
             targets: targets ?? FakeTargets(target: target),
             deliverer: deliverer,
-            clipboard: clipboard
+            clipboard: clipboard,
+            admission: admission
         )
         return (session, capture, transcriber, deliverer, clipboard)
     }
@@ -319,6 +327,43 @@ final class DictationSessionTests: XCTestCase {
             return XCTFail("采集失败必须说明原因，实际为：\(session.phase)")
         }
         XCTAssertTrue(detail.contains("设备被占用"))
+    }
+
+    func testOccupiedMicrophoneIsRefusedBeforeTouchingTheDevice() async {
+        let capture = FakeCapture()
+        let (session, _, transcriber, deliverer, _) = makeSession(
+            capture: capture,
+            admission: FakeAdmission(refusal: .sessionBusy("「会议助手」"))
+        )
+
+        await session.toggle()
+
+        guard case let .failed(.sessionBusy(detail)) = session.phase else {
+            return XCTFail("占用时必须说明是谁在占用，实际为：\(session.phase)")
+        }
+        XCTAssertTrue(detail.contains("会议助手"))
+        XCTAssertEqual(capture.startCount, 0, "占用时不占用第二份麦克风")
+        let calls = await transcriber.callCount
+        XCTAssertEqual(calls, 0)
+        XCTAssertTrue(deliverer.delivered.isEmpty)
+    }
+
+    func testOccupancyClearingAllowsTheNextDictation() async {
+        let admission = FakeAdmission(refusal: .sessionBusy("「实时字幕」"))
+        let capture = FakeCapture()
+        let (session, _, _, deliverer, _) = makeSession(capture: capture, admission: admission)
+
+        await session.toggle()
+        XCTAssertEqual(capture.startCount, 0)
+
+        // 会话结束、占用清空：同一个听写会话能重新开始，不需要重建。
+        admission.refusalValue = nil
+        await session.toggle()
+        XCTAssertEqual(session.phase, .recording(target))
+        XCTAssertEqual(capture.startCount, 1)
+
+        await session.toggle()
+        XCTAssertEqual(deliverer.delivered.count, 1)
     }
 
     func testOverlongRecordingIsRejectedWithoutUpload() async {

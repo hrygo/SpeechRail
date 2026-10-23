@@ -117,6 +117,8 @@ public enum DictationFailure: Equatable, Sendable {
     case captureFailed(String)
     case tooLong
     case emptyTranscript
+    /// 本机会话（会议/字幕/助手/提词器）正拿着麦克风：不另开一条采集与识别。
+    case sessionBusy(String)
     case serviceBusy(String)
     case transcriptionFailed(String)
     case cancelled
@@ -133,6 +135,8 @@ public enum DictationFailure: Equatable, Sendable {
             "这段听写超过 \(Int(DictationLimits.maximumDuration / 60)) 分钟，没有上传识别。"
         case .emptyTranscript:
             "这次没有识别到文字。"
+        case let .sessionBusy(detail):
+            "\(detail)正在使用麦克风；等它结束后再听写。"
         case let .serviceBusy(detail):
             "语音服务正忙：\(detail)。等当前会话结束后再试。"
         case let .transcriptionFailed(detail):
@@ -186,4 +190,21 @@ public protocol DictationTextDelivering: Sendable {
 /// 剪贴板兜底：只在插入失败时写入，不自动恢复旧内容（那会覆盖用户后来复制的东西）。
 public protocol DictationClipboardStaging: Sendable {
     func stage(_ text: String) async
+}
+
+/// 准入边界：会议 / 字幕 / 助手 / 提词器拿着麦克风时，听写不另开一条采集与识别。
+///
+/// 放在 `@MainActor` 上是因为占用状态本身就是主线程的 UI 状态；这里只读一次，
+/// 不做任何"要不要抢占"的判断——抢占属于 `SessionCoordinator`，听写只服从它的结论。
+@MainActor
+public protocol DictationAdmitting {
+    /// 返回拒绝原因（写进状态给用户看）；`nil` 表示可以开始。
+    func refusal() -> DictationFailure?
+}
+
+/// 不设准入时的默认实现：单测与 UI 测试用。
+@MainActor
+public struct AllowAllDictationAdmission: DictationAdmitting {
+    public init() {}
+    public func refusal() -> DictationFailure? { nil }
 }

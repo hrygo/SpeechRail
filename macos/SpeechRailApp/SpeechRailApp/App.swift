@@ -481,7 +481,9 @@ struct SpeechRailApp: App {
             transcriber: dictationTranscriber,
             targets: FrontmostApplicationTargetResolver(),
             deliverer: AccessibilityDictationDeliverer(),
-            clipboard: PasteboardDictationClipboard()
+            clipboard: PasteboardDictationClipboard(),
+            // 会议 / 字幕 / 助手拿着麦克风时不另开一条，直接说明谁在占用。
+            admission: SessionCoordinatorDictationAdmission(coordinator: coordinator)
         )
         let dictationHUDController = DictationHUDWindowController(session: dictationSession)
 
