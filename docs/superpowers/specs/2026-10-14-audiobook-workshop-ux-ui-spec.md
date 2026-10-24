@@ -10,7 +10,7 @@ related_spec: "./2026-10-14-audiobook-workshop-design.md"
 
 # 有声书工坊（Audiobook Workshop）用户旅程与 UX/UI 设计规格
 
-本规格依据 [有声书工坊实施计划](../plans/2026-10-14-audiobook-workshop.md) 与 [有声书工坊产品与交互设计](./2026-10-14-audiobook-workshop-design.md) 制定，并与 [macOS App 设计系统与 Token](../../developers/macos-app-design-system.md)、[全 App UX/UI 统一规范](../../design/UX-UI-SPEC.md) 及 [会话能力端到端用户旅程](../../design/2026-09-17-session-closures/USER-JOURNEYS.md) 保持单一骨架、统一 Token 与一致交互语义。
+本规格依据 [有声书工坊实施计划](../plans/2026-10-14-audiobook-workshop.md) 与 [有声书工坊产品与交互设计](./2026-10-14-audiobook-workshop-design.md) 制定，并与 [macOS App 设计系统与 Token](../../developers/macos-app-design-system.md)、[全 App UX/UI 统一规范](../../design/UX-UI-SPEC.md) 及 [会话能力端到端用户旅程](../../design/archive/2026-09-17-session-closures/USER-JOURNEYS.md) 保持单一骨架、统一 Token 与一致交互语义。
 
 本文件直接指导实施计划 **T06、T08、T09、T10、T12、T13、T14** 的界面状态投影、视图拆分、窗口布局响应、键盘与无障碍契约。
 

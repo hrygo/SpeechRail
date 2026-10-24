@@ -40,7 +40,7 @@
 语音助手、会议助手、实时字幕三条能力的设计资料：
 
 - [`2026-09-17-live-sessions/SESSIONS-SPEC.md`](./2026-09-17-live-sessions/SESSIONS-SPEC.md)：模块规格（边界、逐面规格、状态矩阵、SQLite 数据模型、用户旅程）。
-- [`2026-09-17-session-closures/`](./2026-09-17-session-closures/)：会话闭环设计包与实现就绪度核查。
+- [`2026-09-17-session-closures/`](./archive/2026-09-17-session-closures/)：会话闭环设计包与实现就绪度核查（已归档，留作过程证据）。
 - [`2026-09-18-session-layer/TECHNICAL-DESIGN.md`](./2026-09-18-session-layer/TECHNICAL-DESIGN.md)：**会话层技术方案**——哪些能力归 macOS 原生、哪些归 Python 服务、边界规矩、数据口径、验收判据与外部最佳实践依据。
 
 macOS 26-only 的 App 设计研究、Liquid Glass 分层、统一颜色/间距/字体/可访问性 token 见：

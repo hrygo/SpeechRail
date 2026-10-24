@@ -22,7 +22,7 @@
 ## 配套稿：会话闭环（2026-09-17）
 
 本包描述这三个能力**按页面**的完整形态（48 板全量稿里的一篇）。同一批能力另有一份按**路径**组织的稿：
-[`../2026-09-17-session-closures/`](../2026-09-17-session-closures/README.md)——只画三条闭环
+[`../2026-09-17-session-closures/`](../archive/2026-09-17-session-closures/README.md)——只画三条闭环
 （入口 → 前置与受阻 → 主交互 → 交还与守卫 → 产物与回看），并补两条判据：
 
 1. **记录是资产**：会议记录与纪要、字幕会话、助手对话都落在本机 **SQLite** 库、长期保留，
@@ -38,7 +38,7 @@
 4. **统一设计 token**：会话模块不新开视觉语言。稿侧核查数字与实现规则见本包 **§11.1**。
 
 编码前的对账（屏 → 组件、状态 → 契约、数据模型、快捷键、两侧缺口、以及必须先定的 D7/D8/D9）
-在闭环包的 [`IMPLEMENTATION-READINESS.md`](../2026-09-17-session-closures/IMPLEMENTATION-READINESS.md)；
+在闭环包的 [`IMPLEMENTATION-READINESS.md`](../archive/2026-09-17-session-closures/IMPLEMENTATION-READINESS.md)；
 本包新增 **§15 数据模型（本机 SQLite，草案）**，供该处引用。
 
 本包与闭环稿的页面文案、状态集合以各自规格文件为准；D1 裁决后「记录是资产」的口径已经写进

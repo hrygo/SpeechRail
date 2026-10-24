@@ -1310,7 +1310,7 @@ data → computer-use **只按 AX 元素**（不用坐标点击、不激活窗�
 
 这一批改的是**主交互**，不是加按钮：会议不再只吃麦克风、会议多了会中私密问答、分人要在会议与字幕之间
 共用、助手要能随时换音色与人设、助手要分「一问一答 / 实时对讲」两种模式。稿上的落点见
-[`../2026-09-17-session-closures/README.md`](../2026-09-17-session-closures/README.md) 的「第三批需求」表。
+[`../2026-09-17-session-closures/README.md`](../archive/2026-09-17-session-closures/README.md) 的「第三批需求」表。
 
 ### 14.1 会议音频来源：麦克风 / 本机音频（按 App 多选）
 
@@ -1642,7 +1642,7 @@ ALTER TABLE minutes ADD COLUMN failure_reason TEXT;   -- 直接拿来写界面�
 **新定下来的产品口径**。
 
 > 用户 2026-09-18：「用户旅程也需要落到方案里。」——所以步骤表在**本节正文**里，不再只放在
-> 旁边的 [`USER-JOURNEYS.md`](../2026-09-17-session-closures/USER-JOURNEYS.md)。那个文件保留
+> 旁边的 [`USER-JOURNEYS.md`](../archive/2026-09-17-session-closures/USER-JOURNEYS.md)。那个文件保留
 > 四样此处不重复的东西：角色与情境定义（§1）、缺口表（§9）、可测验收判据（§10）、逐轮复核记录（§12）。
 > **改步骤表改本节**；改判据或缺口改那一份。
 
@@ -1914,7 +1914,7 @@ JSON 是完整记录，但里面**没有**密钥、音频与完整 prompt——�
   但折行后的观感仍未逐格目视核对。
 - 步骤表是**设计意图**，不是实测行为：其中「本机音频 tap 的授权与自动接回」（§14.1）与
   「FTS5 是否可用」（§15.5）两处要上机验证。文字级判据见
-  [`USER-JOURNEYS.md`](../2026-09-17-session-closures/USER-JOURNEYS.md) §10。
+  [`USER-JOURNEYS.md`](../archive/2026-09-17-session-closures/USER-JOURNEYS.md) §10。
 - 本机音频 tap 未真机验证：`source_lost` 的自动接回是 SDK 语义（`processRestoreEnabled`）写出来的
   设计意图，不是实测行为。
 - 2026-09-18 第五轮新增/重画的 5 处（打字输入、换音色 vs 换人设对比板、会议新骨架与 OS 抽屉、

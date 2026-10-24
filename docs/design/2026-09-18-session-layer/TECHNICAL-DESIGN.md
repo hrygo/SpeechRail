@@ -24,7 +24,7 @@ date: 2026-10-20
 
 **它不是什么。** 它不是产品口径与界面规格（在
 [`../2026-09-17-live-sessions/SESSIONS-SPEC.md`](../2026-09-17-live-sessions/SESSIONS-SPEC.md)），
-不是画板清单（[`../2026-09-17-session-closures/`](../2026-09-17-session-closures/)），
+不是画板清单（[`../2026-09-17-session-closures/`](../archive/2026-09-17-session-closures/)），
 也不重复服务既有契约（`contracts/`）。它只回答一个此前没有文档回答的问题：**哪些归 macOS 原生、
 哪些归 Python、边界处的规矩是什么**。
 
@@ -768,7 +768,7 @@ Sona 是这套能力的**经验来源**，不是代码来源：借它的判断�
 ## 11. 验收判据（可执行清单）
 
 产品口径的判据在
-[`../2026-09-17-session-closures/USER-JOURNEYS.md`](../2026-09-17-session-closures/USER-JOURNEYS.md) §10
+[`../2026-09-17-session-closures/USER-JOURNEYS.md`](../archive/2026-09-17-session-closures/USER-JOURNEYS.md) §10
 与规格 §16.9；本节只补**技术侧必须自己判的那几组**，并说明每条怎么观测。每组都能独立执行，
 不需要读别的文档。
 

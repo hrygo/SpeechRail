@@ -21,7 +21,7 @@ UX/UI 优化——一个整体，一个规范。」这份文件就是那个「�
 | [`2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md`](./2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md) | 逐页细节与 35+ 轮标定记录（含大量帧实测证据） | 详图与证据；**规则**已上收到本文 |
 | [`2026-09-17-live-sessions/SESSIONS-SPEC.md`](./2026-09-17-live-sessions/SESSIONS-SPEC.md) | 会话三能力的模块细节：边界、逐面规格、状态矩阵、SQLite 数据模型、用户旅程 | 会话模块详图 |
 | [`2026-09-18-session-layer/TECHNICAL-DESIGN.md`](./2026-09-18-session-layer/TECHNICAL-DESIGN.md) | 会话层技术终态：原生 / Python 分工、边界规矩、验收判据 | 实现映射 |
-| [`2026-09-17-session-closures/`](./2026-09-17-session-closures/) | 闭环设计包与实现就绪度核查 | 过程与证据 |
+| [`2026-09-17-session-closures/`](./archive/2026-09-17-session-closures/) | 闭环设计包与实现就绪度核查 | 过程与证据 |
 | [`archive/`](./archive/) | 上一代设计包 | **历史**，不是当前承诺 |
 
 事实来源顺序：当前代码与实测 → 公共契约 → 标记 `active` 的文档 → 归档。**本文里的数字都出自

@@ -1303,7 +1303,7 @@
 
 ### Migration
 
-- 升级前按 [迁移手册](docs/operations/migration-runbook.md) 移除旧 diarization 配置和事件处理；需要实时归属时改在首个 PCM 前发送新的 session opt-in。
+- 升级前按 [迁移手册](docs/archive/operations/migration-runbook.md) 移除旧 diarization 配置和事件处理；需要实时归属时改在首个 PCM 前发送新的 session opt-in。
 
 ## [1.13.1] - 2026-09-08
 
@@ -1482,7 +1482,7 @@
 ### Performance
 
 - worker 同步帧读取在完整首读时直接复用结果，减少中间复制；支持分片 header，保持截断检查与协议格式。
-  局部对照数据和验证边界见[优化记录](docs/archive/process/2026-09-05-bounded-runtime-optimization.md)。
+  局部对照数据和验证边界见[优化记录](docs/archive/process/archive/2026-09-05-bounded-runtime-optimization.md)。
 
 ## [1.6.7] - 2026-09-05
 
