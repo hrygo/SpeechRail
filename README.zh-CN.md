@@ -71,6 +71,7 @@ OpenAI 兼容接口。
 | `GET /v1/speechrail/capabilities` | 有效能力 | `effective_capabilities_v1`：模型、音色和参数域的一次内部一致快照。读取它不启动 worker，也不做推理。 |
 | `/v1/voice-designs*`、`/v1/voices/clone*` | 音色创建与克隆 | 用一句话设计音色、试听、用参考录音克隆、验证，再发布进音色库。 |
 | `/v1/speechrail/voices*`、`/v1/speechrail/pronunciation-sets*` | 音色库与发音映射 | 不可变音色 revision，支持回滚与撤销；面向合成的版本化发音映射集。 |
+| `/v1/voices/{voice_id}/bundle`、`/v1/voices/bundles*` | 音色包 | 把自定义音色导出为版本化 `.srvoice` 归档，可只读预检、预览导出内容，再导入为新音色；导入后仍需按当前引擎重新验证。 |
 | `/v1/jobs*` | 持久异步任务 | owner-scoped 任务记录，用于长转写。你传不透明引用；服务不落盘原始音频或转写文本。 |
 | `WS /v1/realtime` | Realtime ASR/TTS | 无状态 Speech Plane：转写 session、服务端 VAD 事实、彼此独立的词级对齐与分人 opt-in，以及显式的 `speechrail.tts.*` 渲染控制。协议规则与版本以 [Realtime 契约](contracts/realtime-openai.md)为准。 |
 
@@ -90,8 +91,8 @@ profile，也不代理 Realtime——Agent 客户端直接连接 `/v1/realtime`�
 `macos/SpeechRailApp` 是面向已安装服务的 SwiftUI 控制面。它不加载模型，也不替代用户级
 `com.speechrail` LaunchAgent；它通过受约束的 XPC 委托驱动现有 Python CLI。功能分三组：
 
-- **创作**：配音台（含文稿配音与作品管理）、音色创作、音色克隆、音色库、有声书工坊。
-- **会话**：语音助手、会议助手、实时字幕、AI 提词器。
+- **创作**：配音台（含文稿配音、多角色剧本与作品管理）、音色创作、音色克隆、音色库、有声书工坊。
+- **会话**：语音助手、会议助手、实时字幕、AI 提词器，以及跨应用的全局听写（`⌘⇧D`）。
 - **引擎**：服务状态、运行监控、模型组合、预检与诊断、App 内开发者文档。
 
 [有声书工坊](docs/users/audiobook-workshop.md)支持将 TXT 或无 DRM 的 EPUB 制作成
@@ -102,6 +103,11 @@ profile，也不代理 Realtime——Agent 客户端直接连接 `/v1/realtime`�
 麦克风采集与播放只在会话功能启用期间存在，离开功能即释放。会话 PCM 从不落盘；
 只有文字与记录保存在本机。提词器的摄像头与窗口采集留在你的直播软件里——
 SpeechRail 提供的是稿件跟读，不是视频。
+
+[全局听写](docs/users/global-dictation.md)把同一套识别能力变成系统级输入法：按一次
+`⌘⇧D` 开始录音，再按一次结束，整段识别后写回开始录音时那个应用的焦点控件。
+它不打开主窗口、不抢焦点；识别成功不等于写入成功，无法写入时会明确说明原因并把文字
+放到剪贴板。
 
 ## 边界
 
@@ -117,8 +123,10 @@ SpeechRail 提供的是稿件跟读，不是视频。
   `backend_busy`。
 - **不做云端推理、多租户和高可用。** 这是单用户本地运行时。
 
-分人还额外要求本地 CoreML Sortformer bundle 与点名 aligner 已供给，且任务显式
-opt-in。VoiceDesign 是不绑定任何档位的按需制品。
+分人还额外要求本地 CoreML 分人制品与点名 aligner 已供给，且任务显式 opt-in。
+Realtime 可选 `sortformer` 或 `meeting_dynamic` 后端，后者每场最多确认四位稳定匿名
+身份（`system_cap` 固定为 4）；超出的声音保留为未识别，不轮换已有身份。VoiceDesign
+是不绑定任何档位的按需制品。
 
 ## 环境要求
 
@@ -262,7 +270,7 @@ BF16 权重类型本身不代表质量更高。
 
 | 规格 | ASR | TTS lane | 分人与音色行为 |
 |---|---|---|---|
-| `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` + `tts-0.6b-base-q8` | CustomVoice 系统声音与 Base reference clone；分人需显式供给 Sortformer + aligner。 |
+| `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` + `tts-0.6b-base-q8` | CustomVoice 系统声音与 Base reference clone；分人需显式供给分人制品 + aligner。 |
 | `quality` | `asr-1.7b-q8` | `tts-1.7b-custom-q8` + `tts-1.7b-base-q8` | 1.7B CustomVoice 与 Base 角色；分人需显式供给。 |
 | `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` | bf16 制品继承同族 8-bit 门禁证据，未在本机单独复测；分人仍需显式供给。 |
 
@@ -311,6 +319,7 @@ VoiceDesign 与 Base 克隆的可用性由当前有效能力决定。详见
 | 文档总览 | [`docs/README.md`](docs/README.md) |
 | 安装与首次运行 | [`docs/users/installing-speechrail.md`](docs/users/installing-speechrail.md) |
 | API 与客户端接入 | [`docs/users/README.md`](docs/users/README.md)、[`docs/users/integrations.md`](docs/users/integrations.md) |
+| App 使用与工作流 | [`docs/users/audiobook-workshop.md`](docs/users/audiobook-workshop.md)、[`docs/users/global-dictation.md`](docs/users/global-dictation.md)、[`docs/users/meeting-minutes.md`](docs/users/meeting-minutes.md) |
 | 公共 API 契约 | [`docs/users/api-contract.md`](docs/users/api-contract.md)、[`contracts/openapi.yaml`](contracts/openapi.yaml) |
 | Realtime 协议 | [`contracts/realtime-openai.md`](contracts/realtime-openai.md) |
 | 有效能力快照 | [`docs/users/effective-capabilities.md`](docs/users/effective-capabilities.md) |

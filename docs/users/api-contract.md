@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.19.1"
-date: 2026-10-22
+version: "3.20.0"
+date: 2026-10-24
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -67,6 +67,7 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 
 > - **能力由有效快照决定**：客户端不能仅凭 spec 名称推断 Alignment、Diarization、VoiceDesign、语言或实时并发已经可用。
 > - **辅助能力按任务 opt-in**：VAD、Alignment、Diarization 与 VoiceDesign 不随规格自动开启；VoiceDesign 只在设计作业中运行。
+> - **Realtime 分人后端**：`session.speechrail.diarization` 可选 `sortformer`（默认）或 `meeting_dynamic`；后者每场最多确认四位稳定匿名身份（`system_cap` 固定为 4），要求独立质量认证，请求预算不得超过认证容量，超额声音保留未识别。
 > - **首批组合认证**为三个同档组合和 `ASR quality + TTS fast`；每个组合按实际 TTS 角色分别记录证据。
 > - **无历史 alias**：旧 `light`/`balanced`/`extreme`、Q4/Q6、Design runtime voice 与旧 Realtime wire 都明确拒绝。
 
@@ -85,7 +86,7 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 | `POST` | `/v1/voices` | 自然语言创建自定义音色 (Voice Design) | 接收名称与人设描述，固化专属 Seed 并持久化 |
 | `PATCH` | `/v1/voices/{voice_id}` | 更新自定义音色 metadata | instruction 音色可改名称、描述、Seed；clone 音色只可改名 |
 | `DELETE` | `/v1/voices/{voice_id}` | 删除自定义音色 | 删除指定自建音色（系统预置音色只读保护） |
-| `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写（匿名讲话人分离仅在支持分人的档位可用，见 §1.1） | `json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json` |
+| `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写（匿名讲话人分离需任务级 opt-in 并具备分人制品，见 §1.1 与 §3.1） | `json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
 | `GET` | `/v1/speechrail/audio/receipts/{receipt_id}` | SpeechRail 完整性回执 | PCM sample count/hash 与终态元数据，不含音频正文 |
 | `GET` | `/v1/speechrail/audio/receipts/by-request/{source_request_id}` | 按来源请求 ID 读取最新回执 | 客户端自持 `X-Request-ID` 时用于找回回执；回执仍只含样本数与哈希，不含音频 |
@@ -113,7 +114,7 @@ SpeechRail 保存独立的 ASR 与 TTS 规格，默认 `quality/quality`。三�
 | `POST` | `/v1/voices/bundles` | 导入音色包 | 新建本地身份，绝不覆盖已有音色；导入后仍为未验证 |
 | `GET/PUT/DELETE` | `/v1/speechrail/pronunciation-sets` | 发音映射集管理（见 §5.8） | 列身份、读 revision、CAS 追加 revision、撤销与删除 |
 | `POST` | `/v1/speechrail/voices/{voice_id}/quality-runs` | 音色质量探针（带 evidence） | 同 `/v1/voices/{voice_id}/quality-runs`，另返回 `evidence` 命名空间 |
-| `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启（仅在支持分人的档位可用，见 §1.1） |
+| `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启，可选 `sortformer` 或 `meeting_dynamic` 后端（见 §1.1） |
 
 `GET /health` 的 `asr_runtime_revision` 只在 ASR worker 已完成 ready handshake 且身份字段完整时
 填充 `rt_...`；未驻留、组件未提供 optional resolver 或身份不完整时为 `null`。它是低披露的当前 worker

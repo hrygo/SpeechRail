@@ -77,6 +77,7 @@ caller owns all of that; SpeechRail delivers speech facts and renders audio.
 | `GET /v1/speechrail/capabilities` | Effective capabilities | `effective_capabilities_v1`: one internally consistent snapshot of models, voices, and parameter domains. Reading it starts no worker and runs no inference. |
 | `/v1/voice-designs*`, `/v1/voices/clone*` | Voice creation and cloning | Design a voice from a description, preview it, clone from a reference recording, validate, and publish to the voice library. |
 | `/v1/speechrail/voices*`, `/v1/speechrail/pronunciation-sets*` | Voice library and pronunciation | Immutable voice revisions with rollback and revocation; versioned pronunciation sets for synthesis. |
+| `/v1/voices/{voice_id}/bundle`, `/v1/voices/bundles*` | Voice bundles | Export a custom voice as a versioned `.srvoice` archive, inspect it read-only, preview its contents, and import it as a new voice. Imported voices still need re-validation on the current engine. |
 | `/v1/jobs*` | Durable async jobs | Owner-scoped job records for long transcriptions. You pass opaque references; the service never stores raw audio or transcripts. |
 | `WS /v1/realtime` | Realtime ASR/TTS | Stateless Speech Plane: transcription sessions, server VAD facts, word-level alignment and diarization as independent opt-ins, and explicit `speechrail.tts.*` render control. Protocol rules and version are defined in the [Realtime contract](contracts/realtime-openai.md). |
 
@@ -100,10 +101,11 @@ does not load models and does not replace the user-level `com.speechrail`
 LaunchAgent; it drives the existing Python CLI through a constrained XPC
 delegate. It is organized into three groups:
 
-- **Create** — dubbing desk (with composer and works management), voice design,
-  voice cloning, voice library, and audiobook workshop.
-- **Sessions** — voice assistant, meeting assistant, live captions, and the
-  AI teleprompter.
+- **Create** — dubbing desk (with composer, multi-role scripts, and works
+  management), voice design, voice cloning, voice library, and audiobook
+  workshop.
+- **Sessions** — voice assistant, meeting assistant, live captions, the AI
+  teleprompter, and system-wide dictation (`⌘⇧D`) into other apps.
 - **Engine** — service status, runtime monitoring, model combinations,
   preflight and diagnostics, and in-app developer docs.
 
@@ -120,6 +122,12 @@ and are released when you leave it. Session PCM is never written to disk;
 only text and records are stored locally. Teleprompter camera and window
 capture stay in your streaming software — SpeechRail supplies the script
 follow-along, not the video.
+
+[Dictation](docs/users/global-dictation.md) turns the same recognition into a
+system-wide input method: press `⌘⇧D` to start, press it again to stop, and the
+finished text goes to the field that had focus when recording started. It opens
+no main window and steals no focus. Recognition is not delivery — when the text
+cannot be inserted, the app says why and leaves it on the clipboard.
 
 ## Boundaries
 
@@ -138,9 +146,13 @@ These are deliberate, and they are load-bearing:
 - **No cloud inference, multi-tenancy, or high availability.** This is a
   single-user local runtime.
 
-Speaker diarization additionally requires the local CoreML Sortformer bundle
-and a named aligner to be provisioned, and the task to opt in. VoiceDesign is
-an on-demand artifact bound to no spec.
+Speaker diarization additionally requires the local CoreML diarization
+artifacts and a named aligner to be provisioned, and the task to opt in.
+Realtime accepts either the `sortformer` or the `meeting_dynamic` backend; the
+latter confirms at most four stable anonymous identities per capture
+(`system_cap` is fixed at 4), and extra voices stay unrecognized instead of
+rotating an existing identity. VoiceDesign is an on-demand artifact bound to no
+spec.
 
 ## Requirements
 
@@ -297,7 +309,7 @@ not establish a quality ranking.
 
 | Spec | ASR | TTS lanes | Diarization and voice behavior |
 |---|---|---|---|
-| `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` + `tts-0.6b-base-q8` | CustomVoice system voices and Base reference clone; diarization requires explicit Sortformer + aligner provisioning. |
+| `fast` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` + `tts-0.6b-base-q8` | CustomVoice system voices and Base reference clone; diarization requires explicit diarization artifacts + aligner provisioning. |
 | `quality` | `asr-1.7b-q8` | `tts-1.7b-custom-q8` + `tts-1.7b-base-q8` | 1.7B CustomVoice and Base roles; diarization requires explicit provisioning. |
 | `reference` | `asr-1.7b-bf16` | `tts-1.7b-custom-bf16` + `tts-1.7b-base-bf16` | Reference precision inherits the same-family 8-bit gate evidence and was not separately retested. Diarization still requires explicit provisioning. |
 
@@ -353,6 +365,7 @@ effective capability. See
 | Documentation overview | [`docs/README.md`](docs/README.md) |
 | Install and first run | [`docs/users/installing-speechrail.md`](docs/users/installing-speechrail.md) |
 | API and client integration | [`docs/users/README.md`](docs/users/README.md), [`docs/users/integrations.md`](docs/users/integrations.md) |
+| App workflows | [`docs/users/audiobook-workshop.md`](docs/users/audiobook-workshop.md), [`docs/users/global-dictation.md`](docs/users/global-dictation.md), [`docs/users/meeting-minutes.md`](docs/users/meeting-minutes.md) |
 | Public API contract | [`docs/users/api-contract.md`](docs/users/api-contract.md), [`contracts/openapi.yaml`](contracts/openapi.yaml) |
 | Realtime protocol | [`contracts/realtime-openai.md`](contracts/realtime-openai.md) |
 | Effective capabilities | [`docs/users/effective-capabilities.md`](docs/users/effective-capabilities.md) |

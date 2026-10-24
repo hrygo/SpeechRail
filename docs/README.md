@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 文档中心"
 status: active
-version: "3.3.0"
-date: 2026-09-27
+version: "4.0.0"
+date: 2026-10-24
 ---
 
 # 📚 SpeechRail 文档中心
@@ -20,13 +20,15 @@ date: 2026-09-27
 
 欢迎查阅 SpeechRail 官方技术文档。本文档中心根据不同读者角色与职责进行模块化组织，助您快速获取所需信息。
 
-## 当前实现基线（2026-09-27）
+## 当前实现基线（2026-10-24）
 
-- 当前源码 release 为 SpeechRail `3.3.0`。受管运行时只能由当前源码构建的 wheel 通过 `speechrail install` 切换，不能直接编辑源码 checkout 或 `runtime/current`。
-- Realtime 是无状态 Speech Plane，协议支持范围以 [Realtime ASR/TTS 契约](../contracts/realtime-openai.md)为准；调用方拥有 LLM、历史、memory、tools、播放和 barge-in，服务端只交付 ASR/VAD/匿名分人事实与显式 TTS render。
+- 当前源码 release 为 SpeechRail `5.0.0`。受管运行时只能由当前源码构建的 wheel 通过 `speechrail install` 切换，不能直接编辑源码 checkout 或 `runtime/current`。
+- Realtime 是无状态 Speech Plane，协议支持范围以 [Realtime ASR/TTS 契约](../contracts/realtime-openai.md)（契约版本 `7.1.0`）为准；调用方拥有 LLM、历史、memory、tools、播放和 barge-in，服务端只交付 ASR/VAD/匿名分人事实与显式 TTS render。
 - `/health`、`/readyz` 和 `/v1/models` 只报告当前 profile、worker 和可选能力的实时状态；不得把某一台机器的一组 readiness 值写成所有安装的固定承诺。
 - Realtime `server_vad` 只交付端点事实。endpointing 窗口、播放队列和 barge-in 决策由调用方负责，不是 SpeechRail 的全局业务默认值。
 - 连续 diarization 的 activity stream 与 endpointing 分离：activity 负责 speaker evidence，完成后以 speaker-only revision 更新，不改写 canonical completed text。
+- 匿名分人按任务显式启用，可选 `sortformer` 或 `meeting_dynamic` 后端。`meeting_dynamic` 每场最多确认四位稳定匿名身份（`system_cap` 固定为 4），超额声音保留未识别，不轮换已有身份；该后端要求独立质量认证，原有 5–32 身份配置不再满足其生产准入。
+- 转写会话可在音频输入前协商 `revision_window_v1` 修订窗口，显式换取近期文字回溯；它与 `session.speechrail.asr` 策略互斥，默认关闭，前置条件缺失时在采集前拒绝协商。
 - clone ICL 路径已加入稳定采样、请求级响度冻结、峰值保护和参考音频信号校验；当前 active clone backend 对非 `1.0` speed 明确返回 `clone_speed_unsupported`。
 - 每个 TTS spec 都绑定 `custom_voice` 与 `base`；`voice_design` 是不与档位绑定、只用于设计作业的按需制品。不同 capability lane 可并发，同一 lane 由 worker lock 串行，空闲冷却后按 capability group 回收。`reference` 的 bf16 制品继承同族 8-bit 档位已通过的门禁证据，未在本机逐项复测，也不导出质量排名。
 
@@ -60,7 +62,7 @@ flowchart TD
         API["OpenAI 兼容协议层 & Request ID & 统一错误 Envelope"]
         Dec["3-Tier 内存解码器 (WAV Fast-path / ffmpeg 流式解码)"]
         Gov["Resource Governor 资源调度器 & 有界队列与 WorkerLeaseLock"]
-        Diar["可选 CoreML 分人 worker<br/>• Sortformer FP16 匿名标签<br/>• 原生 diarized_json<br/>• Realtime 单一 opt-in"]
+        Diar["可选 CoreML 分人 worker<br/>• sortformer / meeting_dynamic 后端<br/>• meeting_dynamic 每场 4 位稳定身份<br/>• 原生 diarized_json<br/>• Realtime 单一 opt-in"]
         Life["RuntimeLifecycle + WorkerIdleEvictor<br/>默认 300 秒，可配置"]
         API --> Dec --> Gov
     end
@@ -101,7 +103,9 @@ flowchart TD
 | **批量语音识别 (ASR)** | 契约可用，按 runtime readiness | `POST /v1/audio/transcriptions` | 文档声明的 OpenAI multipart 子集，支持 `verbose_json`、`srt`、`vtt`；分人格式按任务 opt-in 与供给状态启用 | 确定性契约测试；真实质量需按授权单独验收 |
 | **语音合成 (TTS)** | 契约可用，按 runtime readiness | `POST /v1/audio/speech` | 24 kHz PCM16 / WAV / MP3 等文档声明格式，按能力快照选择音色 | 确定性契约测试；真实音质与性能需按授权单独验收 |
 | **实时流式 (Realtime)** | 契约可用 | `WS /v1/realtime` | 无状态 ASR/TTS 子集与 `speechrail.*` 扩展；服务端提供 VAD 事实，调用方负责 LLM、队列、播放和 barge-in，并显式提交 `speechrail.tts.*` | Python 契约/回归与 Native 纯测试；真实模型/音频质量需单独验收 |
-| **说话人分离 (Diarization)** | 可选，需显式供给 sortformer/aligner 且资源就绪 | 文件 `diarized_json`；Realtime 显式 opt-in | 私有 CoreML Sortformer FP16 worker + 独立 aligner；仅输出匿名 session-scoped label | [能力诊断与验收](operations/capability-quality-acceptance.md)；真实质量与长期资源行为需独立实测 |
+| **说话人分离 (Diarization)** | 可选，需显式供给分人制品/aligner 且资源就绪 | 文件 `diarized_json`；Realtime 显式 opt-in 并选择 `sortformer` 或 `meeting_dynamic` | 私有 CoreML 分人 worker + 独立 aligner；`meeting_dynamic` 每场最多 4 位稳定匿名身份，超额保留未识别；仅输出匿名 session-scoped label | [能力诊断与验收](operations/capability-quality-acceptance.md)；真实质量与长期资源行为需独立实测 |
+| **音色包 (Voice bundle)** | 契约可用，按 runtime readiness | `/v1/voices/{voice_id}/bundle`、`/v1/voices/bundles*` | 版本化 `.srvoice` 归档的导出、只读预检、内容预览与导入；导入产生新音色，仍须在当前引擎重新验证 | 确定性契约测试；跨引擎等效性不作承诺 |
+| **macOS 全局听写** | App 内可用，按会话占用与服务 readiness | App 内 `⌘⇧D`；底层复用 `POST /v1/audio/transcriptions` | 单段上限 5 分钟、一次一段、写回开始时焦点控件；写入失败降级为复制并说明原因 | Swift 单元测试；真实应用间写入需按授权实测 |
 | **macOS 常驻运维服务** | 流程可用，按安装态验收 | `speechrail service` CLI | 用户级 LaunchAgent 管理、状态检查和受控回滚 | 确定性测试与安装态证据分开记录 |
 
 ---
