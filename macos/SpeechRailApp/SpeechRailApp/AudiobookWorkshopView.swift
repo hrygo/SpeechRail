@@ -546,7 +546,9 @@ struct AudiobookExportSheet: View {
                 }
             }
 
-            if let prepared = workflow.preparedExport {
+            if let completed = workflow.completedExport {
+                completedExportCard(completed)
+            } else if let prepared = workflow.preparedExport {
                 CardSurface {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         HStack {
@@ -568,12 +570,19 @@ struct AudiobookExportSheet: View {
                 Button("关闭", role: .cancel) {
                     workflow.isShowingExportSheet = false
                     workflow.preparedExport = nil
+                    workflow.clearCompletedExport()
                 }
                 .speechRailButton(.secondary)
 
                 Spacer()
 
-                if workflow.preparedExport == nil {
+                if workflow.completedExport != nil {
+                    Button("完成") {
+                        workflow.isShowingExportSheet = false
+                        workflow.clearCompletedExport()
+                    }
+                    .speechRailButton(.primary)
+                } else if workflow.preparedExport == nil {
                     if workflow.isPreparingExport {
                         Button("取消导出") {
                             Task { await workflow.cancelExportPreparation() }
@@ -617,6 +626,7 @@ struct AudiobookExportSheet: View {
         ])
         .onAppear {
             workflow.preparedExport = nil
+            workflow.clearCompletedExport()
             selectedChapterIDs = Set(workflow.exportReadyChapters.map(\.id))
             workflow.clearExportError()
         }
@@ -640,6 +650,79 @@ struct AudiobookExportSheet: View {
         .onDisappear {
             workflow.clearExportError()
         }
+    }
+
+    /// 保存成功后的结果卡：音频已落盘，章节时间表可单独复制或保存，失败只影响时间表本身。
+    @ViewBuilder
+    private func completedExportCard(_ completed: AudiobookCompletedExport) -> some View {
+        CardSurface {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    StatusPill(tone: .healthy, label: "音频已保存")
+                    Text(completed.destinationURL.lastPathComponent)
+                        .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                if let timeline = completed.timeline {
+                    Text("章节时间表来自本次导出的实际章节时间轴，可直接粘贴到播客或视频说明；保存失败不会影响已导出的音频。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                    ScrollView {
+                        Text(timeline.text)
+                            .font(SpeechRailDesignTokens.Typography.technical)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: SpeechRailDesignTokens.Layout.Sheet.messageBodyMaximumHeight)
+                    .accessibilityLabel("章节时间表预览，共 \(timeline.entries.count) 章")
+
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Button("复制章节时间表") {
+                            copyTimeline(timeline)
+                        }
+                        .speechRailButton(.secondary)
+                        .accessibilityHint("把当前时间表按行复制到剪贴板。")
+
+                        Button("导出章节时间表…") {
+                            presentTimelineSavePanel(completed)
+                        }
+                        .speechRailButton(.secondary)
+                        .accessibilityHint("把当前时间表保存为 UTF-8 文本文件。")
+
+                        Spacer(minLength: 0)
+
+                        Text("共 \(timeline.entries.count) 章")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    }
+                } else {
+                    Text("本次导出没有可用的单文件章节时间轴。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+            }
+            .padding(SpeechRailDesignTokens.Spacing.sm)
+        }
+    }
+
+    private func copyTimeline(_ timeline: AudiobookChapterTimeline) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(timeline.text, forType: .string)
+    }
+
+    private func presentTimelineSavePanel(_ completed: AudiobookCompletedExport) {
+        let savePanel = NSSavePanel()
+        savePanel.title = "导出章节时间表"
+        savePanel.nameFieldStringValue = completed.defaultTimelineFileName
+        savePanel.allowedContentTypes = [.plainText]
+        guard savePanel.runModal() == .OK, let url = savePanel.url else { return }
+        guard confirmReplacingExistingItem(at: url, isDirectory: false) else { return }
+        let consent = try? AudiobookOverwriteConsent.capture(at: url)
+        workflow.saveCompletedChapterTimeline(to: url, overwriteConsent: consent)
     }
 
     private var auditKey: String {

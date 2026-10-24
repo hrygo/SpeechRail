@@ -369,6 +369,8 @@ public final class AudiobookWorkflowModel {
         return "之前版本 · " + revision.createdAt.speechRailFormatted()
     }
     public private(set) var exportRecords: [AudiobookExportRecord] = []
+    /// 最近一次已保存成功的导出；音频已落盘后仍可只重试章节时间表。
+    public private(set) var completedExport: AudiobookCompletedExport?
     public private(set) var exportCover: AudiobookCoverAsset?
     public private(set) var exportCoverPreviewURL: URL?
     public private(set) var exportCoverErrorMessage: String?
@@ -4003,6 +4005,7 @@ public final class AudiobookWorkflowModel {
     ) async {
         guard let bookID = selectedBook?.id, let exportController, !isPreparingExport else { return }
         isPreparingExport = true
+        completedExport = nil
         errorMessage = nil
         exportErrorMessage = nil
         if let exportCover, exportCover.bookID != bookID {
@@ -4053,13 +4056,50 @@ public final class AudiobookWorkflowModel {
                 overwriteConsent: overwriteConsent
             )
             preparedExport = nil
-            isShowingExportSheet = false
+            completedExport = AudiobookCompletedExport(
+                bookID: bookID,
+                bookTitle: prepared.bookTitle,
+                profile: prepared.profile,
+                destinationURL: destination,
+                timeline: prepared.chapterTimeline
+            )
+            // 整本 M4B 保存成功后留在面板里给出章节时间表入口；分章节 MP3 仍按原流程直接收起。
+            if prepared.profile != .m4b {
+                completedExport = nil
+                isShowingExportSheet = false
+            }
             await openBook(bookID)
             bannerMessage = "已成功导出至 \(destination.lastPathComponent)。"
         } catch {
             errorMessage = error.localizedDescription
             exportErrorMessage = error.localizedDescription
         }
+    }
+
+    /// 只重试章节时间表：不重新编码、不重新核验音频，也不改动已经保存的成品。
+    public func saveCompletedChapterTimeline(
+        to destination: URL,
+        overwriteConsent: AudiobookOverwriteConsent? = nil
+    ) {
+        guard let timeline = completedExport?.timeline else {
+            exportErrorMessage = AudiobookExportError.timelineUnsupportedForProfile.errorDescription
+            return
+        }
+        exportErrorMessage = nil
+        do {
+            try AudiobookChapterTimelineWriter.write(
+                timeline,
+                to: destination,
+                overwriteConsent: overwriteConsent
+            )
+            bannerMessage = "已保存章节时间表至 \(destination.lastPathComponent)。"
+        } catch {
+            exportErrorMessage = error.localizedDescription
+        }
+    }
+
+    public func clearCompletedExport() {
+        completedExport = nil
     }
 
     // MARK: - Route Leave & App Shutdown

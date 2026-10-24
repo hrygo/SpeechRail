@@ -682,6 +682,88 @@ final class AudiobookExportTests: XCTestCase {
         )
     }
 
+    /// 章节时间表必须来自这份已核验的产物：M4B 有单文件时间轴，分章 MP3 继续用目录清单。
+    func testPrepareAttachesChapterTimelineOnlyForVerifiedM4B() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let castController = AudiobookCastController(store: store)
+        let revisionController = AudiobookRevisionController(store: store)
+        let exportController = AudiobookExportController(
+            store: store,
+            castController: castController,
+            revisionController: revisionController,
+            customStageEncoder: Self.fakeStageEncoder,
+            mediaVerifier: Self.fakeMediaVerifier
+        )
+        let fixture = try await makeTwoChapterExportFixture(
+            store: store,
+            revisionController: revisionController,
+            completeSecondChapter: true
+        )
+
+        let m4b = try await exportController.prepare(bookID: fixture.bookID, chapterIDs: nil, profile: .m4b)
+        let timeline = try XCTUnwrap(m4b.chapterTimeline, "整本 M4B 核验通过后必须给出章节时间表")
+        XCTAssertEqual(timeline.entries.count, m4b.exportedChapters.count)
+        XCTAssertEqual(timeline.entries.first?.startSeconds, 0)
+        XCTAssertEqual(
+            timeline.entries.map(\.title),
+            m4b.exportedChapters.sorted { $0.ordinal < $1.ordinal }.map(\.title)
+        )
+        XCTAssertEqual(timeline.text.split(separator: "\n").count, m4b.exportedChapters.count)
+
+        let mp3 = try await exportController.prepare(
+            bookID: fixture.bookID,
+            chapterIDs: [fixture.chapter1.id, fixture.chapter2.id],
+            profile: .chapterMP3
+        )
+        XCTAssertNil(mp3.chapterTimeline, "分章 MP3 不得伪造单文件时间轴")
+    }
+
+    /// 隔离真实媒体样本：时间表必须与成品章节标记一致，而不是按字数或语速推算。
+    func testChapterTimelineMatchesRealM4BChapterMarkers() async throws {
+        let titles = ["第一章", "第二章", "第三章"]
+        let chapterFrames: [Int64] = [47_999, 48_001, 72_000]
+        let mediaURL = try await makePlayableM4BWithChapters(
+            zip(titles, chapterFrames).map { (title: $0.0, frameCount: $0.1) }
+        )
+        let bookID = UUID()
+        let chapters = makeTestChapters(bookID: bookID, titles: titles)
+        let expected = makeExpectedM4B(
+            mediaURL: mediaURL,
+            chapters: chapters,
+            chapterFrameCounts: chapterFrames
+        )
+
+        let verification = try await AudiobookMediaVerifier.verify(url: mediaURL, expected: expected)
+        XCTAssertEqual(verification.chapterTitles, titles)
+
+        var prepared = expected
+        prepared.verification = verification
+        let timeline = try prepared.makeChapterTimeline()
+
+        let asset = AVURLAsset(url: mediaURL)
+        let locales = try await asset.load(.availableChapterLocales)
+        let locale = try XCTUnwrap(locales.first, "真实 M4B 必须带章节标记")
+        let groups = try await asset.loadChapterMetadataGroups(
+            withTitleLocale: locale,
+            containingItemsWithCommonKeys: []
+        )
+        let actual = groups
+            .map { (start: $0.timeRange.start.seconds, title: $0.timeRange) }
+            .sorted { $0.start < $1.start }
+        XCTAssertEqual(actual.count, timeline.entries.count)
+
+        for (entry, marker) in zip(timeline.entries, actual) {
+            XCTAssertEqual(
+                entry.startSeconds,
+                Int64(marker.start.rounded(.down)),
+                "第 \(entry.position) 章起点必须等于成品章节标记向下取整"
+            )
+            XCTAssertEqual(entry.timecode, AudiobookChapterTimeline.timecode(seconds: Int64(marker.start.rounded(.down))))
+        }
+        XCTAssertEqual(timeline.entries.map(\.title), titles)
+        XCTAssertEqual(timeline.entries.first?.startSeconds, 0)
+    }
+
     func testExportReadinessIgnoresSkippedChaptersAndBlocksMissingAudio() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)
         let revisionController = AudiobookRevisionController(store: store)

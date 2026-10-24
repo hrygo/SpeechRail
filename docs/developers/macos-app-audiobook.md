@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 有声书工坊开发说明"
 status: active
 audience: "macOS App 开发者、架构与测试工程师"
-version: "1.16.0"
-date: 2026-10-22
+version: "1.17.0"
+date: 2026-10-23
 ---
 
 # SpeechRail macOS App 有声书工坊开发说明
@@ -35,6 +35,7 @@ date: 2026-10-22
 - **`AudiobookCoverAssetStore.swift`**：书籍自有封面资产的落盘与读取（`books/<book_id>/cover/cover.<jpg|jpeg|png>`）。安装前校验普通文件、非符号链接、扩展名白名单（`jpg`/`jpeg`/`png`）与 8 MiB 上限，采用同目录临时文件加原子替换；封面随 `books/<book_id>` 由既有废纸篓生命周期携带，不写 SQLite。
 - **`AudiobookMediaVerifier.swift` & `AudiobookExportController.swift`**：导出前校验全部采用切片的磁盘存在性、WAV 头、帧数与 SHA-256；写入 `<app_home>/audiobooks/exports/<request_id>/request.json` 并通过 `SpeechRailControlAgent` 执行 `speechrail media encode-audiobook`，导出完成后用 `AVURLAsset` 做时长、音轨、章节数与封面存在性的二次校验。准备阶段由 Workflow 持有 requestID，可调用 `cancel(requestID:)` 中止编码并显示“未生成任何文件”；保存阶段对已存在的 M4B 文件或 MP3 目录都要求显式替换确认，目录不会被静默整体覆盖。导出面板先调用 `AudiobookExportController.audit(...)` 做只读预检（与 `prepare` 共用 `buildPlan`，不写文件、不保存生产版本），按 `AudiobookExportBlocker` 逐章列出缺分析、待确认说话人、无当前音频、资产缺失或空片段，再禁用整本 M4B 或空的 MP3 选择；准备/保存失败写入 `exportErrorMessage`，在导出 Sheet 的操作浮层中显示，成功后清除。带封面时清单升级为 `audiobook_media_export_v2` 并携带封面相对路径与图像 SHA-256；`chapter_mp3` 与跨书封面在写清单前拒绝。
 - **`AudiobookWorkflowModel.swift` & `AudiobookProductionWiring.swift`**：`@MainActor @Observable` 顶层编排器，将书架、工作台两页签、收听模式与 `AppModel` / `SharedPlaybackOwner` / `SpeechCreationAdmission` 连接起来；异步读取和制作收尾校验书籍身份与任务代次。
+- **`AudiobookChapterTimeline.swift`**：把一次已核验的整本 M4B 导出投影成可直接粘贴的章节时间表（每行 `HH:MM:SS<TAB>标题`）。时间轴只取本次导出实际使用的章节顺序与逐章媒体帧数，起点按累计帧一次换算并向下取整到秒，不按字数或语速推算，也不累计逐章四舍五入误差；小时不封顶，超过 24 小时不回绕。标题中的制表符、换行与控制字符折叠为单个空格，空标题回落为“第 N 章”。只有 `prepare` 通过媒体核验后才在 `AudiobookPreparedExport.chapterTimeline` 上出现值；分章 MP3 继续使用 `chapters-manifest.json`，不伪造单文件时间轴。`AudiobookChapterTimelineWriter` 以同目录临时文件加原子替换写盘，已有同名文件要求显式覆盖确认，确认后目标被改动则中止；写盘与音频导出解耦，时间表失败不撤销已保存的音频，`AudiobookWorkflowModel.saveCompletedChapterTimeline` 可只重试时间表。复制与保存使用同一份字符串，逐字一致。
 
 角色分析的 primary/context、工作台展示、选角试听和 TTS 共用 `workingSourceSnapshot` 固定的工作索引及 `text(in:)`，同一区间的文字与工作文件字节一致。LLM 只引用该修订的 atom ID。检查点保存 source ID 与加工版本，片段依赖包含加工版本；提交角色、标注、候选、章节和完成进度时重新核对修订，迟到结果不能修改新 source 的状态。 加工生成的段间空白不构成新的标题证据；来源映射保留每个逻辑段落的原始标题候选判定，导入与重开后使用相同判定。
 
