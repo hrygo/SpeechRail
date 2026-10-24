@@ -105,7 +105,8 @@ delegate. It is organized into three groups:
   management), voice design, voice cloning, voice library, and audiobook
   workshop.
 - **Sessions** — voice assistant, meeting assistant, live captions, the AI
-  teleprompter, and system-wide dictation (`⌘⇧D`) into other apps.
+  teleprompter, and system-wide dictation (`⌘⇧D`, a menu-bar and hotkey entry
+  rather than a page) into other apps.
 - **Engine** — service status, runtime monitoring, model combinations,
   preflight and diagnostics, and in-app developer docs.
 
