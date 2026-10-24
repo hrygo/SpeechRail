@@ -364,6 +364,88 @@ def _quality_reject_response(request_id: str, report: vq.VoiceQualityReport) -> 
     )
 
 
+async def _read_uploaded_bundle(
+    bundle: UploadFile, request_id: str
+) -> tuple[bytes, JSONResponse | None]:
+    """Read a bundle upload under a hard ceiling, before any parsing happens."""
+
+    from speechrail.domain.voice_bundle import MAX_ARCHIVE_BYTES
+
+    content = bytearray()
+    while chunk := await bundle.read(64 * 1024):
+        content.extend(chunk)
+        if len(content) > MAX_ARCHIVE_BYTES:
+            return b"", error_response(
+                413,
+                request_id,
+                "bundle_too_large",
+                f"Bundle exceeds the {MAX_ARCHIVE_BYTES // (1024 * 1024)}MB limit",
+            )
+    if not content:
+        return b"", error_response(400, request_id, "bundle_empty", "Bundle payload is empty")
+    return bytes(content), None
+
+
+# Bundle failures are client-visible facts about the uploaded file, so the
+# status code follows the cause instead of collapsing into a generic 400.
+_BUNDLE_ERROR_STATUS = {
+    "bundle_empty": 400,
+    "bundle_invalid_zip": 400,
+    "bundle_missing_manifest": 400,
+    "bundle_invalid_manifest": 400,
+    "bundle_unsafe_entry": 400,
+    "bundle_unexpected_entry": 400,
+    "bundle_duplicate_entry": 400,
+    "bundle_unsupported_format": 415,
+    "bundle_unsupported_version": 415,
+    "bundle_digest_mismatch": 422,
+    "bundle_missing_asset": 422,
+    "bundle_invalid_asset": 422,
+    "bundle_too_large": 413,
+    "bundle_system_voice_not_exportable": 400,
+    "bundle_asset_unavailable": 503,
+}
+
+
+def _voice_bundle_error_response(request_id: str, exc: Any) -> JSONResponse:
+    from speechrail.domain.voice_bundle import VoiceBundleError
+
+    assert isinstance(exc, VoiceBundleError)
+    return error_response(
+        _BUNDLE_ERROR_STATUS.get(exc.code, 400),
+        request_id,
+        exc.code,
+        exc.message,
+        retryable=exc.code == "bundle_asset_unavailable",
+    )
+
+
+def _active_voice_capabilities(active: Any) -> set[str]:
+    """Capabilities the *current* tier actually declares, not what exists on disk."""
+
+    available: set[str] = set()
+    clone = getattr(active, "tts_clone", None)
+    if clone is not None and getattr(clone, "variant", None) == "base":
+        available.add("tts_base")
+    design = getattr(active, "voice_design", None)
+    if design is not None and getattr(design, "variant", None) == "voice_design":
+        available.add("voice_design")
+    return available
+
+
+def _bundle_content_disposition(filename: str) -> str:
+    """RFC 6266/5987 header: an ASCII fallback plus the real UTF-8 name."""
+
+    from urllib.parse import quote
+
+    stem = filename.rsplit(".", 1)[0]
+    ascii_stem = "".join(
+        ch if ch.isascii() and (ch.isalnum() or ch in "-_") else "_" for ch in stem
+    )
+    ascii_name = f"{ascii_stem or 'voice'}.srvoice"
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+
+
 async def _read_uploaded_audio(
     audio: UploadFile, request_id: str
 ) -> tuple[bytes, JSONResponse | None]:
@@ -1931,6 +2013,174 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "voice_not_found",
                 f"Voice {voice_id} not found",
             )
+
+    @router.get("/v1/voices/{voice_id}/bundle/preview")
+    async def preview_voice_bundle(voice_id: str, request: Request) -> JSONResponse:
+        """Describe what an export would contain, without building the archive."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        from speechrail.application.voice_bundle import preview_export
+        from speechrail.domain.voice_bundle import VoiceBundleError
+
+        try:
+            preview = preview_export(services.voice_store, voice_id)
+        except VoiceBundleError as exc:
+            return _voice_bundle_error_response(request_id, exc)
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except ValueError:
+            return error_response(404, request_id, "voice_not_found", "Voice not found")
+        return JSONResponse(status_code=200, content=preview.to_payload())
+
+    @router.get("/v1/voices/{voice_id}/bundle")
+    async def export_voice_bundle(voice_id: str, request: Request) -> Response:
+        """Export one custom voice as a versioned, path-free bundle."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        from speechrail.application.voice_bundle import export_bundle
+        from speechrail.domain.voice_bundle import VoiceBundleError
+
+        try:
+            payload = export_bundle(
+                services.voice_store,
+                voice_id,
+                service_version=str(getattr(resolved, "service_version", "") or ""),
+            )
+            name = services.voice_store.get_profile(voice_id).name or voice_id
+        except VoiceBundleError as exc:
+            return _voice_bundle_error_response(request_id, exc)
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except ValueError:
+            return error_response(404, request_id, "voice_not_found", "Voice not found")
+        return Response(
+            content=payload,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": _bundle_content_disposition(f"{name}.srvoice"),
+                "X-Request-Id": request_id,
+            },
+        )
+
+    @router.post("/v1/voices/bundles/inspect")
+    async def inspect_voice_bundle(
+        request: Request,
+        bundle: UploadFile = File(...),  # noqa: B008 - FastAPI parameter marker.
+    ) -> JSONResponse:
+        """Read-only preflight: verify a bundle without writing or loading models."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        payload, read_error = await _read_uploaded_bundle(bundle, request_id)
+        if read_error is not None:
+            return read_error
+        from speechrail.application.voice_bundle import inspect_bundle
+        from speechrail.domain.voice_bundle import VoiceBundleError
+
+        try:
+            existing = {
+                profile.name
+                for profile in services.voice_store.list_profiles()
+                if not profile.is_system
+            }
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        try:
+            inspection = inspect_bundle(
+                payload,
+                available_capabilities=_active_voice_capabilities(active),
+                existing_names=existing,
+            )
+        except VoiceBundleError as exc:
+            return _voice_bundle_error_response(request_id, exc)
+        return JSONResponse(status_code=200, content=inspection.to_payload())
+
+    @router.post("/v1/voices/bundles", status_code=201)
+    async def import_voice_bundle(
+        request: Request,
+        bundle: UploadFile = File(...),  # noqa: B008 - FastAPI parameter marker.
+        name: str | None = Form(default=None),
+    ) -> JSONResponse:
+        """Import a bundle as a new local voice; an existing voice is never replaced."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        payload, read_error = await _read_uploaded_bundle(bundle, request_id)
+        if read_error is not None:
+            return read_error
+        if name is not None and (not name.strip() or len(name) > _CLONE_NAME_MAX_LENGTH):
+            return error_response(
+                400,
+                request_id,
+                "invalid_name",
+                f"Voice name must be 1-{_CLONE_NAME_MAX_LENGTH} characters",
+            )
+        from speechrail.application.voice_bundle import import_bundle
+        from speechrail.domain.voice_bundle import VoiceBundleError
+
+        try:
+            imported = import_bundle(
+                services.voice_store,
+                payload,
+                available_capabilities=_active_voice_capabilities(active),
+                name=name,
+            )
+        except VoiceBundleError as exc:
+            return _voice_bundle_error_response(request_id, exc)
+        except VoiceAlreadyExistsError:
+            return error_response(
+                409,
+                request_id,
+                "voice_already_exists",
+                "A voice with this identity already exists",
+            )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except ValueError as exc:
+            return error_response(400, request_id, "bundle_import_failed", str(exc))
+
+        profile = imported.profile
+        return JSONResponse(
+            status_code=201,
+            content={
+                "id": profile.id,
+                "name": profile.name,
+                "mode": profile.mode,
+                "revision": profile.revision,
+                "renamed_from": imported.renamed_from,
+                "source_voice_id": imported.inspection.source_voice_id,
+                "source_revision": imported.inspection.source_revision,
+                "validation": "unverified",
+                "missing_capabilities": list(imported.inspection.missing_capabilities),
+                "notes": list(imported.inspection.notes),
+            },
+        )
 
     @router.get("/metrics")
     async def metrics(request: Request) -> Response:
