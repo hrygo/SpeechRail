@@ -247,6 +247,49 @@ App target（`DictationSystemIntegrations.swift`），系统错误在那里翻�
 **测试隔离。** `DictationSessionTests` 全部用 fake 替身（采集/识别/目标/交付/剪贴板），不打开麦克风、
 不联网、不写系统剪贴板；UI 测试用 `UITestDictationTranscriber` 固定返回空文字。
 
+### 多角色短脚本（2026-10-23）
+
+**配音台补一条轻量的多角色路径，不动有声书。** 从配音台「多角色脚本…」直接粘贴对话稿：先分段
+（仍走 `DubbingSegmentPlanner`，只按换行与句末标点，不调用 LLM 猜角色），再给每个角色选一个音色，
+一个默认角色就够开始，逐句再按需覆盖。首版没有情绪 / 语速之外的新控制——角色上只存 `speed`，
+绑定到克隆音色时被 `DubbingCastRules` 钉死在 1.0x，而不是等一次注定失败的请求。
+
+**数据模型按「依赖」而不是「整份配方」失效。** `DubbingSegment` 多两个字段：`roleID` 与
+`pauseAfterMilliseconds`。`DubbingProject` 多 `cast: [DubbingRole]` 与 `defaultRoleID`。
+判定分岔只在一处：
+
+- `cast` 为空（历史单声音项目）：仍比**项目级配方摘要**，与升级前逐字一致。
+- `cast` 非空：比**这一段该用的声音**（`resolvedVoiceID`）与**这个角色第一次成功渲染时记下的运行事实**
+  （`DubbingRole.runtime`，含 `engineRevision` / `modelArtifact` / `modelArtifactRevision` /
+  `voiceRevision` / `sampleRate` / `channels`）。
+
+于是换一个角色的声音只让那一角色的候选失效（`.candidateVoiceChanged`），别的段落的已采用版本原样保留；
+音色被改过（同一 id、新 revision）也单独报 `.candidateVoiceChanged`，不混进「运行版本变了」。
+
+**旧记录无损。** `DubbingProject` / `DubbingSegment` 各自手写 `init(from:)`，用 `decodeIfPresent`
+读 `cast` / `defaultRoleID` / `roleID` / `pauseAfterMilliseconds`；缺字段读作空角色表、跟随默认角色、
+无停顿。升级前的索引读回来与升级前行为一致，没有迁移步骤，也没有丢配方或候选。
+
+**换声不静默。** 删角色时若还有段落指着它，`updateCast` 直接抛 `.roleNotFound`；「自动回落到默认角色」
+看着方便，实际是一次静默换声，所以这条路径不存在。同理 `DubbingCastAudit` 把「没选声音 / 音色被删 /
+音色不可用 / 音色已变化」分成四条独立提示；音色列表还没读到时它一句都不说——那是「未知」，不是「坏了」。
+
+**停顿只属于装配。** `DubbingPause` 上限 5 秒、步进 100ms；`DubbingStreamingWAV.write(inputs:pauses:)`
+把停顿换算成同一采样率下的静音字节，与 PCM 一起在建文件**之前**过完长度与 RIFF 上限校验。
+末段之后的停顿不写进成品，清单里也不声称有——句间停顿描述的是「两句之间」，不是成品尾巴。
+停顿从来不是控制标记，不进模型，也不进 `script.txt`。
+
+**导出三份文件。** 音频 + 正文 + 片段清单（`DubbingExportManifest`，schema `dubbing_segments_v1`）：
+清单第 N 条就是音频里第 N 段、正文第 N 行，带角色、声音、候选 id、时长与停顿。`copyPrepared` 的
+目标地址要求三个互不相同且不覆盖导出临时目录里的源文件，`ExportCopyReceipt` 多一个 `segmentsCommitted`，
+部分提交的提示也按三份文件改口径。`prepareExport` 现在逐段调 `rejection(for:)`，失效段落整次导出失败
+（`.incompleteProject`），绝不跳过它拼出一个「看起来完整」的成品。
+
+**测试隔离。** `DubbingCastTests`（19 例）全部用临时目录里的真实 store 与合成 WAV：角色表规则、
+停顿换算、对账四类问题、旧索引解码、逐段失效、删角色被拒、角色运行时固定、导出三份文件逐字节对齐、
+失效段落拒绝导出、单声音项目无停顿导出。`DubbingExportStreamingTests` 随之更新为三份文件。
+
+
 ### 语音助手的会话与回看布局
 
 `AssistantView` 的 live/ready 状态可使用右侧 inspector；窗口进入 compact tier 时，右栏响应式收起，主内容仍保持可操作。`review` 状态是独立的记录阅读布局：只显示记录列表与转写正文，不再显示右侧 inspector；复制、继续、重命名、移除动作固定在正文底部，并通过 `ViewThatFits` 在一行或两行之间适配。继续会话从原记录预填人设、音色和会话偏好并建立新会话，原记录保持不变；移除记录仍是明确的破坏性操作。

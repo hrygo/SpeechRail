@@ -45,16 +45,20 @@ struct DubbingExportStreamingTests {
         let prepared = try exportFixture(directory)
         let largestRead = Mutex(0)
         let metrics = AppPerformanceMetrics(collecting: true, signposting: false)
-        let expectedBytes = try Data(contentsOf: prepared.audioURL).count + Data(contentsOf: prepared.scriptURL).count
+        let expectedBytes = try Data(contentsOf: prepared.audioURL).count
+            + Data(contentsOf: prepared.scriptURL).count
+            + Data(contentsOf: prepared.manifestURL).count
         let writer = DubbingExportWriter(onRead: { count in largestRead.withLock { $0 = max($0, count) } }, metrics: metrics)
         let audio = directory.appendingPathComponent("saved.wav"), script = directory.appendingPathComponent("saved.txt")
-        let receipt = try await writer.copyPrepared(prepared, audioDestination: audio, scriptDestination: script)
-        #expect(receipt.audioCommitted && receipt.scriptCommitted)
+        let manifest = directory.appendingPathComponent("saved.segments.json")
+        let receipt = try await writer.copyPrepared(prepared, audioDestination: audio,
+            scriptDestination: script, manifestDestination: manifest)
+        #expect(receipt.audioCommitted && receipt.scriptCommitted && receipt.segmentsCommitted)
         #expect(try Data(contentsOf: audio) == Data(contentsOf: prepared.audioURL))
         #expect(largestRead.withLock { $0 } <= 262_144)
         #expect(await writer.activeFileHandles == 0)
         let summary = metrics.snapshot(for: .dubbingExport)
-        #expect(summary.samples == 1 && summary.bytes == UInt64(expectedBytes) && summary.count == 2)
+        #expect(summary.samples == 1 && summary.bytes == UInt64(expectedBytes) && summary.count == 3)
         #expect(summary.failed == 0 && summary.cancelled == 0)
     }
     @Test @MainActor func testSlowExportCopyDoesNotBlockMainActorAndCancellationPreservesDestination() async throws {
@@ -65,7 +69,8 @@ struct DubbingExportStreamingTests {
         let destination = directory.appendingPathComponent("saved.wav")
         let original = Data("existing".utf8); try original.write(to: destination)
         let task = Task { try await writer.copyPrepared(prepared, audioDestination: destination,
-            scriptDestination: directory.appendingPathComponent("saved.txt")) }
+            scriptDestination: directory.appendingPathComponent("saved.txt"),
+            manifestDestination: directory.appendingPathComponent("saved.segments.json")) }
         gate.onEntry { task.cancel() }
         do { _ = try await task.value; Issue.record("cancelled copy published") } catch {}
         #expect(task.isCancelled)
@@ -82,7 +87,12 @@ struct DubbingExportStreamingTests {
         let writer = DubbingExportWriter(metrics: metrics)
         let audio = directory.appendingPathComponent("saved.wav"), script = directory.appendingPathComponent("saved.txt")
         try FileManager.default.createDirectory(at: script, withIntermediateDirectories: true)
-        do { _ = try await writer.copyPrepared(prepared, audioDestination: audio, scriptDestination: script); Issue.record("expected partial failure") }
+        do {
+            _ = try await writer.copyPrepared(prepared, audioDestination: audio,
+                scriptDestination: script,
+                manifestDestination: directory.appendingPathComponent("saved.segments.json"))
+            Issue.record("expected partial failure")
+        }
         catch let error as ExportCopyFailure {
             #expect(error.receipt.audioCommitted && !error.receipt.scriptCommitted)
         }
@@ -109,10 +119,12 @@ struct DubbingExportStreamingTests {
         try await store.releaseExport(leaseID: prepared.leaseID)
         #expect(!FileManager.default.fileExists(atPath: prepared.audioURL.path))
         let again = try await store.prepareExport(projectID: project.id)
+        // 释放会删掉临时目录，清单必须在释放前读。
+        let manifestBytes = try Data(contentsOf: again.manifestURL).count
         try await store.releaseExport(leaseID: again.leaseID)
         let summary = metrics.snapshot(for: .dubbingExport)
         #expect(summary.samples == 3 && summary.failed == 1 && summary.count == 2)
-        #expect(summary.bytes == 2 * (Int(again.audioBytes) + "synthetic".utf8.count))
+        #expect(summary.bytes == 2 * (Int(again.audioBytes) + "synthetic".utf8.count + manifestBytes))
     }
     @Test @MainActor func testPreviewUsesURLAndSharedRequestCannotResumeAfterStopOrOtherOwner() throws {
         let driver = ExportPlaybackDriver(), playback = SharedPlaybackOwner(driver: driver)
@@ -159,8 +171,11 @@ struct DubbingExportStreamingTests {
     }
     private func exportFixture(_ directory: URL) throws -> PreparedDubbingExport {
         let audio = directory.appendingPathComponent("source.wav"), script = directory.appendingPathComponent("source.txt")
+        let manifest = directory.appendingPathComponent("source.segments.json")
         let data = try wav(3); try data.write(to: audio); try Data("synthetic".utf8).write(to: script)
-        return .init(leaseID: UUID(), audioURL: audio, scriptURL: script, sourceRevision: "fixture", audioBytes: UInt64(data.count), baseName: "fixture")
+        try Data("{}".utf8).write(to: manifest)
+        return .init(leaseID: UUID(), audioURL: audio, scriptURL: script, manifestURL: manifest,
+            sourceRevision: "fixture", audioBytes: UInt64(data.count), baseName: "fixture")
     }
 }
 private final class ExportCopyGate: Sendable {

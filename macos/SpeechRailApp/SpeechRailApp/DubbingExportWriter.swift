@@ -5,11 +5,14 @@ public struct PreparedDubbingExport: Equatable, Sendable {
     public let leaseID: UUID
     public let audioURL: URL
     public let scriptURL: URL
+    /// 片段清单：顺序、正文、角色、停顿与实际音频一一对应。
+    public let manifestURL: URL
     public let sourceRevision: String
     public let audioBytes: UInt64
     public let baseName: String
     public var audioFileName: String { "\(baseName).wav" }
     public var scriptFileName: String { "\(baseName).txt" }
+    public var manifestFileName: String { "\(baseName).segments.json" }
 }
 public enum DubbingExportError: Error, LocalizedError, Equatable, Sendable {
     case exportBusy, incompleteProject, invalidWAV, riffOverflow, invalidDestination
@@ -26,6 +29,7 @@ public enum DubbingExportError: Error, LocalizedError, Equatable, Sendable {
 public struct ExportCopyReceipt: Equatable, Sendable {
     public var audioCommitted = false
     public var scriptCommitted = false
+    public var segmentsCommitted = false
 }
 public struct ExportCopyFailure: Error, Sendable {
     public let receipt: ExportCopyReceipt
@@ -43,7 +47,8 @@ public actor DubbingExportWriter {
         self.onRead = onRead; self.beforePublish = beforePublish; self.metrics = metrics
     }
     public func copyPrepared(_ export: PreparedDubbingExport, audioDestination: URL,
-                             scriptDestination: URL) async throws -> ExportCopyReceipt {
+                             scriptDestination: URL,
+                             manifestDestination: URL) async throws -> ExportCopyReceipt {
         let measureExport = metrics.isEnabled
         let startedAt = measureExport ? DispatchTime.now().uptimeNanoseconds : 0
         var bytesWritten = 0, filesAttempted = 0
@@ -57,13 +62,24 @@ public actor DubbingExportWriter {
         }
         var receipt = ExportCopyReceipt()
         do {
-            let targets = [audioDestination.standardizedFileURL, scriptDestination.standardizedFileURL]
-            guard targets[0] != targets[1], !targets.contains(export.audioURL.standardizedFileURL),
-                  !targets.contains(export.scriptURL.standardizedFileURL) else { throw DubbingExportError.invalidDestination }
+            let targets = [
+                audioDestination.standardizedFileURL,
+                scriptDestination.standardizedFileURL,
+                manifestDestination.standardizedFileURL,
+            ]
+            // 三份文件必须落在三个不同的位置，也不能覆盖导出临时目录里的源文件。
+            guard Set(targets).count == targets.count,
+                  !targets.contains(export.audioURL.standardizedFileURL),
+                  !targets.contains(export.scriptURL.standardizedFileURL),
+                  !targets.contains(export.manifestURL.standardizedFileURL) else {
+                throw DubbingExportError.invalidDestination
+            }
             filesAttempted += 1
             try copy(export.audioURL, to: audioDestination, bytesWritten: &bytesWritten, trackBytes: measureExport) { receipt.audioCommitted = true }
             filesAttempted += 1
             try copy(export.scriptURL, to: scriptDestination, bytesWritten: &bytesWritten, trackBytes: measureExport) { receipt.scriptCommitted = true }
+            filesAttempted += 1
+            try copy(export.manifestURL, to: manifestDestination, bytesWritten: &bytesWritten, trackBytes: measureExport) { receipt.segmentsCommitted = true }
             return receipt
         } catch {
             outcome = error is CancellationError ? .cancelled : .failed
@@ -112,11 +128,17 @@ public actor DubbingExportWriter {
 /// Bounded parsing/copying on the store's non-reentrant filesystem transaction.
 enum DubbingStreamingWAV {
     static let chunkBytes = 256 * 1024
+    /// 静音就是零字节；按块写，不按整段停顿分配缓冲区。
+    private static let silenceChunk = Data(count: chunkBytes)
     struct Payload { let format: DubbingAudioFormat; let offset: UInt64; let count: UInt64 }
     static func validatePCMSize(_ count: UInt64) throws {
         guard count <= UInt64(UInt32.max) - 36, count.isMultiple(of: 2) else { throw DubbingExportError.riffOverflow }
     }
-    @discardableResult static func write(inputs: [URL], output: URL,
+    /// 按顺序拼接候选音频，并在段间插入静音。
+    ///
+    /// `pauses` 与 `inputs` 对齐，单位毫秒；末段之后的停顿不写进成品——
+    /// 句间停顿描述的是"两句之间"，不是成品尾巴。
+    @discardableResult static func write(inputs: [URL], pauses: [Int] = [], output: URL,
                                          onRead: (@Sendable (Int) -> Void)? = nil) throws -> UInt64 {
         guard !inputs.isEmpty else { throw DubbingExportError.incompleteProject }
         let payloads = try inputs.map { try parse($0, onRead: onRead) }
@@ -129,14 +151,28 @@ enum DubbingStreamingWAV {
             guard !overflow else { throw DubbingExportError.riffOverflow }
             try validatePCMSize(sum); count = sum
         }
+        // 静音字节一并计入总长，长度上限与偶数对齐都在建文件之前验完。
+        var silence: [UInt64] = []
+        for index in payloads.indices {
+            let requested = index < pauses.count ? pauses[index] : 0
+            let bytes = index == payloads.count - 1
+                ? 0
+                : UInt64(DubbingPause.byteCount(milliseconds: requested, sampleRate: format.sampleRate))
+            silence.append(bytes)
+            guard bytes > 0 else { continue }
+            let (sum, overflow) = count.addingReportingOverflow(bytes)
+            guard !overflow else { throw DubbingExportError.riffOverflow }
+            try validatePCMSize(sum); count = sum
+        }
         // All format and length checks finish before creating the output.
         guard FileManager.default.createFile(atPath: output.path, contents: nil) else { throw DubbingExportError.invalidDestination }
         var succeeded = false
         defer { if !succeeded { try? FileManager.default.removeItem(at: output) } }
         let destination = try FileHandle(forWritingTo: output); defer { try? destination.close() }
         try destination.write(contentsOf: header(format: format, bytes: UInt32(count)))
-        for (url, payload) in zip(inputs, payloads) {
+        for (index, pair) in zip(inputs, payloads).enumerated() {
             try Task.checkCancellation()
+            let (url, payload) = pair
             let source = try FileHandle(forReadingFrom: url)
             defer { try? source.close() }
             try source.seek(toOffset: payload.offset)
@@ -146,6 +182,13 @@ enum DubbingStreamingWAV {
                 let bytes = try read(source, count: Int(min(UInt64(chunkBytes), remaining)), onRead: onRead)
                 remaining -= UInt64(bytes.count)
                 try destination.write(contentsOf: bytes)
+            }
+            var gap = silence[index]
+            while gap > 0 {
+                try Task.checkCancellation()
+                let step = Int(min(UInt64(chunkBytes), gap))
+                try destination.write(contentsOf: silenceChunk.prefix(step))
+                gap -= UInt64(step)
             }
         }
         try destination.synchronize(); succeeded = true
@@ -194,5 +237,95 @@ enum DubbingStreamingWAV {
         data.append(Data("RIFF".utf8)); append(bytes + 36); data.append(Data("WAVEfmt ".utf8)); append(UInt32(16))
         append(UInt16(1)); append(UInt16(1)); append(UInt32(format.sampleRate)); append(UInt32(format.sampleRate * 2))
         append(UInt16(2)); append(UInt16(16)); data.append(Data("data".utf8)); append(bytes); return data
+    }
+}
+
+/// 成品旁边的片段清单。
+///
+/// 它是「导出顺序、正文、角色、停顿与实际音频一一对应」这件事的可核对形态：
+/// 音频里第 N 段就是清单里第 N 条，正文文件第 N 行也是它。
+/// 只写事实，不写推测——没有角色就是 `null`，没有停顿就是 0。
+enum DubbingExportManifest {
+    static let schemaVersion = "dubbing_segments_v1"
+
+    struct Entry: Codable, Equatable, Sendable {
+        let index: Int
+        let text: String
+        let roleID: String?
+        let roleName: String?
+        let voiceID: String?
+        let voiceName: String?
+        let voiceRevision: String?
+        let candidateID: String
+        let durationSeconds: Double?
+        let pauseAfterMilliseconds: Int
+
+        enum CodingKeys: String, CodingKey {
+            case index, text
+            case roleID = "role_id"
+            case roleName = "role_name"
+            case voiceID = "voice_id"
+            case voiceName = "voice_name"
+            case voiceRevision = "voice_revision"
+            case candidateID = "candidate_id"
+            case durationSeconds = "duration_seconds"
+            case pauseAfterMilliseconds = "pause_after_milliseconds"
+        }
+    }
+
+    struct Document: Codable, Equatable, Sendable {
+        let schemaVersion: String
+        let projectID: String
+        let projectTitle: String
+        let mode: String
+        let sourceRevision: String
+        let segments: [Entry]
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case projectID = "project_id"
+            case projectTitle = "project_title"
+            case mode
+            case sourceRevision = "source_revision"
+            case segments
+        }
+    }
+
+    static func make(
+        project: DubbingProject,
+        segments: [DubbingSegment],
+        candidates: [String: DubbingCandidate],
+        sourceRevision: String
+    ) -> Data {
+        let entries = segments.enumerated().map { index, segment -> Entry in
+            let role = project.resolvedRole(for: segment)
+            let candidate = segment.acceptedCandidateID.flatMap { candidates[$0] }
+            return Entry(
+                index: index + 1,
+                text: segment.text,
+                roleID: role?.id,
+                roleName: role?.name,
+                voiceID: project.resolvedVoiceID(for: segment),
+                voiceName: role?.voice?.voiceName ?? project.recipe.recipe?.voiceID,
+                voiceRevision: candidate?.provenance.recipe?.voiceRevision,
+                candidateID: segment.acceptedCandidateID ?? "",
+                durationSeconds: candidate?.durationSeconds,
+                // 末段之后的停顿不写进音频，清单里也不该声称有。
+                pauseAfterMilliseconds: index == segments.count - 1
+                    ? 0
+                    : segment.pauseAfterMilliseconds
+            )
+        }
+        let document = Document(
+            schemaVersion: schemaVersion,
+            projectID: project.id,
+            projectTitle: project.title,
+            mode: project.isMultiRole ? "multi_role" : "single_voice",
+            sourceRevision: sourceRevision,
+            segments: entries
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return (try? encoder.encode(document)) ?? Data()
     }
 }

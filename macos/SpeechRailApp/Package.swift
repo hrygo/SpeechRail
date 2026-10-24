@@ -154,6 +154,7 @@ let package = Package(
                 "CreativeWorkStore.swift",
                 "StoreCommitReceipt.swift",
                 "DubbingProjectStore.swift",
+                "DubbingCast.swift",
                 "DubbingExportWriter.swift",
                 "SessionActivityIndicators.swift",
                 "PreparedTeleprompterScript.swift",

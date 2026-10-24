@@ -455,7 +455,10 @@ public final class DubbingWorkflowModel {
 
     private var dubbingSelection: [String]? {
         guard let project = dubbingProject else { return nil }
-        return [project.id] + project.segments.map { $0.acceptedCandidateID ?? "" }
+        // 角色与停顿也进选择指纹：改了角色或停顿，成品就必须重新导出。
+        return [project.id] + project.segments.map {
+            "\($0.acceptedCandidateID ?? "")|\($0.roleID ?? "-")|\($0.pauseAfterMilliseconds)"
+        }
     }
 
     public var dubbingHasUnexportedAdoptions: Bool {
@@ -663,6 +666,248 @@ public final class DubbingWorkflowModel {
         }
     }
 
+    // MARK: - 多角色脚本
+
+    /// 从粘贴的脚本直接建立多角色项目：不需要已保存作品，也不需要 LLM 分析。
+    ///
+    /// 分段只来自文稿本身；角色只是「这段由谁念」的标注，首版不猜角色。
+    @discardableResult
+    public func createMultiRoleDubbingProject(
+        title: String,
+        scriptText: String,
+        roles: [DubbingRole]
+    ) async -> DubbingProject? {
+        closeDubbingProject()
+        let generation = dubbingRedoGeneration
+        let texts = DubbingSegmentPlanner.segments(from: scriptText)
+        guard !texts.isEmpty else {
+            dubbingMessage = "脚本是空的，请先粘贴要配音的内容。"
+            return nil
+        }
+        let cast: [DubbingRole]
+        do {
+            cast = try DubbingCastRules.validate(roles)
+        } catch {
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return nil
+        }
+        let projectID = "dub_" + UUID().uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let project = DubbingProject(
+            id: projectID,
+            title: trimmedTitle.isEmpty ? "多角色脚本" : String(trimmedTitle.prefix(80)),
+            scriptText: scriptText,
+            // 多角色项目没有一份能代表全部段落的项目配方；逐段有效性由角色运行事实判定。
+            recipe: .legacyUnknown,
+            segments: texts.enumerated().map { index, text in
+                DubbingSegment(id: "\(projectID)_s\(index + 1)", text: text)
+            },
+            cast: cast,
+            defaultRoleID: cast.first?.id
+        )
+        do {
+            let committed = try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.save(project, operationID: operationID)
+            }
+            let candidates = try await dubbingProjectStore.candidates(forProject: committed.id)
+            guard generation == dubbingRedoGeneration else { return committed }
+            dubbingProject = committed
+            dubbingCandidates = candidates
+            await refreshDubbingProjects()
+            guard generation == dubbingRedoGeneration else { return committed }
+            dubbingMessage = nil
+            return committed
+        } catch {
+            guard generation == dubbingRedoGeneration else { return nil }
+            dubbingMessage = "无法建立多角色项目，请检查磁盘权限和可用空间后重试。"
+            return nil
+        }
+    }
+
+    /// 角色与音色的对账结果。列表还没读到时为空——那时什么都不该断言。
+    public var dubbingCastIssues: [DubbingCastIssue] {
+        guard let project = dubbingProject else { return [] }
+        return DubbingCastAudit.issues(
+            cast: project.cast,
+            voices: creatorVoices,
+            voicesLoadState: creatorVoicesLoadState
+        )
+    }
+
+    /// 这一段的已采用版本是否已经和当前角色/声音对不上。
+    public func dubbingSegmentNeedsRedo(_ segment: DubbingSegment) -> Bool {
+        guard let project = dubbingProject, let id = segment.acceptedCandidateID,
+              let candidate = dubbingCandidates.first(where: { $0.id == id }) else { return false }
+        return project.rejection(for: candidate) != nil
+    }
+
+    public func dubbingRole(_ roleID: String?) -> DubbingRole? {
+        dubbingProject?.role(id: roleID)
+    }
+
+    /// 改角色表。所有改动都走同一次提交，失败时项目保持原样。
+    private func commitCast(
+        _ mutate: (inout [DubbingRole], inout String?) throws -> Void
+    ) async -> Bool {
+        guard let project = dubbingProject, dubbingBusySegmentID == nil else { return false }
+        var cast = project.cast
+        var defaultRoleID = project.defaultRoleID
+        do {
+            try mutate(&cast, &defaultRoleID)
+        } catch {
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+        let generation = dubbingRedoGeneration
+        do {
+            let updated = try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.updateCast(
+                    projectID: project.id,
+                    cast: cast,
+                    defaultRoleID: defaultRoleID,
+                    operationID: operationID
+                )
+            }
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else {
+                return true
+            }
+            dubbingProject = updated
+            dubbingMessage = nil
+            return true
+        } catch {
+            guard generation == dubbingRedoGeneration else { return false }
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+    }
+
+    @discardableResult
+    public func addDubbingRole(voice: DubbingVoiceBinding? = nil) async -> Bool {
+        await commitCast { cast, defaultRoleID in
+            let role = DubbingRole(
+                id: DubbingCastRules.newRoleID(existing: cast),
+                name: DubbingCastRules.newRoleName(existing: cast),
+                voice: voice
+            )
+            cast.append(role)
+            if defaultRoleID == nil { defaultRoleID = role.id }
+        }
+    }
+
+    @discardableResult
+    public func renameDubbingRole(_ roleID: String, to name: String) async -> Bool {
+        await commitCast { cast, _ in
+            guard let index = cast.firstIndex(where: { $0.id == roleID }) else {
+                throw DubbingProjectError.roleNotFound
+            }
+            cast[index].name = name
+        }
+    }
+
+    /// 给角色换声音。换完之后这个角色的旧候选会因声音不符被判失效，
+    /// 但采用记录原样保留——用户能看到「需要重新生成」，而不是被静默换声。
+    @discardableResult
+    public func bindDubbingVoice(
+        _ binding: DubbingVoiceBinding?,
+        toRole roleID: String
+    ) async -> Bool {
+        await commitCast { cast, _ in
+            guard let index = cast.firstIndex(where: { $0.id == roleID }) else {
+                throw DubbingProjectError.roleNotFound
+            }
+            cast[index].voice = binding
+            cast[index].runtime = nil
+            if binding?.mode == "clone" { cast[index].speed = 1.0 }
+        }
+    }
+
+    @discardableResult
+    public func setDubbingRoleSpeed(_ speed: Double, roleID: String) async -> Bool {
+        await commitCast { cast, _ in
+            guard let index = cast.firstIndex(where: { $0.id == roleID }) else {
+                throw DubbingProjectError.roleNotFound
+            }
+            guard speed >= 0.5, speed <= 2.0 else { throw DubbingProjectError.roleSpeedOutOfRange }
+            cast[index].speed = cast[index].voice?.mode == "clone" ? 1.0 : speed
+        }
+    }
+
+    /// 删角色。还有段落指着它时直接拒绝：先改派段落，再删角色。
+    @discardableResult
+    public func removeDubbingRole(_ roleID: String) async -> Bool {
+        await commitCast { cast, defaultRoleID in
+            guard let index = cast.firstIndex(where: { $0.id == roleID }) else {
+                throw DubbingProjectError.roleNotFound
+            }
+            guard dubbingProject?.segments.contains(where: { $0.roleID == roleID }) != true else {
+                // 角色还在用与角色不存在是两件事：说「找不到」会让用户去找一个好好存在的角色。
+                throw DubbingProjectError.roleStillInUse
+            }
+            cast.remove(at: index)
+            if defaultRoleID == roleID { defaultRoleID = cast.first?.id }
+        }
+    }
+
+    @discardableResult
+    public func setDefaultDubbingRole(_ roleID: String?) async -> Bool {
+        await commitCast { _, defaultRoleID in
+            defaultRoleID = roleID
+        }
+    }
+
+    @discardableResult
+    public func assignDubbingSegmentRole(_ segmentID: String, to roleID: String?) async -> Bool {
+        guard let project = dubbingProject, dubbingBusySegmentID == nil else { return false }
+        let generation = dubbingRedoGeneration
+        do {
+            let updated = try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.assignSegmentRole(
+                    segmentID: segmentID,
+                    inProject: project.id,
+                    roleID: roleID,
+                    operationID: operationID
+                )
+            }
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else {
+                return true
+            }
+            dubbingProject = updated
+            dubbingMessage = nil
+            return true
+        } catch {
+            guard generation == dubbingRedoGeneration else { return false }
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+    }
+
+    @discardableResult
+    public func setDubbingSegmentPause(_ segmentID: String, milliseconds: Int) async -> Bool {
+        guard let project = dubbingProject, dubbingBusySegmentID == nil else { return false }
+        let generation = dubbingRedoGeneration
+        do {
+            let updated = try await performStoreWrite(in: .projects) { operationID in
+                try await self.dubbingProjectStore.setSegmentPause(
+                    segmentID: segmentID,
+                    inProject: project.id,
+                    milliseconds: milliseconds,
+                    operationID: operationID
+                )
+            }
+            guard generation == dubbingRedoGeneration, dubbingProject?.id == project.id else {
+                return true
+            }
+            dubbingProject = updated
+            return true
+        } catch {
+            guard generation == dubbingRedoGeneration else { return false }
+            dubbingMessage = Self.dubbingErrorMessage(for: error)
+            return false
+        }
+    }
+
     /// 关闭当前段落项目。在途的重做立刻作废，落地结果不会写进下一个项目。
     public func closeDubbingProject() {
         dubbingRedoGeneration &+= 1
@@ -697,21 +942,41 @@ public final class DubbingWorkflowModel {
         guard let segment = project.segments.first(where: { $0.id == segmentID }) else {
             return
         }
-        // 没有配方摘要就无法证明"这次重做与原作品是同一制作条件"，因此整段拒绝。
-        guard project.recipe.recipe?.digest != nil else {
-            dubbingMessage = "这件作品没有记录完整的制作配方，无法安全地只重做其中一段。"
-            return
+        let voiceID: String
+        let speed: Double
+        if project.isMultiRole {
+            // 多角色项目：声音来自这一段的角色。角色没选声音就直说，不替他挑一个。
+            guard creatorVoicesLoadState == .loaded else {
+                dubbingMessage = "还没读到音色列表，无法确认这一段的角色是否可用，请先刷新一次。"
+                return
+            }
+            guard let role = project.resolvedRole(for: segment), let binding = role.voice else {
+                dubbingMessage = DubbingProjectError.segmentVoiceUnassigned.errorDescription
+                return
+            }
+            voiceID = binding.voiceID
+            speed = role.speed
+        } else {
+            // 没有配方摘要就无法证明"这次重做与原作品是同一制作条件"，因此整段拒绝。
+            guard project.recipe.recipe?.digest != nil else {
+                dubbingMessage = "这件作品没有记录完整的制作配方，无法安全地只重做其中一段。"
+                return
+            }
+            // 「列表没读到」与「音色不在列表里」是两件事：前者是我们还不知道，
+            // 后者才是这件作品的条件变了。把前者说成后者，会让用户去「音色库」
+            // 修一个根本没坏的音色。
+            guard creatorVoicesLoadState == .loaded else {
+                dubbingMessage = "还没读到音色列表，无法确认这件作品用的音色是否可用，请先刷新一次。"
+                return
+            }
+            guard let recipeVoiceID = project.recipe.recipe?.voiceID else {
+                dubbingMessage = "这件作品使用的音色不在当前的音色列表里，无法重做段落。"
+                return
+            }
+            voiceID = recipeVoiceID
+            speed = project.recipe.recipe?.effectiveSpeed ?? 1.0
         }
-        // 「列表没读到」与「音色不在列表里」是两件事：前者是我们还不知道，
-        // 后者才是这件作品的条件变了。把前者说成后者，会让用户去「音色库」
-        // 修一个根本没坏的音色。
-        guard creatorVoicesLoadState == .loaded else {
-            dubbingMessage = "还没读到音色列表，无法确认这件作品用的音色是否可用，请先刷新一次。"
-            return
-        }
-        guard let voiceID = project.recipe.recipe?.voiceID,
-              let voice = creatorVoices.first(where: { $0.id == voiceID })
-        else {
+        guard let voice = creatorVoices.first(where: { $0.id == voiceID }) else {
             dubbingMessage = "这件作品使用的音色不在当前的音色列表里，无法重做段落。"
             return
         }
@@ -719,7 +984,11 @@ public final class DubbingWorkflowModel {
             dubbingMessage = "这件作品使用的音色当前暂不可用，无法重做段落。"
             return
         }
-        let speed = project.recipe.recipe?.effectiveSpeed ?? 1.0
+        // 参考音色只支持 1.0x；角色上存了别的语速时在这里挡下，而不是发出一次注定失败的请求。
+        guard voice.mode != "clone" || speed == 1.0 else {
+            dubbingMessage = "参考音色只支持 1.0x 语速，请先把「\(voice.name)」所在角色的语速改回 1.0x。"
+            return
+        }
         dubbingBusySegmentID = segmentID
         dubbingMessage = nil
         dubbingRedoGeneration &+= 1
@@ -929,7 +1198,8 @@ public final class DubbingWorkflowModel {
     public func writeDubbingExport(to directory: URL) async -> Bool {
         // A saved export retries only its retained cleanup; target files may already have been edited.
         if let cleanup = exportCleanupLease, let committed = completedExportCopy,
-           committed.leaseID == cleanup.leaseID, committed.receipt.audioCommitted, committed.receipt.scriptCommitted {
+           committed.leaseID == cleanup.leaseID, committed.receipt.audioCommitted,
+           committed.receipt.scriptCommitted, committed.receipt.segmentsCommitted {
             let generation = exportGeneration
             await startDubbingExportCleanup()?.value
             if generation == exportGeneration { reportSavedDubbingExport(cleanup) }
@@ -940,7 +1210,8 @@ public final class DubbingWorkflowModel {
         let task = Task { [exportWriter] in
             try await exportWriter.copyPrepared(prepared,
                 audioDestination: directory.appendingPathComponent(prepared.audioFileName),
-                scriptDestination: directory.appendingPathComponent(prepared.scriptFileName))
+                scriptDestination: directory.appendingPathComponent(prepared.scriptFileName),
+                manifestDestination: directory.appendingPathComponent(prepared.manifestFileName))
         }
         exportCopyTask = task
         do {
@@ -958,9 +1229,9 @@ public final class DubbingWorkflowModel {
             guard generation == exportGeneration else { return false }
             exportCopyTask = nil
             if let failure = error as? ExportCopyFailure, failure.receipt.audioCommitted {
-                dubbingMessage = failure.receipt.scriptCommitted
-                    ? "两份文件已保存，但保存位置的同步未确认，请检查文件后重试。"
-                    : "已写入 \(prepared.audioFileName)，但正文没能写入：目标位置可能被占用或空间不足。"
+                dubbingMessage = failure.receipt.segmentsCommitted
+                    ? "三份文件已保存，但保存位置的同步未确认，请检查文件后重试。"
+                    : "已写入 \(prepared.audioFileName)，但正文或片段清单没能写入：目标位置可能被占用或空间不足。"
                 // A partial commit retains its immutable lease for an explicit retry.
             } else {
                 await discardDubbingExport()
@@ -989,8 +1260,8 @@ public final class DubbingWorkflowModel {
 
     private func reportSavedDubbingExport(_ prepared: PreparedDubbingExport) {
         dubbingMessage = exportCleanupLease?.leaseID == prepared.leaseID
-            ? "两份文件已保存，但导出临时文件尚未清理，请重试清理。"
-            : "已导出 \(prepared.audioFileName) 和 \(prepared.scriptFileName)。"
+            ? "三份文件已保存，但导出临时文件尚未清理，请重试清理。"
+            : "已导出 \(prepared.audioFileName)、\(prepared.scriptFileName) 和 \(prepared.manifestFileName)。"
     }
 
     /// One cleanup owns the single lease until removal succeeds; closing a page never loses its retry handle.
@@ -1024,6 +1295,20 @@ public final class DubbingWorkflowModel {
                  .candidateRuntimeChanged, .candidateConditionsChanged,
                  .candidateInUse, .projectHasAdoptedCandidates, .cleanupRequired:
                 projectError.errorDescription ?? "这个候选无法安全采用。"
+            case .candidateVoiceChanged:
+                "这一段的角色换了声音，旧候选是用之前的声音生成的。请重新生成这一段，或把角色改回原来的声音。"
+            case .segmentVoiceUnassigned:
+                "这一段还没有绑定角色或声音，请先给角色选一个音色。"
+            case .roleNotFound:
+                "找不到这个角色，可能已被删除。请刷新项目后重试。"
+            case .roleStillInUse:
+                "这个角色还有段落在用，请先把这些段落改派给其他角色，再删除角色。"
+            case .roleNameEmpty:
+                "角色名不能为空。"
+            case .roleNameDuplicate:
+                "已有同名角色，请换一个名字。"
+            case .roleSpeedOutOfRange:
+                "语速需要在 0.5x 到 2.0x 之间。"
             case .recoveryRequired:
                 "配音项目音频未通过完整性校验，请保留项目并打开诊断。"
             case .candidateNotFound, .segmentNotFound:

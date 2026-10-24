@@ -10,8 +10,15 @@ public struct DubbingProject: Codable, Equatable, Identifiable, Sendable {
     /// 用户保存的原始文稿。导出正文以段落为准，这里保留全文供编辑对照。
     public let scriptText: String
     /// 整个项目共享的制作配方。改动配方等于换一次制作，全部候选失效。
+    ///
+    /// 多角色项目的段落分属不同声音，没有一份"项目配方"能代表全部：
+    /// 这类项目的 `recipe` 只是建立时的来源记录，逐段有效性改由角色运行事实判定。
     public let recipe: RenderProvenanceSnapshot
     public var segments: [DubbingSegment]
+    /// 角色表。为空即单声音项目，与升级前的行为逐字一致。
+    public var cast: [DubbingRole]
+    /// 没有显式 `roleID` 的段落跟随这个角色。
+    public var defaultRoleID: String?
     public let createdAt: Date
 
     public init(
@@ -20,6 +27,8 @@ public struct DubbingProject: Codable, Equatable, Identifiable, Sendable {
         scriptText: String,
         recipe: RenderProvenanceSnapshot,
         segments: [DubbingSegment],
+        cast: [DubbingRole] = [],
+        defaultRoleID: String? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -27,7 +36,29 @@ public struct DubbingProject: Codable, Equatable, Identifiable, Sendable {
         self.scriptText = scriptText
         self.recipe = recipe
         self.segments = segments
+        self.cast = cast
+        self.defaultRoleID = defaultRoleID
         self.createdAt = createdAt
+    }
+
+    /// 有角色表就是多角色项目：逐段有效性按角色判定，不再比项目级配方摘要。
+    public var isMultiRole: Bool { !cast.isEmpty }
+
+    public func role(id: String?) -> DubbingRole? {
+        guard let id else { return nil }
+        return cast.first { $0.id == id }
+    }
+
+    /// 这一段实际由哪个角色念。段落没指定时回落到项目默认角色。
+    public func resolvedRole(for segment: DubbingSegment) -> DubbingRole? {
+        role(id: segment.roleID) ?? role(id: defaultRoleID)
+    }
+
+    /// 这一段现在应该用哪个声音。单声音项目回落到项目配方的声音。
+    public func resolvedVoiceID(for segment: DubbingSegment) -> String? {
+        if let voice = resolvedRole(for: segment)?.voice?.voiceID { return voice }
+        guard !isMultiRole else { return nil }
+        return recipe.recipe?.voiceID
     }
 
     /// 导出正文：只包含已采用候选对应的段落文本，按段落顺序拼接。
@@ -56,8 +87,28 @@ public struct DubbingProject: Codable, Equatable, Identifiable, Sendable {
             return .segmentNotFound
         }
         guard segment.text == candidate.text else { return .candidateTextChanged }
-        guard let projectDigest = recipe.recipe?.digest,
-              let candidateDigest = candidate.provenance.recipe?.digest else {
+        guard let candidateRecipe = candidate.provenance.recipe,
+              let candidateDigest = candidateRecipe.digest else {
+            return .candidateRecipeMissing
+        }
+        if isMultiRole {
+            // 多角色项目按「声音 + 这个角色的运行事实」判定。
+            // 换一个角色的声音只会让那一角色的候选失效，其它段落的采用不受影响。
+            guard let voiceID = resolvedVoiceID(for: segment) else {
+                return .segmentVoiceUnassigned
+            }
+            guard candidateRecipe.voiceID == voiceID else { return .candidateVoiceChanged }
+            guard let runtime = resolvedRole(for: segment)?.runtime else { return nil }
+            // 音色被改过（同一 id、新 revision）要单独说清，不要混进「运行版本变了」。
+            guard candidateRecipe.voiceRevision == runtime.voiceRevision else {
+                return .candidateVoiceChanged
+            }
+            guard DubbingRenderRuntime(recipe: candidateRecipe) == runtime else {
+                return .candidateRuntimeChanged
+            }
+            return nil
+        }
+        guard let projectDigest = recipe.recipe?.digest else {
             return .candidateRecipeMissing
         }
         guard projectDigest != candidateDigest else { return nil }
@@ -71,6 +122,24 @@ public struct DubbingProject: Codable, Equatable, Identifiable, Sendable {
            previous != current { return .candidateRuntimeChanged }
         return .candidateConditionsChanged
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, scriptText, recipe, segments, cast, defaultRoleID, createdAt
+    }
+
+    /// 早于多角色能力的记录没有 `cast` / `defaultRoleID`：
+    /// 读作空角色表，`isMultiRole` 因此为 false，走原来的单声音判定。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        scriptText = try container.decode(String.self, forKey: .scriptText)
+        recipe = try container.decode(RenderProvenanceSnapshot.self, forKey: .recipe)
+        segments = try container.decode([DubbingSegment].self, forKey: .segments)
+        cast = try container.decodeIfPresent([DubbingRole].self, forKey: .cast) ?? []
+        defaultRoleID = try container.decodeIfPresent(String.self, forKey: .defaultRoleID)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+    }
 }
 
 /// 项目中的一段。只有显式采用候选才决定这一段最终导出什么。
@@ -82,17 +151,25 @@ public struct DubbingSegment: Codable, Equatable, Identifiable, Sendable {
     /// 与"采用过一个候选"是两种不同状态，所以这里必须能存 nil。
     /// 撤销从这里回退，不删除任何音频。
     public var adoptionHistory: [String?]
+    /// 这一段由哪个角色念。`nil` 表示跟随项目默认角色；单声音项目里两者都为空。
+    public var roleID: String?
+    /// 这一段念完后插多长的静音。只影响装配，绝不进模型。
+    public var pauseAfterMilliseconds: Int
 
     public init(
         id: String,
         text: String,
         acceptedCandidateID: String? = nil,
-        adoptionHistory: [String?] = []
+        adoptionHistory: [String?] = [],
+        roleID: String? = nil,
+        pauseAfterMilliseconds: Int = 0
     ) {
         self.id = id
         self.text = text
         self.acceptedCandidateID = acceptedCandidateID
         self.adoptionHistory = adoptionHistory
+        self.roleID = roleID
+        self.pauseAfterMilliseconds = DubbingPause.clamped(pauseAfterMilliseconds)
     }
 
     /// 撤销一步采用；没有历史时返回 false，不改变当前采用项。
@@ -100,6 +177,24 @@ public struct DubbingSegment: Codable, Equatable, Identifiable, Sendable {
         guard let previous = adoptionHistory.popLast() else { return false }
         acceptedCandidateID = previous
         return true
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, text, acceptedCandidateID, adoptionHistory, roleID, pauseAfterMilliseconds
+    }
+
+    /// 早于多角色能力的记录没有 `roleID` / `pauseAfterMilliseconds`：
+    /// 缺字段读作「跟随默认角色、无停顿」，与升级前行为逐字一致。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        text = try container.decode(String.self, forKey: .text)
+        acceptedCandidateID = try container.decodeIfPresent(String.self, forKey: .acceptedCandidateID)
+        adoptionHistory = try container.decode([String?].self, forKey: .adoptionHistory)
+        roleID = try container.decodeIfPresent(String.self, forKey: .roleID)
+        pauseAfterMilliseconds = DubbingPause.clamped(
+            try container.decodeIfPresent(Int.self, forKey: .pauseAfterMilliseconds) ?? 0
+        )
     }
 }
 
@@ -135,7 +230,7 @@ public struct DubbingCandidate: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-public enum DubbingProjectError: Error, LocalizedError, Sendable {
+public enum DubbingProjectError: Error, LocalizedError, Equatable, Sendable {
     case invalidIdentifier
     case segmentNotFound
     case candidateNotFound
@@ -144,6 +239,17 @@ public enum DubbingProjectError: Error, LocalizedError, Sendable {
     case candidateTextChanged
     case candidateRuntimeChanged
     case candidateConditionsChanged
+    /// 候选是用另一个声音生成的：这一段的角色换过声音。
+    case candidateVoiceChanged
+    /// 多角色项目里这一段既没有角色，也没有项目默认角色。
+    case segmentVoiceUnassigned
+    case roleNotFound
+    /// 角色还在被段落引用：先改派段落，再删角色。与「找不到这个角色」是两件事。
+    case roleStillInUse
+    case roleNameEmpty
+    case roleNameDuplicate
+    /// 角色语速越界（0.5x–2.0x）。
+    case roleSpeedOutOfRange
     case candidateInUse
     case projectHasAdoptedCandidates
     case cleanupRequired
@@ -171,6 +277,20 @@ public enum DubbingProjectError: Error, LocalizedError, Sendable {
             "模型或运行版本已变化，请按这个候选的条件新建项目"
         case .candidateConditionsChanged:
             "制作条件已变化，请按这个候选的条件新建项目"
+        case .candidateVoiceChanged:
+            "这一段的角色已经换了声音，这个候选是用旧声音生成的，请按当前声音重新生成"
+        case .segmentVoiceUnassigned:
+            "这一段还没有绑定角色或声音，请先给角色选一个音色"
+        case .roleNotFound:
+            "找不到这个角色"
+        case .roleStillInUse:
+            "这个角色还有段落在用，请先把这些段落改派给其他角色再删除"
+        case .roleNameEmpty:
+            "角色名不能为空"
+        case .roleNameDuplicate:
+            "已有同名角色，请换一个名字"
+        case .roleSpeedOutOfRange:
+            "语速需要在 0.5x 到 2.0x 之间"
         case .candidateInUse:
             "这个候选仍被采用或撤销记录使用，请先撤销相关采用"
         case .projectHasAdoptedCandidates:
@@ -483,6 +603,106 @@ public actor DubbingProjectStore {
         }
     }
 
+    /// 改角色表：改名、绑定声音、增删角色都走这一次提交。
+    ///
+    /// 删角色不许留下悬空引用——还有段落指着它时直接拒绝，由调用方先改派段落。
+    /// 「自动回落到默认角色」看着方便，实际是一次静默换声，正是这个功能要避免的事。
+    @discardableResult
+    public func updateCast(
+        projectID: String,
+        cast: [DubbingRole],
+        defaultRoleID: String?,
+        operationID: UUID
+    ) throws -> StoreWriteResult<DubbingProject> {
+        let normalized = try DubbingCastRules.validate(cast)
+        return try withWriteReceipt(operationID: operationID) {
+            try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                    throw DubbingProjectError.candidateNotFound
+                }
+                var project = records[index].project
+                let roleIDs = Set(normalized.map(\.id))
+                if let defaultRoleID, !roleIDs.contains(defaultRoleID) {
+                    throw DubbingProjectError.roleNotFound
+                }
+                guard project.segments.allSatisfy({ segment in
+                    segment.roleID.map(roleIDs.contains) ?? true
+                }) else {
+                    // 角色还在用与角色不存在是两件事：说「找不到」会让用户去找一个好好存在的角色。
+                    throw DubbingProjectError.roleStillInUse
+                }
+                project.cast = normalized
+                project.defaultRoleID = defaultRoleID
+                records[index].project = project
+                try commitUnlocked(records: records, operation: "cast")
+                return project
+            }
+        }
+    }
+
+    /// 把一段改派给另一个角色。采用关系原样保留：旧候选会因声音不符被判失效，
+    /// 由 UI 明确提示「需要重新生成」，不在这里替用户做决定。
+    @discardableResult
+    public func assignSegmentRole(
+        segmentID: String,
+        inProject projectID: String,
+        roleID: String?,
+        operationID: UUID
+    ) throws -> StoreWriteResult<DubbingProject> {
+        try withWriteReceipt(operationID: operationID) {
+            try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                    throw DubbingProjectError.candidateNotFound
+                }
+                guard let segmentIndex = records[index].project.segments.firstIndex(where: {
+                    $0.id == segmentID
+                }) else {
+                    throw DubbingProjectError.segmentNotFound
+                }
+                if let roleID,
+                   !records[index].project.cast.contains(where: { $0.id == roleID }) {
+                    throw DubbingProjectError.roleNotFound
+                }
+                records[index].project.segments[segmentIndex].roleID = roleID
+                try commitUnlocked(records: records, operation: "segment_role")
+                return records[index].project
+            }
+        }
+    }
+
+    /// 设置一段的句末停顿。只影响装配，不改动任何候选。
+    @discardableResult
+    public func setSegmentPause(
+        segmentID: String,
+        inProject projectID: String,
+        milliseconds: Int,
+        operationID: UUID
+    ) throws -> StoreWriteResult<DubbingProject> {
+        try withWriteReceipt(operationID: operationID) {
+            try withRecoveredLibrary {
+                var records = try readRecordsUnlocked()
+                guard let index = records.firstIndex(where: { $0.project.id == projectID }) else {
+                    throw DubbingProjectError.candidateNotFound
+                }
+                guard let segmentIndex = records[index].project.segments.firstIndex(where: {
+                    $0.id == segmentID
+                }) else {
+                    throw DubbingProjectError.segmentNotFound
+                }
+                let clamped = DubbingPause.clamped(milliseconds)
+                guard records[index].project.segments[segmentIndex].pauseAfterMilliseconds != clamped
+                else {
+                    return records[index].project
+                }
+                records[index].project.segments[segmentIndex].pauseAfterMilliseconds = clamped
+                try commitUnlocked(records: records, operation: "segment_pause")
+                return records[index].project
+            }
+        }
+    }
+
     /// 保存一次段落重做的候选。候选不会自动被采用。
     @discardableResult
     public func addCandidate(
@@ -543,6 +763,7 @@ public actor DubbingProjectStore {
                     durationSeconds: candidate.durationSeconds
                 )
                 records[index].candidates.append(committed)
+                Self.fixRoleRuntime(in: &records[index].project, for: committed)
                 try commitUnlocked(
                     records: records,
                     operation: "candidate",
@@ -627,6 +848,18 @@ public actor DubbingProjectStore {
         }
     }
 
+    /// 角色第一次成功渲染时固定运行事实；之后这个角色的候选都要和它对得上。
+    static func fixRoleRuntime(in project: inout DubbingProject, for candidate: DubbingCandidate) {
+        guard project.isMultiRole,
+              let segment = project.segments.first(where: { $0.id == candidate.segmentID }),
+              let roleID = project.resolvedRole(for: segment)?.id,
+              let roleIndex = project.cast.firstIndex(where: { $0.id == roleID }),
+              project.cast[roleIndex].runtime == nil,
+              let runtime = DubbingRenderRuntime(recipe: candidate.provenance.recipe)
+        else { return }
+        project.cast[roleIndex].runtime = runtime
+    }
+
     public func audioURL(for candidate: DubbingCandidate) throws -> URL {
         try withRecoveredLibrary {
             let owned = try readRecordsUnlocked().lazy.flatMap(\.candidates).first { $0.id == candidate.id }
@@ -694,15 +927,21 @@ public actor DubbingProjectStore {
             let record = try recordUnlocked(projectID: projectID)
             let byID = Dictionary(record.candidates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             var inputs: [URL] = []
+            var adopted: [DubbingSegment] = []
             for segment in record.project.segments {
                 guard let id = segment.acceptedCandidateID, let candidate = byID[id],
-                      candidate.segmentID == segment.id, candidate.text == segment.text,
-                      let digest = record.project.recipe.recipe?.digest,
-                      digest == candidate.provenance.recipe?.digest else { throw DubbingExportError.incompleteProject }
+                      candidate.segmentID == segment.id, candidate.text == segment.text
+                else { throw DubbingExportError.incompleteProject }
+                // 逐段判定：多角色项目按角色声音与运行事实，单声音项目仍按项目配方摘要。
+                // 未通过就是不完整，绝不跳过这一段拼出一个「看起来完整」的成品。
+                guard record.project.rejection(for: candidate) == nil else {
+                    throw DubbingExportError.incompleteProject
+                }
                 guard Self.isSafeAudioFileName(candidate.audioFileName) else { throw DubbingProjectError.invalidIdentifier }
                 let url = directory.appendingPathComponent(candidate.audioFileName)
                 guard !operations.isSymbolicLink(at: url) else { throw DubbingProjectError.candidateNotAdoptable }
                 inputs.append(url)
+                adopted.append(segment)
                 if trackMetrics { measurement.candidateFiles = inputs.count }
             }
             guard !inputs.isEmpty else { throw DubbingExportError.incompleteProject }
@@ -711,11 +950,13 @@ public actor DubbingProjectStore {
             var succeeded = false
             defer { if !succeeded { try? FileManager.default.removeItem(at: temp) } }
             let audio = temp.appendingPathComponent("audio.wav"), script = temp.appendingPathComponent("script.txt")
-            let bytes = try DubbingStreamingWAV.write(inputs: inputs, output: audio)
+            let manifest = temp.appendingPathComponent("segments.json")
+            let pauses = adopted.map(\.pauseAfterMilliseconds)
+            let bytes = try DubbingStreamingWAV.write(inputs: inputs, pauses: pauses, output: audio)
             if trackMetrics { measurement.bytesWritten = Int(clamping: bytes) }
             guard FileManager.default.createFile(atPath: script.path, contents: nil) else { throw DubbingExportError.invalidDestination }
             let handle = try FileHandle(forWritingTo: script); defer { try? handle.close() }
-            for (index, segment) in record.project.segments.enumerated() {
+            for (index, segment) in adopted.enumerated() {
                 try Task.checkCancellation()
                 if index > 0 {
                     try handle.write(contentsOf: Data([10]))
@@ -732,9 +973,22 @@ public actor DubbingProjectStore {
             try handle.synchronize()
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]; encoder.dateEncodingStrategy = .iso8601
             let revision = CreativeWorkTransaction.digest(try encoder.encode(record))
+            // 片段清单与正文、音频出自同一次采用决策，因此三者一一对应。
+            let manifestData = try DubbingExportManifest.make(
+                project: record.project,
+                segments: adopted,
+                candidates: byID,
+                sourceRevision: revision
+            )
+            try operations.write(manifestData, to: manifest)
+            try operations.synchronize(at: manifest)
+            if trackMetrics { measurement.recordWrittenBytes(manifestData.count) }
             activeExportLease = (id, temp); succeeded = true
-            return .init(leaseID: id, audioURL: audio, scriptURL: script, sourceRevision: revision,
-                         audioBytes: bytes, baseName: Self.exportBaseName(for: record.project.title))
+            return .init(
+                leaseID: id, audioURL: audio, scriptURL: script, manifestURL: manifest,
+                sourceRevision: revision, audioBytes: bytes,
+                baseName: Self.exportBaseName(for: record.project.title)
+            )
         }
     }
     public func releaseExport(leaseID: UUID) throws {
@@ -1046,7 +1300,8 @@ public actor DubbingProjectStore {
         try operations.synchronize(at: transactionsDirectory)
     }
 
-    private static func isSafeIdentifier(_ value: String) -> Bool {
+    /// 角色 id 与段落/候选 id 用同一套校验：都要落进文件名与索引，不能各写一份。
+    static func isSafeIdentifier(_ value: String) -> Bool {
         value.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil
     }
 
