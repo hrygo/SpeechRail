@@ -354,3 +354,60 @@ public enum AudiobookProductionWiring {
         )
     }
 }
+
+/// T17 队列的默认执行器：把「一份已确认的计划」翻译成对
+/// `AudiobookProductionController` 的一次 start/pause。队列因此不需要知道
+/// 片段怎么渲染、音频提交到哪个库，也不需要知道服务端有哪些任务。
+public struct LiveAudiobookProductionQueueExecutor: AudiobookProductionQueueExecutor, @unchecked Sendable {
+    private let controller: AudiobookProductionController
+    private let store: AudiobookProjectStore
+
+    public init(controller: AudiobookProductionController, store: AudiobookProjectStore) {
+        self.controller = controller
+        self.store = store
+    }
+
+    public func execute(_ request: AudiobookProductionQueueRequest) async throws -> AudiobookProductionQueueOutcome {
+        do {
+            try await controller.start(
+                bookID: request.plan.bookID,
+                chapterIDs: request.plan.chapterIDs,
+                resumingTaskID: request.continuesTaskID,
+                expectedSourceID: request.plan.sourceID,
+                approvedPlan: request.plan
+            )
+        } catch is CancellationError {
+            return await stoppedOutcome(bookID: request.plan.bookID)
+        } catch let error as AudiobookProductionError where error == .cancelled {
+            // 用户请求的停止是正常收尾，不是失败。已提交片段和检查点都还在。
+            return await stoppedOutcome(bookID: request.plan.bookID)
+        }
+        let progress = await controller.progress(for: request.plan.bookID)
+        return AudiobookProductionQueueOutcome(
+            taskID: await lastAttemptTaskID(for: request.plan.bookID),
+            completedFragments: progress?.completedFragments ?? 0,
+            reusedFragments: progress?.reusedFragments ?? 0,
+            unconfirmedRemoteStopFragmentID: progress?.unconfirmedRemoteStopFragmentID
+        )
+    }
+
+    private func stoppedOutcome(bookID: UUID) async -> AudiobookProductionQueueOutcome {
+        let progress = await controller.progress(for: bookID)
+        return AudiobookProductionQueueOutcome(
+            taskID: await lastAttemptTaskID(for: bookID),
+            completedFragments: progress?.completedFragments ?? 0,
+            reusedFragments: progress?.reusedFragments ?? 0,
+            unconfirmedRemoteStopFragmentID: progress?.unconfirmedRemoteStopFragmentID,
+            stoppedByRequest: true
+        )
+    }
+
+    /// 控制器不直接暴露任务身份；检查点是它的持久投影，重试据此续跑。
+    public func lastAttemptTaskID(for bookID: UUID) async -> UUID? {
+        try? await store.productionCheckpoint(for: bookID)?.taskID
+    }
+
+    public func cancelActive() async {
+        await controller.pause()
+    }
+}
