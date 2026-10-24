@@ -446,7 +446,11 @@ def test_consumption_admission_is_outside_the_transport_deadline() -> None:
     async def run() -> None:
         synth = _FakeSynthesizer()
         sink = _Sink()
-        window = TtsAudioWindow(4, inactivity_seconds=0.2)
+        # The point is that a blocked admission never spends the transport
+        # deadline, so the admission budget has to stay far above it while also
+        # surviving a scheduling stall on a loaded runner. A sub-second window
+        # would turn this assertion into a wall-clock race.
+        window = TtsAudioWindow(4, inactivity_seconds=1.0)
         controller = await _service(synth).open(
             options=_options(),
             sink=sink,

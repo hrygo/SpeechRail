@@ -113,16 +113,31 @@ class _PipeTransport:
 
 
 def test_real_pipe_pipeline_survives_healthy_consumption_longer_than_deadline() -> None:
+    # Every layer here is real (pipes, threads, event loop), so the budgets are
+    # wall clock and must survive a loaded machine. The CI gate runs two xdist
+    # workers under coverage while building a wheel, and a 0.2 s budget was
+    # observed dying on a scheduler stall rather than on a stopped consumer.
+    # Sizing rule: one deadline must sit far above that noise floor, and the
+    # total consumption must still outlast one deadline — otherwise the test
+    # would stop proving that progress, not total time, keeps the stream alive.
+    slow_consumer_seconds = 1.0
+    frames = 80
+    per_frame_seconds = 0.02  # frames * per_frame = 1.6 s > one deadline
+    assert frames * per_frame_seconds > slow_consumer_seconds
+
     async def run() -> None:
         options = TtsStreamOptions(request_id="pipe", response_id="pipe-response", voice="serena")
-        limits = TtsStreamLimits(max_pending_audio_bytes=7_680, slow_consumer_seconds=0.2)
+        limits = TtsStreamLimits(
+            max_pending_audio_bytes=7_680, slow_consumer_seconds=slow_consumer_seconds
+        )
         transport = _PipeTransport(options, limits)
+        assert transport.model.remaining == frames
         client = Qwen3TtsIncrementalSynthesizer(transport, stream_protocol=1)
 
         governor = ResourceGovernor(
             GovernorLimits(total_capacity=2, realtime_reserved_capacity=1, max_pending_per_class=2)
         )
-        window = TtsAudioWindow(7_680, inactivity_seconds=0.2)
+        window = TtsAudioWindow(7_680, inactivity_seconds=slow_consumer_seconds)
         playback: asyncio.Queue[int | None] = asyncio.Queue(maxsize=2)
         received: list[TtsStreamEvent] = []
         max_unconsumed = 0
@@ -130,7 +145,7 @@ def test_real_pipe_pipeline_survives_healthy_consumption_longer_than_deadline() 
         async def consume() -> None:
             offset = 0
             while (samples := await playback.get()) is not None:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(per_frame_seconds)
                 offset += samples
                 window.acknowledge(offset)
 
@@ -158,8 +173,8 @@ def test_real_pipe_pipeline_survives_healthy_consumption_longer_than_deadline() 
             assert controller.terminal is TtsStreamTerminal.COMPLETED
             audio = [event for event in received if event.kind is TtsStreamEventKind.AUDIO]
             pcm = b"".join(event.pcm16 for event in audio)
-            assert len(pcm) == 80 * 1_920 * 2
-            assert pcm[:-240] == b"\x01\x00" * (80 * 1_920 - 120)
+            assert len(pcm) == frames * 1_920 * 2
+            assert pcm[:-240] == b"\x01\x00" * (frames * 1_920 - 120)
             assert pcm[-2:] == b"\x00\x00"
             offset = 0
             for event in audio:

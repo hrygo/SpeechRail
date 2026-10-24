@@ -26,10 +26,18 @@ class TtsAudioWindow:
         loop = asyncio.get_running_loop()
         waiting_since = loop.time()
         while not self.closed:
+            # Clear before testing credits. An ACK that lands between the credit
+            # test and the clear would otherwise be lost: its `set()` would be
+            # erased, and the sender would sleep out a whole deadline before
+            # noticing the credit it already had.
+            self._changed.clear()
+            # A close() that raced with the clear above would otherwise leave
+            # this sender asleep for a whole deadline before it noticed.
+            if self.closed:
+                return False
             if 2 * (self.sent_samples - self.consumed_samples + samples) <= self.maximum_bytes:
                 self.sent_samples += samples
                 return True
-            self._changed.clear()
             remaining = self._inactivity_seconds - (
                 loop.time() - max(waiting_since, self._last_progress_at)
             )

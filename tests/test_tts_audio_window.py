@@ -10,11 +10,15 @@ from speechrail.domain.tts_stream import TtsStreamError
 
 def test_consumption_progress_extends_wait_beyond_a_single_deadline() -> None:
     async def run() -> None:
-        window = TtsAudioWindow(8, inactivity_seconds=0.1)
+        # Only four ACKs can land before the window grants credit, so the whole
+        # utterance is 4 * 0.15 s and the deadline has to sit below that while
+        # staying well above a scheduler stall on a loaded runner. The old
+        # 0.04 s / 0.1 s pair left just 100 ms of tolerance and flaked in CI.
+        window = TtsAudioWindow(8, inactivity_seconds=0.5)
         await window.reserve(8)
         pending = asyncio.create_task(window.reserve(8))
         for offset in (1, 2, 3, 4):
-            await asyncio.sleep(0.04)
+            await asyncio.sleep(0.15)
             window.acknowledge(offset)
         assert await pending
         assert window.sent_samples == 8
