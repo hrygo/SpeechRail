@@ -32,6 +32,7 @@ struct SpeakerLabelingSheet: View {
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
                 Button("关闭") { close() }
                     .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.cancelAction)
             }
             if let sessionID {
                 ScrollView(.vertical) {

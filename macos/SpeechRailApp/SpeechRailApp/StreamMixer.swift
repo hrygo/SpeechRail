@@ -81,6 +81,8 @@ actor StreamMixer {
     private struct Slot {
         var generation = UUID()
         var active = false, replacing = false, completed = false, running = false
+        var hasProduced = false
+        var hadDataLastTick = false
         var ring = InputRing()
         var task: Task<Void, Never>?
     }
@@ -165,6 +167,7 @@ actor StreamMixer {
         guard var slot = slots[sourceID] else { return }
         let generation = slot.generation, task = slot.task
         slot.active = false; slot.replacing = true; slot.ring.clear()
+        slot.hasProduced = false; slot.hadDataLastTick = false
         slots[sourceID] = slot
         task?.cancel(); await task?.value
         if slots[sourceID]?.generation == generation {
@@ -213,6 +216,7 @@ actor StreamMixer {
             slot.completed = true; slot.active = slot.ring.bytes > 0
         } else {
             slot.active = false; slot.ring.clear()
+            slot.hadDataLastTick = false
         }
         slots[sourceID] = slot
     }
@@ -246,14 +250,25 @@ actor StreamMixer {
             for key in slots.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
                 guard slots[key]?.active == true else { continue }
                 let bytes = slots[key]?.ring.bytes ?? 0
-                guard bytes >= frames * 2 || (whileStopping && bytes > 0) else { didGap = true; continue }
-                if bytes < frames * 2 { didGap = true }
-                let evidence = try slots[key]!.ring.take(into: &mixed, now: uptime)
-                if let stamp = evidence.0 { capturedUptime = min(capturedUptime ?? stamp.capturedUptimeNanoseconds, stamp.capturedUptimeNanoseconds) }
-                if let instant = evidence.1 { capturedAt = min(capturedAt ?? instant, instant) }
-                if let watermark = evidence.2 { watermarks.append(watermark) }
-                served += 1
-                if slots[key]?.completed == true, slots[key]?.ring.bytes == 0 { slots[key]?.active = false }
+                if bytes >= frames * 2 || (whileStopping && bytes > 0) {
+                    if bytes < frames * 2, slots[key]?.hadDataLastTick == true {
+                        didGap = true
+                    }
+                    let evidence = try slots[key]!.ring.take(into: &mixed, now: uptime)
+                    if let stamp = evidence.0 { capturedUptime = min(capturedUptime ?? stamp.capturedUptimeNanoseconds, stamp.capturedUptimeNanoseconds) }
+                    if let instant = evidence.1 { capturedAt = min(capturedAt ?? instant, instant) }
+                    if let watermark = evidence.2 { watermarks.append(watermark) }
+                    served += 1
+                    slots[key]?.hasProduced = true
+                    slots[key]?.hadDataLastTick = true
+                    if slots[key]?.completed == true, slots[key]?.ring.bytes == 0 { slots[key]?.active = false }
+                } else {
+                    if slots[key]?.hasProduced == true && slots[key]?.hadDataLastTick == true && slots[key]?.completed == false {
+                        didGap = true
+                    }
+                    slots[key]?.hadDataLastTick = false
+                    continue
+                }
             }
         } catch {
             outcome = .failed

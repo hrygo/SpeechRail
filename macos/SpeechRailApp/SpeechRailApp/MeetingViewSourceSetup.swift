@@ -80,6 +80,7 @@ extension MeetingView {
                     }
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.md)
 
+                    let hasValidSource = usesMicrophone || !systemApps.isEmpty
                     Button {
                         Task { await start() }
                     } label: {
@@ -94,8 +95,10 @@ extension MeetingView {
                         }
                     }
                     .speechRailButton(.primary)
-                    .disabled(meeting.minutes.isBusy)
-                    .help("按当前所选音源开始录制（快捷键 ⌘⇧N）")
+                    .disabled(meeting.minutes.isBusy || !hasValidSource)
+                    .help(!hasValidSource
+                        ? "请先开启麦克风或选择至少一个要录制声音的应用"
+                        : "按当前所选音源开始录制（快捷键 ⌘⇧N）")
                 }
 
                 if meeting.minutes.isBusy {
@@ -264,10 +267,10 @@ extension MeetingView {
                         .font(SpeechRailDesignTokens.Typography.sectionTitle)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                        Text("未检测到正在出声的普通应用程序")
+                        Text("未检测到正在运行的音频应用程序")
                             .font(SpeechRailDesignTokens.Typography.calloutMedium)
                             .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                        Text("请先启动会议或音乐软件并播放声音，然后点击右上角「重新扫描」。")
+                        Text("请先启动腾讯会议、微信、Zoom 或音乐等软件并播放声音，然后点击右上角「重新扫描」。")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
@@ -483,7 +486,7 @@ extension MeetingView {
         var parts: [String] = []
         if usesMicrophone { parts.append("麦克风") }
         if !systemApps.isEmpty { parts.append(systemApps.map(\.name).joined(separator: "、")) }
-        return parts.isEmpty ? "还没有选来源" : "将录：" + parts.joined(separator: " + ")
+        return parts.isEmpty ? "未选择声音来源" : parts.joined(separator: " + ")
     }
 
     private func binding(for app: SystemAudioApp) -> Binding<Bool> {

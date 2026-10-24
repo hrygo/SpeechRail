@@ -184,16 +184,39 @@ public struct SpeakerLabelingPanel: View {
                     .speechRailPointerCursor()
 
                     let others = labeling.speakers.filter { $0.label != speaker.label }
-                    if let target = others.first {
+                    if others.count == 1, let target = others.first {
                         Button("与 \(labeling.displayText(for:target.label)) 合并") {
                             Task { await labeling.merge(label: speaker.label, into: target.label) }
                         }
                         .buttonStyle(.link)
                         .speechRailPointerCursor()
-                        .help("这两个标签的行都保留；合并只改显示名，可回溯")
+                        .help("这两个标签的发言都会保留；合并只改显示名，随时可回溯")
+                    } else if others.count > 1 {
+                        Menu {
+                            if let suggestion = speaker.suggestedMergeInto,
+                               let target = others.first(where: { $0.label == suggestion }) {
+                                Button("与 \(labeling.displayText(for:target.label)) 合并（系统推荐）") {
+                                    Task { await labeling.merge(label: speaker.label, into: target.label) }
+                                }
+                                Divider()
+                            }
+                            ForEach(others.filter { $0.label != speaker.suggestedMergeInto }) { target in
+                                Button("与 \(labeling.displayText(for:target.label)) 合并") {
+                                    Task { await labeling.merge(label: speaker.label, into: target.label) }
+                                }
+                            }
+                        } label: {
+                            Text("与其他发言人合并…")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.visible)
+                        .fixedSize()
+                        .speechRailPointerCursor()
+                        .help("将当前发言人的记录与选定的其他发言人合并")
                     }
                     if let suggestion = speaker.suggestedMergeInto, others.contains(where: { $0.label == suggestion }) {
-                        Text("声纹相近，可能与 \(labeling.displayText(for: suggestion)) 是同一人")
+                        Text("声学特征相近，可能与 \(labeling.displayText(for: suggestion)) 是同一人")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     }

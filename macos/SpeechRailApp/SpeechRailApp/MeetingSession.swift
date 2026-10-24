@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 import SpeechRailControlKit
 
 // 会议助手（`SESSIONS-SPEC` §6.2、§14.1、§14.3、§16.7；`TECHNICAL-DESIGN` §5.6）。
@@ -20,6 +21,7 @@ import SpeechRailControlKit
 @MainActor
 @Observable
 public final class MeetingSession {
+    private static let diagnostics = Logger(subsystem: "com.speechrail.desktop", category: "MeetingSession")
     public enum Phase: String, Sendable, Equatable {
         case idle
         case preparing
@@ -1542,15 +1544,12 @@ public final class MeetingSession {
         defer {
             if epoch == recoveryEpoch { isReconnectingSystemAudio = false }
         }
-        _ = await coordinator.markInterruption(.sourceLost, atOrdinal: currentOrdinal)
         guard epoch == recoveryEpoch, phase == .recording, !isStoppingIntentionally else { return }
         let reconnected = await audio.restartSystemAudio()
         guard epoch == recoveryEpoch, phase == .recording, !isStoppingIntentionally else { return }
         if reconnected {
-            await coordinator.resumeAfterInterruption()
-            guard epoch == recoveryEpoch, phase == .recording, !isStoppingIntentionally else { return }
             reconnectedSources += 1
-            lastFailure = "音频采集连接曾中断（\(reason)）；已重新建立连接，中断期间可能漏录，请确认文字记录继续更新。"
+            Self.diagnostics.notice("system_audio_reconnected reason=\(reason, privacy: .public) attempt=\(self.systemAudioRecoveryAttempts.count)")
         } else {
             await enterInterruption(.sourceLost,
                 note: "音频采集没有恢复（\(reason)）。已保存的文字仍在，请检查声音来源后重试录制。",

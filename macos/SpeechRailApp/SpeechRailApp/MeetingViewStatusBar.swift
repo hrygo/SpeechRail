@@ -76,6 +76,7 @@ extension MeetingView {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .speechRailPointerCursor()
                 .help("只是暂时不把声音送进去；会话、文字记录都在，麦克风也还归这一场")
                 .accessibilityLabel(meeting.isPaused ? "继续录制会议" : "暂停录制会议")
                 .accessibilityValue(meeting.isPaused ? "已暂停" : "正在录制")
@@ -148,14 +149,17 @@ extension MeetingView {
         return MeetingAxisProjection(
             readiness: meeting.blocked.map { .failed($0.title) } ?? (live ? .ready : .idle),
             capture: live ? axis(for: sourceCapture) : .idle,
-            // 采集层没有独立的"识别已连上"标志；这里用**上行有没有断过**近似，
-            // 采集层补上显式标志之后要换掉。
-            recognition: live
-                ? (meeting.interruption == nil ? .active : .failed("上行中断过"))
-                : .idle,
+            // 识别轴：区分正常识别、重连降级、中断与空闲
+            recognition: {
+                if meeting.phase == .interrupted { return .failed("识别连接已中断") }
+                if meeting.phase.isLive {
+                    return meeting.isReconnectingSystemAudio ? .degraded("正在重新连接识别") : .active
+                }
+                return .idle
+            }(),
             persistence: meeting.storedLineCount > 0 ? .ready : (live ? .active : .idle),
             // 保存与索引分开报（§6.5）：存下了不等于搜得到。
-            index: meeting.gapCount > 0 ? .degraded("补过 \(meeting.gapCount) 处静音") : .ready,
+            index: meeting.storedLineCount > 0 ? .ready : (live ? .active : .idle),
             // 审阅轴之前恒为 .idle，等于界面明明有待复核的结论却什么都不说。
             review: MeetingAxisProjection.reviewState(verdicts: reviewVerdicts)
         )
@@ -195,10 +199,10 @@ extension MeetingView {
             facts.append("\(meeting.labeling.labels.count) 位发言人")
         }
         facts.append("\(meeting.storedLineCount) 段对话已记录")
-        if meeting.gapCount > 0 { facts.append("\(meeting.gapCount) 处补过静音") }
-        if meeting.isMicrophoneMuted, meeting.isPaused { facts.append("麦克风已静音") }
+        if meeting.gapCount > 0 { facts.append("音频衔接补偿 \(meeting.gapCount) 次") }
+        if meeting.isMicrophoneMuted && !meeting.isPaused { facts.append("麦克风已静音") }
         if meeting.reconnectedSources > 0 {
-            facts.append("接回过 \(meeting.reconnectedSources) 次")
+            facts.append("已恢复连接 \(meeting.reconnectedSources) 次")
         }
         // 渐进式披露：仅当某条轴存在故障或降级时才在主状态带呈现警示，常态不无谓堆砌「正常」技术日志
         for problem in axisProjection.problems {

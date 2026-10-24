@@ -274,9 +274,17 @@ extension MeetingView {
                     }
                 }
                 if line.isDeviceSwitch {
-                    Text("换设备")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(SpeechRailDesignTokens.Typography.chipIcon)
+                        Text("已切换录音设备")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                    }
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
+                    .background(SpeechRailDesignTokens.Color.recessedField, in: Capsule())
+                    .help("系统在此处切换了音频输入设备，时间线与转录已自动连续对齐")
                 }
             }
             Spacer(minLength: 0)

@@ -4444,6 +4444,8 @@ struct InputLevelSheet: View {
                 Spacer(minLength: 0)
                 Button("关闭") { dismiss() }
                     .speechRailButton(.primary)
+                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.cancelAction)
             }
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)

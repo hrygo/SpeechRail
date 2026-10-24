@@ -434,6 +434,8 @@ struct MeetingKnowledgeLibraryView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("好") { openItemsPresented = false }
+                        .keyboardShortcut(.defaultAction)
+                        .keyboardShortcut(.cancelAction)
                 }
             }
         }
@@ -514,6 +516,8 @@ struct MeetingKnowledgeLibraryView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("好") { conflictsPresented = false }
+                        .keyboardShortcut(.defaultAction)
+                        .keyboardShortcut(.cancelAction)
                 }
             }
         }
@@ -879,6 +883,8 @@ struct MeetingKnowledgeLibraryView: View {
                         prepPresented = false
                         model.clearPrepDraft()
                     }
+                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.cancelAction)
                 }
             }
         }
@@ -1550,6 +1556,7 @@ struct MeetingKnowledgeLibraryView: View {
                 }
                 Button("好", role: .cancel) { manageProjectsPresented = false }
                     .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.cancelAction)
             }
         }
         .padding(SpeechRailDesignTokens.Layout.contentPadding)

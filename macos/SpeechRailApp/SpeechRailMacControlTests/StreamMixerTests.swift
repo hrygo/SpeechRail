@@ -218,4 +218,58 @@ struct StreamMixerTests {
 
         await mixer.stop()
     }
+
+    @Test func testSilentSlotDoesNotAccumulateGapsEveryTick() async throws {
+        let mixer = StreamMixer(automaticTicks: false)
+        let output = await mixer.start()
+        var reader = output.makeAsyncIterator()
+        let mic = AudioChunkStream.makeStream()
+        let sys = AudioChunkStream.makeStream()
+        let micID = UUID(), sysID = UUID()
+        try await mixer.attach(sourceID: micID, stream: mic.stream)
+        try await mixer.attach(sourceID: sysID, stream: sys.stream)
+
+        // Mic delivers 5 chunks while Sys delivers nothing (Sys is silent/idle from beginning)
+        for seq in 1...5 {
+            mic.continuation.offer(.init(pcm: pcm(100), level: 0.5, sequenceNumber: seq))
+        }
+        while await mixer.snapshot().queuedBytes < 5 * 1_920 { await Task.yield() }
+
+        // Process 5 ticks with active Mic and silent Sys
+        for _ in 1...5 {
+            await mixer.tick(at: 1_000)
+            _ = try await reader.next()
+        }
+
+        // Silent slot should NOT accumulate gaps every tick
+        #expect(await mixer.snapshot().gaps == 0)
+
+        // Now Sys delivers 1 chunk, followed by a gap
+        sys.continuation.offer(.init(pcm: pcm(50), level: 0.2, sequenceNumber: 1))
+        mic.continuation.offer(.init(pcm: pcm(100), level: 0.5, sequenceNumber: 6))
+        while await mixer.snapshot().queuedBytes < 2 * 1_920 { await Task.yield() }
+
+        // Tick with both producing
+        await mixer.tick(at: 1_040)
+        _ = try await reader.next()
+        #expect(await mixer.snapshot().gaps == 0)
+
+        // Next tick: Mic delivers, but Sys drops (transition to gap)
+        mic.continuation.offer(.init(pcm: pcm(100), level: 0.5, sequenceNumber: 7))
+        while await mixer.snapshot().queuedBytes < 1_920 { await Task.yield() }
+        await mixer.tick(at: 1_080)
+        _ = try await reader.next()
+        #expect(await mixer.snapshot().gaps == 1)
+
+        // Following ticks: Sys stays silent. Gaps must NOT repeatedly increment!
+        for tick in 8...12 {
+            mic.continuation.offer(.init(pcm: pcm(100), level: 0.5, sequenceNumber: tick))
+            while await mixer.snapshot().queuedBytes < 1_920 { await Task.yield() }
+            await mixer.tick(at: 1_080 + UInt64(tick - 7) * 40_000_000)
+            _ = try await reader.next()
+        }
+        #expect(await mixer.snapshot().gaps == 1)
+
+        await mixer.stop()
+    }
 }

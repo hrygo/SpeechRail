@@ -53,6 +53,7 @@ struct MinutesReviewView: View {
             HStack {
                 Spacer()
                 Button("取消", role: .cancel) { supplementSheetPresented = false }
+                    .keyboardShortcut(.cancelAction)
                 Button("补充") {
                     Task { if await model.supplement(supplementDraft) { supplementSheetPresented = false } }
                 }
