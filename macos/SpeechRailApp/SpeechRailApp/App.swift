@@ -28,6 +28,10 @@ struct SpeechRailApp: App {
     @State private var assistant: AssistantSession
     /// 会议助手的会话层（§12 阶段 6）：多路来源 → ASR → 分人 → 纪要。
     @State private var meeting: MeetingSession
+    /// 全局听写（issue #414）：麦克风 → 批量识别 → 写进当时的前台应用。
+    /// 不抢焦点：录制期只有一块非激活浮层，用户仍在原来的输入框里。
+    @State private var dictation: DictationSession
+    @State private var dictationHUD: DictationHUDWindowController
     /// 全局热键（§12 阶段 8）。Carbon 路线，**不需要辅助功能授权**。
     @State private var hotKeys = GlobalHotKeyCenter()
     /// 新会话的预填值（人设 / 音色 / 对讲模式 / 分人默认值 / 大模型地址与模型）。
@@ -460,6 +464,29 @@ struct SpeechRailApp: App {
             await meetingSession.finishAndSummarize()
         }
 
+        // 听写：采集复用会话层的麦克风，识别走批量接口，交付走辅助功能代写。
+        // UI 测试不联网：给一个只返回空文字的识别器，避免测试按下热键时打到本机服务。
+        let dictationTranscriber: any DictationTranscribing
+#if DEBUG
+        if isUITest {
+            dictationTranscriber = UITestDictationTranscriber()
+        } else {
+            dictationTranscriber = ServiceDictationTranscriber(client: ServiceAPIClient())
+        }
+#else
+        dictationTranscriber = ServiceDictationTranscriber(client: ServiceAPIClient())
+#endif
+        let dictationSession = DictationSession(
+            audio: MicrophoneDictationCapture(),
+            transcriber: dictationTranscriber,
+            targets: FrontmostApplicationTargetResolver(),
+            deliverer: AccessibilityDictationDeliverer(),
+            clipboard: PasteboardDictationClipboard(),
+            // 会议 / 字幕 / 助手拿着麦克风时不另开一条，直接说明谁在占用。
+            admission: SessionCoordinatorDictationAdmission(coordinator: coordinator)
+        )
+        let dictationHUDController = DictationHUDWindowController(session: dictationSession)
+
         _model = State(initialValue: appModel)
         _navigation = State(initialValue: navigationState)
         _session = State(initialValue: coordinator)
@@ -469,6 +496,8 @@ struct SpeechRailApp: App {
         _teleprompterStage = State(initialValue: teleprompterStage)
         _assistant = State(initialValue: assistantSession)
         _meeting = State(initialValue: meetingSession)
+        _dictation = State(initialValue: dictationSession)
+        _dictationHUD = State(initialValue: dictationHUDController)
         _preferences = State(initialValue: sessionPreferences)
         _captionBand = State(initialValue: band)
     }
@@ -620,6 +649,13 @@ struct SpeechRailApp: App {
             meeting.innerOS.isExpanded.toggle()
             reveal(.meeting)
         }
+        hotKeys.setHandler(.toggleDictation) {
+            // 听写不打开任何页面：浮层是非激活面板，用户留在原来的输入框里。
+            Task { await dictation.toggle() }
+        }
+        // 浮层观察在启动时就装上，不挂在热键里：菜单栏「开始听写」与热键是同一条路径，
+        // 两个入口都要看到状态，而 `install` 本身幂等。
+        dictationHUD.install()
         hotKeys.install()
     }
 
@@ -685,6 +721,7 @@ struct SpeechRailApp: App {
                 .environment(session)
                 .environment(caption)
                 .environment(meeting)
+                .environment(dictation)
         } label: {
             // 状态项要的四个对象**显式传进去**，不走环境：`MenuBarExtra` 的 label 由系统
             // 单独承载，挂在上面的 `.environment(...)` 不生效（2026-09-18 真机崩溃就是它）。
@@ -2021,5 +2058,13 @@ private struct UITestControlTransport: SpeechRailControlTransport {
             return ControlResponse(requestID: request.requestID, command: request.command, status: .completed)
         }
     }
+}
+#endif
+
+#if DEBUG
+/// UI 测试里的听写识别器：不联网、不启动模型，固定返回空文字。
+/// 于是"按下热键 → 采集 → 识别 → 没有文字"这条路径仍然可走，但不会打到本机服务。
+private struct UITestDictationTranscriber: DictationTranscribing {
+    func transcribe(_ recording: DictationRecording) async throws -> String { "" }
 }
 #endif

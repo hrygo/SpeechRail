@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.6.19"
-date: 2026-10-20
+version: "0.6.20"
+date: 2026-10-23
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -207,10 +207,45 @@ hypothesis 时清空本地播放队列并显式发送 `speechrail.tts.cancel`；
 `Window("SpeechRail 管理控制台", id: "control-center")` 承载同一个 `AppModel` 下的三类一级 surface：
 
 - 创作：配音台（含文稿配音与作品管理）、音色创作、音色克隆、音色库、有声书工坊。音色创作保留 VoiceDesign 的描述、候选、试听和保存主线；音色克隆在应用内读服务端下发的提词稿、录制参考音频，经 `validate` 预检后注册成新音色（录音只落系统临时目录、应用收下即删，采集链关闭 AEC / AGC / 降噪；入口按服务当前明确声明的 VoiceDesign 与 Base 能力开放，不由档位名称推断）；配音与试听通过统一的本机 Bearer 凭据接入服务，音色库提供服务端列表、详情、更新和删除，失败时保留用户输入并解释稳定错误；有声书工坊承载整书导入与多角色分章合成。
-- 会话：语音助手、会议助手、实时字幕、AI 提词器。四类功能共享会话层的启停与资源占用边界，但各自拥有不同的来源、转写和本机记录；空闲时不持有麦克风、系统音频 tap 或播放引擎。
+- 会话：语音助手、会议助手、实时字幕、AI 提词器、全局听写。五类功能共享会话层的启停与资源占用边界，但各自拥有不同的来源、转写和本机记录；空闲时不持有麦克风、系统音频 tap 或播放引擎。
 - 服务：服务状态、运行监控、模型组合、诊断、开发者文档。服务状态解释健康状态和能力，监控读取 `/metrics`，模型组合通过 XPC Agent 调用锁定目录的 `model catalog/status/prepare`，诊断显示可操作的失败原因；开发者文档把接入信息（服务地址 / 鉴权 / 运行档位 / 已发布能力）与 8 个主题的最小示例放进应用，事实仍以 `contracts/` 与 `docs/users/` 为准。
 
 模型页明确区分“下载并校验”和“应用此档位”：前者执行逐文件大小/SHA-256 校验和原子发布，可显示 JSONL 进度并取消；后者才改变当前 profile。App 不直接访问模型源、不把本地路径或 hash 返回给页面，也不把模型下载放进请求路径。
+
+### 全局听写（2026-10-23）
+
+**听写是输入入口，不是第四个会话页面。** 按下 `⌘⇧D`（或菜单栏「开始听写」）时先记下当时的前台应用，
+录音期间只有一块非激活 `NSPanel` 浮层；再按一次结束，整段上传批量识别，最终文字写回**当时那个**应用的
+焦点控件。全程不打开控制台窗口、不切前台、不抢光标。
+
+状态机在 `DictationSession`（`DictationDomain.swift` 定义值类型与五条协议，`DictationSession.swift`
+定义 idle → recording → transcribing → delivering → finished/failed）。三条硬约束：
+
+- **一次只跑一段。** 识别或交付未完成时再按热键不排队、不打断，只把「上一段还在识别」写进 `notice`，
+  于是「两次听写交错」在状态层面不可能发生。
+- **迟到的结果不落地。** 每次开始换一个 `sessionID`，任何 `await` 之后先核对它；取消也会换号，
+  于是旧结果既不会插进新目标，也不会重复插入。
+- **识别完成不等于交付成功。** `AccessibilityDictationDeliverer` 在写入前重新核对前台 pid，先试
+  `kAXSelectedTextAttribute`，失败再走「读全文 + 替换选区（无选区则插到末尾）+ 写 `kAXValueAttribute`」。
+  两条都不成立就明确返回失败，由会话层降级为「已复制」并把原因写进状态：`targetChanged` /
+  `unsupportedTarget` / `permissionDenied` / `insertionFailed`。剪贴板只写不恢复旧内容——一次迟到的
+  恢复会冲掉用户后来复制的东西。
+
+**上限与拒绝。** 单段 5 分钟（`DictationLimits.maximumDuration`）；采集侧攒到 `maximumByteCount` 就停采并
+报 `tooLong`，不截断成一段「看起来完整」的录音。没有前台目标时不占用麦克风。会议 / 字幕 / 助手 / 提词器
+拿着麦克风时，`SessionCoordinatorDictationAdmission` 只读 `SessionCoordinator.occupancy` 就拒绝，
+并说明是谁在占用——不抢、不排队、不中断别的会话。识别走
+`ServiceAPIClient.transcribe`，与字幕/会议同一条服务准入：409 / 503 / `backend_busy` 翻译成
+`serviceBusy`，提示等当前会话结束，不重试、不降级到别的模型。
+
+**边界。** `MicrophoneDictationCapture`、`FrontmostApplicationTargetResolver`、
+`AccessibilityDictationDeliverer`、`PasteboardDictationClipboard`、`ServiceDictationTranscriber` 都在
+App target（`DictationSystemIntegrations.swift`），系统错误在那里翻译成 `DictationCaptureError`；
+`DictationSession` 只认识领域词汇。`DictationHUDWindowController` 在启动时 `install()` 一次并常驻观察，
+所以热键与菜单栏两个入口都有浮层，收尾 6 秒后自动收起。
+
+**测试隔离。** `DictationSessionTests` 全部用 fake 替身（采集/识别/目标/交付/剪贴板），不打开麦克风、
+不联网、不写系统剪贴板；UI 测试用 `UITestDictationTranscriber` 固定返回空文字。
 
 ### 语音助手的会话与回看布局
 

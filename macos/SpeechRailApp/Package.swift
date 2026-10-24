@@ -58,6 +58,11 @@ let package = Package(
                 "CreatorSurfaceViews.swift",
                 "DeveloperDocsContent.swift",
                 "DeveloperDocsView.swift",
+                // 听写的系统接线（麦克风泵 / 前台应用解析 / AX 代写 / 剪贴板）
+                // 与浮层窗口都要 AppKit 运行时和辅助功能授权，只属于 App target；
+                // 状态机本身（DictationDomain / DictationSession）留在单测目标里。
+                "DictationHUD.swift",
+                "DictationSystemIntegrations.swift",
                 "GlobalHotKey.swift",
                 "Info.plist",
                 "InnerOSDrawer.swift",
@@ -172,6 +177,10 @@ let package = Package(
                 "AudioCaptureDrain.swift",
                 "AppRoute.swift",
                 "SessionDomain.swift",
+                // 全局听写（#414）：采集 / 识别 / 交付三段都是协议注入，
+                // 生产实现留在 App target，状态机本身能直接跑单测。
+                "DictationDomain.swift",
+                "DictationSession.swift",
                 "VoicePrompt.swift",
                 "WindowLayoutPolicy.swift",
                 "TeleprompterDomain.swift",
