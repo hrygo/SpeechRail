@@ -1348,12 +1348,11 @@ public final class MeetingSession {
             from: item.boundary,
             startedAt: startedAt
         )
-        let isEpochStart = epoch > 1 && lines.isEmpty
         acceptTranscript(TranscriptPersistenceQueue.Command(
             sessionID: sessionID, connection: item.identity.connection, itemID: item.itemID,
             generation: item.identity.generation, text: text, source: lineSource, role: .speaker,
             tStart: inputTimes?.start, tEnd: inputTimes?.end, formal: true,
-            isInterrupted: false, isDeviceSwitch: isEpochStart,
+            isInterrupted: false, isDeviceSwitch: false,
             timingQuality: .unavailable, observedAt: dependencies.clock.now()
         ))
     }
