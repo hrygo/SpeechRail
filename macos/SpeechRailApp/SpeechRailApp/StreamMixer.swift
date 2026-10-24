@@ -18,8 +18,18 @@ actor StreamMixer {
         var entries = [AudioChunk?](repeating: nil, count: 16)
         var head = 0, count = 0, offset = 0, bytes = 0
         mutating func append(_ chunk: AudioChunk) -> Bool {
-            guard chunk.pcm.count.isMultiple(of: 2), chunk.pcm.count <= 19_200 - bytes, count < entries.count else { return false }
+            guard chunk.pcm.count.isMultiple(of: 2), chunk.pcm.count <= 19_200 else { return false }
             guard !chunk.pcm.isEmpty else { return true }
+            while count > 0 && (count >= entries.count || chunk.pcm.count > 19_200 - bytes) {
+                if let old = entries[head] {
+                    bytes -= (old.pcm.count - offset)
+                }
+                entries[head] = nil
+                head = (head + 1) % entries.count
+                count -= 1
+                offset = 0
+            }
+            guard count < entries.count, chunk.pcm.count <= 19_200 - bytes else { return false }
             entries[(head + count) % entries.count] = chunk
             count += 1; bytes += chunk.pcm.count
             return true
@@ -29,15 +39,27 @@ actor StreamMixer {
             var oldestStamp: AudioCaptureStamp?, oldestInstant: ContinuousClock.Instant?, watermark: AudioSourceWatermark?
             while position < mixed.count, let chunk = entries[head] {
                 if let stamp = chunk.captureStamp {
-                    guard now >= stamp.capturedUptimeNanoseconds, now - stamp.capturedUptimeNanoseconds <= 750_000_000 else {
-                        throw AudioStreamError(reason: .staleInput, captureEpoch: stamp.captureEpoch, sourceID: stamp.sourceID)
+                    if now < stamp.capturedUptimeNanoseconds || now - stamp.capturedUptimeNanoseconds > 750_000_000 {
+                        entries[head] = nil
+                        head = (head + 1) % entries.count
+                        count -= 1
+                        bytes -= (chunk.pcm.count - offset)
+                        offset = 0
+                        continue
                     }
                     if oldestStamp == nil { oldestStamp = stamp }
                     watermark = .init(captureEpoch: stamp.captureEpoch, sourceID: stamp.sourceID,
                         sourceSequence: stamp.sourceSequence, droppedSamplesBefore: UInt64(max(0, chunk.droppedSamplesBefore ?? 0)))
                 }
                 if let capturedAt = chunk.capturedAt {
-                    guard capturedAt.duration(to: .now) <= .milliseconds(750) else { throw AudioStreamError(reason: .staleInput) }
+                    if capturedAt.duration(to: .now) > .milliseconds(750) {
+                        entries[head] = nil
+                        head = (head + 1) % entries.count
+                        count -= 1
+                        bytes -= (chunk.pcm.count - offset)
+                        offset = 0
+                        continue
+                    }
                     if oldestInstant == nil { oldestInstant = capturedAt }
                 }
                 let take = min((chunk.pcm.count - offset) / 2, mixed.count - position)
@@ -193,8 +215,6 @@ actor StreamMixer {
             slot.active = false; slot.ring.clear()
         }
         slots[sourceID] = slot
-        // Keep the handle until attach/retire/stop has joined its actual task.
-        if reason != .completed && reason != .sourceLost && reason != .cancelled { fail(reason) }
     }
 
     private func fail(_ reason: AudioStreamTermination) {

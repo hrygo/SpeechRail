@@ -114,14 +114,16 @@ struct StreamMixerTests {
         await mixer.stop()
     }
 
-    @Test func testInputOverflowPropagatesInsteadOfDroppingOldPCM() async throws {
+    // 单个 chunk 比整个混音窗口还大时没有地方安放它，只能整块拒绝。
+    // 环形缓冲满（多个 chunk 叠加）走的是另一条路：丢最旧的，见下面的突发测试。
+    @Test func testSingleOversizedChunkIsRejectedAsOverflow() async throws {
         let mixer = StreamMixer(automaticTicks: false)
         let output = await mixer.start(), source = AudioChunkStream.makeStream()
         try await mixer.attach(sourceID: UUID(), stream: source.stream)
         source.continuation.offer(.init(pcm: pcm(1, frames: 9_601), level: 0))
         while output.snapshot.termination == nil { await Task.yield() }
         var reader = output.makeAsyncIterator()
-        do { _ = try await reader.next(); Issue.record("Mixer discarded old PCM silently") }
+        do { _ = try await reader.next(); Issue.record("Mixer accepted an oversized chunk instead of reporting overflow") }
         catch { #expect((error as? AudioStreamError)?.reason == .overflow) }
         await mixer.stop()
         #expect(await mixer.snapshot().queuedBytes == 0)
@@ -154,5 +156,66 @@ struct StreamMixerTests {
         #expect(received == pcm(123, frames: 1_200))
         #expect(await mixer.snapshot().activeTasks == 0)
         #expect(await mixer.snapshot().queuedBytes == 0)
+    }
+
+    @Test func testStaleInputIsDiscardedWithoutFailingMixer() async throws {
+        let clock = Mutex(UInt64(1_000_000_000))
+        let source = AudioChunkStream.makeStream(now: { clock.withLock { $0 } })
+        let mixer = StreamMixer(automaticTicks: false, now: { clock.withLock { $0 } })
+        let output = await mixer.start()
+        let sourceID = UUID(), epoch = UUID()
+        try await mixer.attach(sourceID: sourceID, stream: source.stream)
+
+        // Offer a chunk at sourceTime = 1_000_000_000
+        source.continuation.offer(.init(pcm: pcm(100), level: 0.5,
+            captureStamp: .init(captureEpoch: epoch, sourceID: sourceID, sourceSequence: 1, capturedUptimeNanoseconds: 1_000_000_000)))
+
+        while await mixer.snapshot().queuedBytes == 0 { await Task.yield() }
+
+        // Advance mixer clock to 2_000_000_000 (1 second later, > 750ms threshold)
+        clock.withLock { $0 = 2_000_000_000 }
+        await mixer.tick(at: 2_000_000_000)
+
+        // Stale chunk should be discarded, mixer output must remain healthy
+        #expect(output.snapshot.termination == nil)
+        var reader = output.makeAsyncIterator()
+        _ = try await reader.next()
+        #expect(await mixer.snapshot().queuedBytes == 0)
+
+        // Verify mixer can still receive fresh chunk and continue normally
+        source.continuation.offer(.init(pcm: pcm(200), level: 0.5,
+            captureStamp: .init(captureEpoch: epoch, sourceID: sourceID, sourceSequence: 2, capturedUptimeNanoseconds: 2_000_000_000)))
+        while await mixer.snapshot().queuedBytes == 0 { await Task.yield() }
+
+        await mixer.tick(at: 2_000_000_000)
+        #expect(output.snapshot.termination == nil)
+
+        // Even if an input source ends with .staleInput, the mixer itself does not fail
+        source.continuation.finish(.staleInput)
+        while await mixer.snapshot().activeSlots > 0 { await Task.yield() }
+        #expect(output.snapshot.termination == nil)
+
+        await mixer.stop()
+    }
+
+    @Test func testBurstOfChunksEvictsOldestInsteadOfFailingMixer() async throws {
+        let mixer = StreamMixer(automaticTicks: false)
+        let output = await mixer.start()
+        let source = AudioChunkStream.makeStream()
+        try await mixer.attach(sourceID: UUID(), stream: source.stream)
+
+        // Offer 20 valid 40ms chunks (more than 16 slots ring capacity)
+        for seq in 1...20 {
+            source.continuation.offer(.init(pcm: pcm(Int16(seq)), level: 0.1, sequenceNumber: seq))
+        }
+
+        // Give the ingest task time to process all chunks
+        for _ in 0..<10 { await Task.yield() }
+
+        // The mixer must NOT have failed with .overflow
+        #expect(output.snapshot.termination == nil)
+        #expect(await mixer.snapshot().queuedBytes <= 19_200)
+
+        await mixer.stop()
     }
 }

@@ -268,9 +268,15 @@ public final class AudioSourceCoordinator {
     }
 
     private func systemStreamEnded(_ termination: AudioStreamTermination, generation: UUID) {
-        guard generation == systemSourceGeneration, termination == .sourceLost || termination == .completed,
+        guard generation == systemSourceGeneration, termination != .cancelled,
               !isTearingDown, activeSelection != nil else { return }
-        let reason = system?.stopReason ?? "来源 App 退出了。"
+        let defaultReason: String
+        switch termination {
+        case .staleInput: defaultReason = "音频等待时间过长。"
+        case .droppedSamples: defaultReason = "音频传输有缺失。"
+        default: defaultReason = "来源 App 退出了。"
+        }
+        let reason = system?.stopReason ?? defaultReason
         systemAudioStopReason = reason
         onSystemAudioLost?(reason)
     }

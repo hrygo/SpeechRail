@@ -769,8 +769,12 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
             let status = withUnsafePointer(to: &description) {
                 AudioObjectSetPropertyData(tapID, &address, 0, nil, UInt32(MemoryLayout<CATapDescription>.size), $0)
             }
-            if status != noErr { failOnDrain(.sourceLost) }
-        } catch { failOnDrain(.sourceLost) }
+            if status != noErr {
+                Self.diagnostics.error("tap_description_update_failed status=\(status)")
+            }
+        } catch {
+            Self.diagnostics.error("selected_audio_processes_failed error=\(error.localizedDescription)")
+        }
     }
 
     private static func readTapFormat(tapID: AudioObjectID) throws -> AudioStreamBasicDescription {
