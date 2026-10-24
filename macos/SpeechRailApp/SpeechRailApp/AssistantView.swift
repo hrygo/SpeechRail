@@ -4445,11 +4445,14 @@ struct InputLevelSheet: View {
                 Button("关闭") { dismiss() }
                     .speechRailButton(.primary)
                     .keyboardShortcut(.defaultAction)
-                    .keyboardShortcut(.cancelAction)
             }
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
         .frame(width: SpeechRailDesignTokens.Layout.Sheet.regularWidth)
+        .onKeyPress(.escape) {
+            dismiss()
+            return .handled
+        }
         .onAppear { start() }
         .onDisappear {
             task?.cancel()

@@ -435,7 +435,6 @@ struct MeetingKnowledgeLibraryView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("好") { openItemsPresented = false }
                         .keyboardShortcut(.defaultAction)
-                        .keyboardShortcut(.cancelAction)
                 }
             }
         }
@@ -443,6 +442,10 @@ struct MeetingKnowledgeLibraryView: View {
             minWidth: SpeechRailDesignTokens.Layout.Sheet.regularWidth,
             minHeight: SpeechRailDesignTokens.Layout.Sheet.mediumMinimumHeight
         )
+        .onKeyPress(.escape) {
+            openItemsPresented = false
+            return .handled
+        }
         .operationFeedback([
             OperationFeedback(model.openItemWriteError.map { _ in model.openItemWriteHint }, title: "事项未保存"),
             OperationFeedback(model.openItemsError, title: "未完成事项未读取")
@@ -517,7 +520,6 @@ struct MeetingKnowledgeLibraryView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("好") { conflictsPresented = false }
                         .keyboardShortcut(.defaultAction)
-                        .keyboardShortcut(.cancelAction)
                 }
             }
         }
@@ -525,6 +527,10 @@ struct MeetingKnowledgeLibraryView: View {
             minWidth: SpeechRailDesignTokens.Layout.Sheet.formWidth,
             minHeight: SpeechRailDesignTokens.Layout.Sheet.formMinimumHeight
         )
+        .onKeyPress(.escape) {
+            conflictsPresented = false
+            return .handled
+        }
         .operationFeedback([
             OperationFeedback(model.conflictWriteError.map { _ in model.conflictWriteHint }, title: "取代关系未保存"),
             OperationFeedback(model.conflictError, title: "跨会议结论未读取")
@@ -884,7 +890,6 @@ struct MeetingKnowledgeLibraryView: View {
                         model.clearPrepDraft()
                     }
                     .keyboardShortcut(.defaultAction)
-                    .keyboardShortcut(.cancelAction)
                 }
             }
         }
@@ -892,6 +897,11 @@ struct MeetingKnowledgeLibraryView: View {
             minWidth: SpeechRailDesignTokens.Layout.Sheet.regularWidth,
             minHeight: SpeechRailDesignTokens.Layout.Sheet.mediumMinimumHeight
         )
+        .onKeyPress(.escape) {
+            prepPresented = false
+            model.clearPrepDraft()
+            return .handled
+        }
         .operationFeedback([
             OperationFeedback(model.prepError, title: "会前准备稿未读取")
         ])
@@ -1556,11 +1566,14 @@ struct MeetingKnowledgeLibraryView: View {
                 }
                 Button("好", role: .cancel) { manageProjectsPresented = false }
                     .keyboardShortcut(.defaultAction)
-                    .keyboardShortcut(.cancelAction)
             }
         }
         .padding(SpeechRailDesignTokens.Layout.contentPadding)
         .frame(minWidth: SpeechRailDesignTokens.Layout.creatorVoicePopoverWidth, alignment: .leading)
+        .onKeyPress(.escape) {
+            manageProjectsPresented = false
+            return .handled
+        }
     }
 
     /// 标签编辑。**标签是用户写的，导入与生成都不猜**（MA-13），
