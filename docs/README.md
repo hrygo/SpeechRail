@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 文档中心"
 status: active
-version: "4.0.0"
-date: 2026-10-24
+version: "4.1.0"
+date: 2026-10-25
 ---
 
 # 📚 SpeechRail 文档中心
@@ -44,6 +44,7 @@ date: 2026-10-24
 | 🏛️ **架构师 / 技术决策** | 架构拓扑、进程隔离、Speech Plane、私有 IPC、状态机、ADR | [🏛️ 总体架构设计](architecture/architecture.md) <br/> [🎙️ 无状态 Speech Plane 设计](superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md) <br/> [📜 架构决策记录 (ADR)](decisions/README.md) <br/> [👥 分人整洁架构](superpowers/specs/2026-09-08-diarization-clean-architecture-design.md) |
 | 🔌 **API 用户 / 客户端集成** | REST / WebSocket 契约、SDK 接入、MCP/Agent 集成、音色库、错误码 | [🔌 客户端与 SDK 接入指南](users/integrations.md) <br/> [🤖 MCP 主流 Agent 集成指南](users/mcp-agent-integration.md) <br/> [📡 公共 API 契约手册](users/api-contract.md) <br/> [⚡ OpenAI Realtime 协议规范](../contracts/realtime-openai.md) <br/> [🧾 Realtime 事件 Schema](../contracts/realtime-events.schema.json) |
 | 📦 **本机用户 / 自部署** | 发布制品说明、安装顺序、首次验证、升级与卸载 | [📦 SpeechRail 安装与首次使用](users/installing-speechrail.md) |
+| 🖥️ **macOS App 用户** | 三组页面各自能做什么、录音与隐私边界、写不进去或中断后怎么恢复 | [🧭 用户与集成指南目录](users/README.md) <br/> [🎙️ 全局听写](users/global-dictation.md) <br/> [🗒️ 会议纪要与模型服务](users/meeting-minutes.md) <br/> [📚 有声书工坊](users/audiobook-workshop.md) <br/> [🔁 找回未保存的文字](users/transcript-save-recovery.md) |
 | 🛠️ **核心开发者 / 贡献者** | 5分钟启动、代码分层、测试金字塔、Worker 扩展 | [🛠️ 开发者开发指南](developers/development-guide.md) <br/> [🧪 测试与质量验收规范](developers/testing-acceptance.md) <br/> [🔍 审计与专项审查记录](audits/README.md) |
 | 📦 **运维工程师 / SRE** | LaunchAgent 常驻、Wheel 发布、排障决策树、监控 | [📖 运维操作手册 (Runbook)](operations/operations-runbook.md) <br/> [🚀 运行时部署方案](operations/runtime-deployment.md) <br/> [🔒 安全与可观测性](operations/security-observability.md) |
 
