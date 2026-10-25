@@ -88,7 +88,26 @@ struct CaptionBandContent: Equatable, Sendable {
         }
         let id: ID
         let text: String
+        let primaryText: String
+        let secondaryText: String?
         let isPartial: Bool
+        let isTranslating: Bool
+
+        init(
+            id: ID,
+            text: String,
+            primaryText: String? = nil,
+            secondaryText: String? = nil,
+            isPartial: Bool,
+            isTranslating: Bool = false
+        ) {
+            self.id = id
+            self.text = text
+            self.primaryText = primaryText ?? text
+            self.secondaryText = secondaryText
+            self.isPartial = isPartial
+            self.isTranslating = isTranslating
+        }
     }
     let rows: [Row]
 
@@ -97,9 +116,40 @@ struct CaptionBandContent: Equatable, Sendable {
         pendingCommands: [TranscriptPersistenceQueue.Command] = [],
         activeRecordID: String? = nil,
         windowUnits: [TranscriptWindowUnit]?,
-        partialText: String?
+        partialText: String?,
+        partialTranslatedText: String? = nil,
+        displayMode: CaptionDisplayMode = .bilingual
     ) {
-        var rows = lines.map { Row(id: .final($0.id), text: $0.text, isPartial: false) }
+        var rows: [Row] = []
+        for line in lines {
+            let primary: String
+            let secondary: String?
+            switch displayMode {
+            case .originalOnly:
+                primary = line.text
+                secondary = nil
+            case .chineseOnly:
+                primary = line.translatedText ?? line.text
+                secondary = nil
+            case .bilingual:
+                if let translated = line.translatedText, !translated.isEmpty, translated != line.text {
+                    primary = translated
+                    secondary = line.text
+                } else {
+                    primary = line.text
+                    secondary = nil
+                }
+            }
+            rows.append(Row(
+                id: .final(line.id),
+                text: primary,
+                primaryText: primary,
+                secondaryText: secondary,
+                isPartial: false,
+                isTranslating: line.isTranslating
+            ))
+        }
+
         var visibleLineIDs = Set(lines.map(\.id))
         for command in pendingCommands {
             guard let activeRecordID,
@@ -107,14 +157,47 @@ struct CaptionBandContent: Equatable, Sendable {
                   command.formal,
                   visibleLineIDs.insert(command.lineID).inserted
             else { continue }
-            rows.append(Row(id: .final(command.lineID), text: command.text, isPartial: false))
+            rows.append(Row(
+                id: .final(command.lineID),
+                text: command.text,
+                primaryText: command.text,
+                secondaryText: nil,
+                isPartial: false,
+                isTranslating: false
+            ))
         }
-        if let windowUnits {
-            rows += windowUnits.map { Row(id: .window($0.unitID), text: $0.text, isPartial: true) }
-        } else if let partialText, !partialText.isEmpty {
-            rows.append(Row(id: .partial, text: partialText, isPartial: true))
+
+        let currentPartial = windowUnits?.map(\.text).joined() ?? partialText
+        if let currentPartial, !currentPartial.isEmpty {
+            let primary: String
+            let secondary: String?
+            switch displayMode {
+            case .originalOnly:
+                primary = currentPartial
+                secondary = nil
+            case .chineseOnly:
+                primary = partialTranslatedText ?? currentPartial
+                secondary = nil
+            case .bilingual:
+                if let partialTranslated = partialTranslatedText, !partialTranslated.isEmpty, partialTranslated != currentPartial {
+                    primary = partialTranslated
+                    secondary = currentPartial
+                } else {
+                    primary = currentPartial
+                    secondary = nil
+                }
+            }
+            let rowID: Row.ID = windowUnits != nil ? .window(windowUnits?.first?.unitID ?? "window") : .partial
+            rows.append(Row(
+                id: rowID,
+                text: primary,
+                primaryText: primary,
+                secondaryText: secondary,
+                isPartial: true,
+                isTranslating: partialTranslatedText == nil
+            ))
         }
-        self.rows = rows.filter { !$0.text.isEmpty }
+        self.rows = rows.filter { !$0.primaryText.isEmpty }
     }
 }
 
@@ -162,6 +245,8 @@ public final class CaptionSession {
         case storeUnavailable(String)
         /// 转写链路中途断了。正文保留，可以重新接上（新 epoch，不重放 PCM）。
         case streamFailed(String)
+        case noTargetSelected
+        case systemAudioUnavailable(String)
 
         public var title: String {
             switch self {
@@ -171,6 +256,8 @@ public final class CaptionSession {
             case .occupiedBy(let kind): "\(kind.title)正在使用麦克风"
             case .storeUnavailable: "记录库不可用"
             case .streamFailed: "转写中断了"
+            case .noTargetSelected: "还没有选择要显示字幕的应用窗口"
+            case .systemAudioUnavailable: "应用音频采集未就绪"
             }
         }
 
@@ -190,6 +277,10 @@ public final class CaptionSession {
                 // 断开码要带给用户：`1008`（握手被拒）与「服务中途挂了」是两件事，
                 // 只写"中断了"会让人没法判断该去检查 key 还是该去看服务。
                 "\(message)丢掉的音频就是没录上；已经定稿的字幕都还在，可以重新接上往下听。"
+            case .noTargetSelected:
+                "点击「选择应用窗口」拾取正在播放视频或音频的窗口，或切换为麦克风收音。"
+            case .systemAudioUnavailable(let message):
+                "\(message)请在系统设置 → 隐私与安全性 → 录音中允许 SpeechRail，然后重试。"
             }
         }
 
@@ -211,6 +302,35 @@ public final class CaptionSession {
         public var speakerLabel: String?
         public var attributionUnits: [TranscriptAttributionUnit] = []
         public var speakerLabelIsManual = false
+        public var sourceLanguage: String?
+        public var translatedText: String?
+        public var isTranslating: Bool = false
+
+        public init(
+            id: String,
+            ordinal: Int,
+            text: String,
+            start: TimeInterval? = nil,
+            end: TimeInterval? = nil,
+            speakerLabel: String? = nil,
+            attributionUnits: [TranscriptAttributionUnit] = [],
+            speakerLabelIsManual: Bool = false,
+            sourceLanguage: String? = nil,
+            translatedText: String? = nil,
+            isTranslating: Bool = false
+        ) {
+            self.id = id
+            self.ordinal = ordinal
+            self.text = text
+            self.start = start
+            self.end = end
+            self.speakerLabel = speakerLabel
+            self.attributionUnits = attributionUnits
+            self.speakerLabelIsManual = speakerLabelIsManual
+            self.sourceLanguage = sourceLanguage
+            self.translatedText = translatedText
+            self.isTranslating = isTranslating
+        }
     }
 
     public enum ServiceReadiness: Sendable {
@@ -230,7 +350,24 @@ public final class CaptionSession {
         set { transcriptPresentation.reset(newValue) }
     }
     /// 未定稿的增量累加结果。`nil` 表示这一轮还没开始出字。
-    public private(set) var partialText: String?
+    public private(set) var partialText: String? {
+        didSet {
+            guard let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+                partialTranslatedText = nil
+                return
+            }
+            if oldValue != partialText {
+                let context = lines.suffix(3).map(\.text)
+                translationCoordinator.schedulePartialTranslation(
+                    sourceText: text,
+                    contextLines: context,
+                    displayMode: displayMode
+                ) { [weak self] translated in
+                    self?.partialTranslatedText = translated
+                }
+            }
+        }
+    }
     /// 采集的真实电平 0…1（浮层页脚那几根柱子读它）。
     public private(set) var level: Double = 0
     public private(set) var sessionID: String?
@@ -262,6 +399,38 @@ public final class CaptionSession {
         self.blocked = blocked
     }
     #endif
+
+    // MARK: 目标与翻译
+
+    /// 当前选定的字幕音频源（默认 nil，首次开启时引导拾取窗口或使用上次选定的运行中应用）。
+    public var audioTarget: CaptionAudioTarget?
+    /// 字幕显示模式（双语对照 / 仅中文 / 仅原文），持久化到 UserDefaults。
+    public var displayMode: CaptionDisplayMode = {
+        if let raw = UserDefaults.standard.string(forKey: "speechrail.caption.displayMode"),
+           let mode = CaptionDisplayMode(rawValue: raw) {
+            return mode
+        }
+        return .bilingual
+    }() {
+        didSet {
+            UserDefaults.standard.set(displayMode.rawValue, forKey: "speechrail.caption.displayMode")
+        }
+    }
+    /// 浮层定位模式（智能吸附目标窗口 / 自由悬浮钉住）。
+    public var placementMode: CaptionBandPlacementMode = .dockedToTargetWindow
+    /// 外语未定稿句的实时中文预览译文。
+    public private(set) var partialTranslatedText: String?
+    /// 由 App 层注入：按 CaptionAudioTarget 创建对应的 AudioChunkSource（App -> SystemAudioCapture, Mic -> MicrophoneCapture）。
+    public var makeAudioSourceForTarget: (@MainActor (CaptionAudioTarget) -> AudioChunkSource)?
+    /// 由 App 层注入：唤起全屏窗口拾取器。
+    public var presentWindowPicker: (@MainActor () async -> CaptionAudioTarget?)?
+    /// 由 App 层注入：提供翻译客户端（读取 SessionPreferences 中 .captions 模块的 LLM 配置）。
+    public var makeTranslationClient: (@MainActor () -> (any CaptionTranslationClient)?)?
+
+    /// 翻译协调器
+    @ObservationIgnored private lazy var translationCoordinator = CaptionTranslationCoordinator(makeClient: { [weak self] in
+        self?.makeTranslationClient?()
+    })
 
     // MARK: 挂载点（由 App 注入）
 
@@ -320,7 +489,9 @@ public final class CaptionSession {
             pendingCommands: pendingCommands,
             activeRecordID: sessionID,
             windowUnits: windowCapture?.visibleUnits,
-            partialText: partialText
+            partialText: partialText,
+            partialTranslatedText: partialTranslatedText,
+            displayMode: displayMode
         )
     }
 
@@ -334,7 +505,7 @@ public final class CaptionSession {
         guard enabled, let recordID = sessionID else { return }
         let coordinator = coordinator
         windowCapture = TranscriptWindowCapture(recordID: recordID, identity: identity,
-            source: .microphone, offsetSeconds: captureStartedAt.timeIntervalSince(sessionStartedAt ?? captureStartedAt),
+            source: audioTarget?.lineSource ?? .microphone, offsetSeconds: captureStartedAt.timeIntervalSince(sessionStartedAt ?? captureStartedAt),
             observedAt: captureStartedAt, save: { command in
                 switch command {
                 case .sealed(let batch): return try await coordinator.appendSealedWindow(batch)
@@ -542,6 +713,34 @@ public final class CaptionSession {
         await coordinator.requestStart(.captions)
     }
 
+    /// 用户在窗口拾取器或快捷菜单中选定了新的目标应用（或麦克风）。
+    public func selectTarget(_ target: CaptionAudioTarget) async {
+        let previous = audioTarget
+        audioTarget = target
+        switch target {
+        case .app:
+            placementMode = .dockedToTargetWindow
+        case .microphone:
+            placementMode = .freeFloatingPinned
+        }
+        if phase.isLive {
+            if previous != target {
+                await finish()
+                await openBand()
+            }
+        } else {
+            await openBand()
+        }
+    }
+
+    /// 唤起全屏窗口拾取器让用户选择目标窗口或麦克风。
+    public func promptSelectTarget() async {
+        guard let picker = presentWindowPicker else { return }
+        if let target = await picker() {
+            await selectTarget(target)
+        }
+    }
+
     /// 隐藏浮层。**这不是结束会话**：字幕继续、记录继续落库。
     public func hideBand() {
         setBandVisible(false)
@@ -609,7 +808,12 @@ public final class CaptionSession {
             }
         }
 
-        let source = audioSourceFactory()
+        let source: AudioChunkSource
+        if let target = audioTarget, let factory = makeAudioSourceForTarget {
+            source = factory(target)
+        } else {
+            source = audioSourceFactory()
+        }
         self.source = source
         let stream: AudioChunkStream
         do {
@@ -685,11 +889,13 @@ public final class CaptionSession {
                 SessionDraft(
                     kind: .captions,
                     engineProfile: profile,
-                    audioSource: .microphone,
+                    audioSource: audioTarget?.resolvedAudioSource ?? .microphone,
                     diarization: diarizationEnabled ? .active
                         : (diarizationUnavailableNote == nil ? .off : .unavailable),
                     diarizationNote: diarizationUnavailableNote,
-                    startedAt: startedAt
+                    startedAt: startedAt,
+                    targetBundleID: audioTarget?.targetBundleID,
+                    targetAppName: audioTarget?.targetAppName
                 )
             )
             sessionID = record.id
@@ -845,6 +1051,8 @@ public final class CaptionSession {
     /// `§16.3` X1 的那一条），`✕` 只把带子收起来——否则"关掉字幕"会把正在录的会议
     /// 推进"整理中"：麦克风的所有权只由守卫（§6.4）交还，不由浮层的关闭键交还。
     public func finish() async {
+        translationCoordinator.cancelAll()
+        partialTranslatedText = nil
         if coordinator.occupancy?.kind == .captions {
             await coordinator.stopCapture(endingWith: .user)
         }
@@ -858,6 +1066,7 @@ public final class CaptionSession {
         phase = .idle
         level = 0
         partialText = nil
+        partialTranslatedText = nil
         previewIdentity = nil
         sessionStartedAt = nil
         sessionID = nil
@@ -1331,7 +1540,7 @@ public final class CaptionSession {
         let inputTimes = sessionRelativeInputTimes(from: boundary, startedAt: startedAt)
         let command = TranscriptPersistenceQueue.Command(
             sessionID: sessionID, connection: identity.connection, itemID: itemID,
-            generation: identity.generation, text: text, source: .microphone, role: .speaker,
+            generation: identity.generation, text: text, source: audioTarget?.lineSource ?? .microphone, role: .speaker,
             tStart: inputTimes?.start, tEnd: inputTimes?.end, formal: formal,
             isInterrupted: false, timingQuality: .unavailable, observedAt: Date()
         )
@@ -1383,6 +1592,41 @@ public final class CaptionSession {
                     id: command.lineID, ordinal: ordinal, text: command.text,
                     start: command.tStart, end: command.tEnd, speakerLabel: command.speakerLabel
                 ))
+
+            let contextLines = Array(lines.suffix(3).map(\.text))
+            let lineID = command.lineID
+            let sourceText = command.text
+            transcriptPresentation.update(id: lineID) { $0.isTranslating = true }
+
+            translationCoordinator.translateCompletedLine(
+                lineID: lineID,
+                sourceText: sourceText,
+                contextLines: contextLines,
+                displayMode: displayMode,
+                onStreamingUpdate: { [weak self] id, partialTranslation in
+                    self?.transcriptPresentation.update(id: id) {
+                        $0.translatedText = partialTranslation
+                        $0.isTranslating = true
+                    }
+                },
+                onFinished: { [weak self] id, finalTranslation, lang in
+                    guard let self else { return }
+                    self.transcriptPresentation.update(id: id) {
+                        $0.translatedText = finalTranslation
+                        $0.sourceLanguage = lang
+                        $0.isTranslating = false
+                    }
+                    if let finalTranslation {
+                        Task {
+                            try? await self.coordinator.attachLineTranslation(
+                                lineID: id,
+                                translatedText: finalTranslation,
+                                sourceLanguage: lang
+                            )
+                        }
+                    }
+                }
+            )
         }
         guard let payload = pendingAttributions.take(recordID: command.sessionID, identity: itemIdentity),
               command.formal else { return }
@@ -1489,7 +1733,12 @@ public final class CaptionSession {
             let rows = try await coordinator.lines(sessionID: sessionID)
             let names = try await coordinator.speakerNames(sessionID: sessionID)
             try SessionExportPanel.write(
-                SessionExportPayload(record: record, lines: rows, speakerNames: names),
+                SessionExportPayload(
+                    record: record,
+                    lines: rows,
+                    speakerNames: names,
+                    captionDisplayMode: displayMode
+                ),
                 as: .srt
             )
         } catch {

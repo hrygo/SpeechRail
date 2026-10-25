@@ -78,6 +78,9 @@ public struct AssistantView: View {
     /// 刚落进记忆的那一句的回执（写在对话卡页脚那一行）。**必须有回执**：
     /// 「记住」按下去只是往库里写一行，屏幕上零变化就与"点了没反应"没有区别。
     @State private var memoryNote: String?
+    @State private var isCopiedReviewedRecord = false
+    /// 最近一次点击复制的 Turn ID，用于行内 2 秒微反馈（对齐行业即时反馈规范）
+    @State private var copiedTurnID: String?
     /// 这一页此刻在不在屏幕上（`onAppear` / `onDisappear`）。「结束之后落到刚结束的那一段」
     /// 只对**正在看的这一页**做：结束一场会议时用户人在会议页，那时把助手页翻到一条旧记录上，
     /// 等他半小时后回来会看见"刚结束"三个字——那是一条过期的谎。
@@ -360,6 +363,8 @@ public struct AssistantView: View {
                 ) {
                     setInspectorCollapsed(!isInspectorCollapsed, autoCollapsed: false)
                 }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .help("切换辅助侧栏折叠状态（⌥⌘I）")
                 .focused($inspectorToggleFocused)
             }
         }
@@ -1110,8 +1115,14 @@ public struct AssistantView: View {
                 spacing: SpeechRailDesignTokens.Spacing.sm
             ) {
                 ForEach(Self.scenarioCards) { item in
+                    let isStaged = typed == item.prompt
                     Button {
-                        typed = item.prompt
+                        if isStaged {
+                            // 第二次点击已暂存卡片直接发送
+                            send()
+                        } else {
+                            typed = item.prompt
+                        }
                     } label: {
                         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Image(systemName: item.icon)
@@ -1135,6 +1146,22 @@ public struct AssistantView: View {
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 0)
+
+                            if isStaged {
+                                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                                    Text("发问")
+                                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                    Image(systemName: "arrow.up.circle.fill")
+                                        .font(SpeechRailDesignTokens.Typography.caption)
+                                }
+                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                                .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+                                .background(
+                                    SpeechRailDesignTokens.Color.rail.opacity(0.12),
+                                    in: Capsule()
+                                )
+                            }
                         }
                         .padding(SpeechRailDesignTokens.Spacing.sm)
                         .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
@@ -1144,11 +1171,14 @@ public struct AssistantView: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                                .stroke(
+                                    isStaged ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Surface.border,
+                                    lineWidth: isStaged ? SpeechRailDesignTokens.Stroke.strong : SpeechRailDesignTokens.Stroke.hairline
+                                )
                         )
                     }
                     .buttonStyle(.plain)
-                    .help("填入「\(item.prompt)」")
+                    .help(isStaged ? "已填入此模板，再次点击或敲回车直接发送" : "填入「\(item.prompt)」")
                     .speechRailPointerCursor()
                 }
             }
@@ -1355,6 +1385,12 @@ public struct AssistantView: View {
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
             CardFoot(note: "密钥通过本地安全加密保管（AES-GCM），不进配置文件，也不出现在日志中。") {
+                if isShowingQuickLLM && preferences.isLLMConfigured(for: .assistant) {
+                    Button("收起") {
+                        setShowingQuickLLM(false)
+                    }
+                    .speechRailButton(.secondary)
+                }
                 Button("保存并开始对话") { Task { await saveLLMAndStart() } }
                     .speechRailButton(.primary)
                     .disabled(!canSaveLLM)
@@ -1562,10 +1598,12 @@ public struct AssistantView: View {
                             // 用户实时语音转写中
                             if let partial = assistant.partialText, !partial.isEmpty {
                                 SessionTurnRow(who: "你", text: partial, isPartial: true, bodyWidth: bodyWidth)
+                                    .id("live-partial-user")
                             }
                             // 助手思考态
                             if assistant.phase == .thinking && assistant.streamingReply == nil {
                                 liveAssistantThinkingBubble
+                                    .id("live-thinking-bubble")
                             }
                             // 助手实时朗读回复流
                             if let streaming = assistant.streamingReply, !streaming.isEmpty {
@@ -1573,6 +1611,7 @@ public struct AssistantView: View {
                                     who: "助手", isVoice: true, voiceBadge: currentVoiceName,
                                     text: streaming, isPartial: true, bodyWidth: bodyWidth
                                 )
+                                .id("live-streaming-reply")
                             }
                         }
                     }
@@ -1587,10 +1626,57 @@ public struct AssistantView: View {
                         withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
                 }
+                .onChange(of: assistant.streamingReply) { _, newReply in
+                    guard newReply != nil else { return }
+                    if reduceMotion {
+                        proxy.scrollTo("live-streaming-reply", anchor: .bottom)
+                    } else {
+                        withAnimation { proxy.scrollTo("live-streaming-reply", anchor: .bottom) }
+                    }
+                }
+                .onChange(of: assistant.partialText) { _, newPartial in
+                    guard newPartial != nil else { return }
+                    if reduceMotion {
+                        proxy.scrollTo("live-partial-user", anchor: .bottom)
+                    } else {
+                        withAnimation { proxy.scrollTo("live-partial-user", anchor: .bottom) }
+                    }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             SessionHairline()
+            // 麦克风静音显著感知横条：对齐行业标准防无声说话挫败
+            if assistant.isMuted {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Image(systemName: "mic.slash.fill")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    Text("麦克风当前已静音，助手暂时不会听到您的声音")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Spacer()
+                    Button("取消静音 (⌘⇧M)") {
+                        assistant.toggleMute()
+                    }
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    .buttonStyle(.plain)
+                    .speechRailPointerCursor()
+                }
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
+                .background(
+                    SpeechRailDesignTokens.Color.attention.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                        .stroke(SpeechRailDesignTokens.Color.attention.opacity(0.2), lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                )
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+            }
             // 上下文裁剪说明属于本轮对话状态，保留在输入区旁。
             if let contextNote = assistant.contextOmissionNote {
                 NoticeBar(tone: .info, message: contextNote)
@@ -1926,7 +2012,8 @@ public struct AssistantView: View {
         }
         .speechRailButton(assistant.isMuted ? .primary : .secondary)
         .fixedSize(horizontal: true, vertical: false)
-        .help(assistant.isMuted ? "取消静音，恢复麦克风拾音" : "静音麦克风，暂停语音输入")
+        .keyboardShortcut("m", modifiers: [.command, .shift])
+        .help(assistant.isMuted ? "取消静音，恢复麦克风拾音（⌘⇧M）" : "静音麦克风，暂停语音输入（⌘⇧M）")
         .accessibilityLabel(assistant.isMuted ? "取消静音麦克风" : "静音麦克风")
         .accessibilityValue(assistant.isMuted ? "已静音" : "正在拾音")
     }
@@ -2003,15 +2090,31 @@ public struct AssistantView: View {
         case .saved(let turn):
             return turnRow(turn)
         case .accepted(let command, let failure):
+            let commandID = "cmd-\(command.observedAt.timeIntervalSince1970)"
+            var pills: [SessionTurnRow.Pill] = [
+                .init(tone: failure == nil ? .neutral : .attention,
+                      label: failure == nil ? "正在保存" : "未保存")
+            ]
+            if copiedTurnID == commandID {
+                pills.append(.init(tone: .healthy, label: "已复制"))
+            }
             return SessionTurnRow(
                 who: "你",
-                pills: [.init(tone: failure == nil ? .neutral : .attention,
-                              label: failure == nil ? "正在保存" : "未保存")],
+                pills: pills,
                 timestamp: Self.clock(command.observedAt),
                 text: command.text,
                 bodyWidth: bodyWidth,
                 actions: [.copy],
-                onAction: { _ in copy(command.text) }
+                onAction: { _ in
+                    copy(command.text)
+                    copiedTurnID = commandID
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        if copiedTurnID == commandID {
+                            copiedTurnID = nil
+                        }
+                    }
+                }
             )
         }
     }
@@ -2024,6 +2127,14 @@ public struct AssistantView: View {
         }
         if turn.source == .keyboard {
             pills.append(.init(tone: .neutral, label: "打字"))
+        }
+        // 正在重播此句时的动态指示
+        if assistant.replayingTurnID == turn.id {
+            pills.append(.init(tone: .healthy, label: "正在重播"))
+        }
+        // 本句刚被复制时的短暂微反馈
+        if copiedTurnID == turn.id {
+            pills.append(.init(tone: .healthy, label: "已复制"))
         }
         // VA-12/A41：完整生成但未播完时保留全文，挂“朗读未完成”交付说明，
         // 不截同比例字符、不编造已听文本。
@@ -2060,7 +2171,15 @@ public struct AssistantView: View {
                         break
                     }
                     Task { await assistant.replay(turn: turn) }
-                case .copy: copy(turn.text)
+                case .copy:
+                    copy(turn.text)
+                    copiedTurnID = turn.id
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        if copiedTurnID == turn.id {
+                            copiedTurnID = nil
+                        }
+                    }
                 case .remember: Task { await remember(turn) }
                 }
             }
@@ -2108,6 +2227,7 @@ public struct AssistantView: View {
     private func copy(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+        memoryNote = "已复制内容至剪贴板"
     }
 
     // MARK: 音色：某一句是谁的声音
@@ -2479,7 +2599,8 @@ public struct AssistantView: View {
                     assistant.toggleMute()
                 }
                 .speechRailButton(.secondary)
-                .help("只是暂时不说了；对话、记录都留着。要结束用页头的「结束对话」")
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+                .help("只是暂时不说了；对话、记录都留着。快捷键 ⌘⇧M")
                 .accessibilityLabel(assistant.isMuted ? "取消静音麦克风" : "静音麦克风")
                 .accessibilityValue(assistant.isMuted ? "已静音" : "正在拾音")
 
@@ -2746,6 +2867,9 @@ public struct AssistantView: View {
         isSending = true
         sendFailure = nil
         Task {
+            if assistant.phase == .speaking {
+                await assistant.stopSpeaking()
+            }
             // 纯文字对话不需要麦克风，也不需要语音服务：ready 状态下直接建一条
             // 文字记录就发出去。以前这里是"先试着开麦，再忙等 3 秒等 sessionID"，
             // 于是麦克风被拒或别的功能占着设备时，发送既没反应又吞掉了草稿（D07）。
@@ -2852,6 +2976,15 @@ public struct AssistantView: View {
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .background {
+            // macOS Pro App 标准辅助栏切换快捷键（⌥⌘1 ~ ⌥⌘4）
+            HStack(spacing: 0) {
+                Button("") { inspectorTab = .session }.keyboardShortcut("1", modifiers: [.option, .command]).opacity(0).frame(width: 0, height: 0)
+                Button("") { inspectorTab = .voice }.keyboardShortcut("2", modifiers: [.option, .command]).opacity(0).frame(width: 0, height: 0)
+                Button("") { inspectorTab = .record }.keyboardShortcut("3", modifiers: [.option, .command]).opacity(0).frame(width: 0, height: 0)
+                Button("") { inspectorTab = .memory }.keyboardShortcut("4", modifiers: [.option, .command]).opacity(0).frame(width: 0, height: 0)
+            }
+        }
     }
 
     private var factsTabBody: some View {
@@ -3604,6 +3737,7 @@ public struct AssistantView: View {
                         .textFieldStyle(.plain)
                         .font(SpeechRailDesignTokens.Typography.body)
                         .speechRailSingleLineInput(.regular)
+                        .accessibilityLabel("输入要添加的记忆内容")
                         .onSubmit { Task { await saveNewMemory() } }
 
                     HStack {
@@ -3613,14 +3747,21 @@ public struct AssistantView: View {
                             newMemoryDraft = ""
                         }
                         .speechRailButton(.secondary)
+                        .keyboardShortcut(.cancelAction)
 
                         Button("保存") { Task { await saveNewMemory() } }
                             .speechRailButton(.primary)
+                            .keyboardShortcut(.defaultAction)
                             .disabled(newMemoryDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+                .onKeyPress(.escape) {
+                    setAddingMemory(false)
+                    newMemoryDraft = ""
+                    return .handled
+                }
                 SessionHairline()
             }
 
@@ -3886,11 +4027,22 @@ public struct AssistantView: View {
     private var copyReviewedRecordButton: some View {
         Button {
             copy((review?.lines ?? []).map(\.text).joined(separator: "\n"))
+            isCopiedReviewedRecord = true
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                isCopiedReviewedRecord = false
+            }
         } label: {
-            Label("复制全文", systemImage: "doc.on.doc")
+            if isCopiedReviewedRecord {
+                Label("已复制全文", systemImage: "checkmark")
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ready)
+            } else {
+                Label("复制全文", systemImage: "doc.on.doc")
+            }
         }
         .speechRailButton(.secondary)
         .fixedSize(horizontal: true, vertical: false)
+        .help("复制整段对话的所有发言文字（剪贴板）")
     }
 
     private var continueReviewedRecordButton: some View {
@@ -4248,17 +4400,24 @@ public struct AssistantView: View {
             TextField("名字", text: $renameDraft)
                 .textFieldStyle(.plain)
                 .speechRailSingleLineInput(.regular)
+                .accessibilityLabel("记录名称")
                 .onSubmit { Task { await renameReviewedRecord() } }
             HStack {
                 Spacer(minLength: 0)
                 Button("取消") { isRenamingRecord = false }
                     .speechRailButton(.secondary)
+                    .keyboardShortcut(.cancelAction)
                 Button("保存") { Task { await renameReviewedRecord() } }
                     .speechRailButton(.primary)
+                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
         .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth)
+        .onKeyPress(.escape) {
+            isRenamingRecord = false
+            return .handled
+        }
         .operationFeedback([
             OperationFeedback(recordOperationError, onDismiss: { recordOperationError = nil })
         ])
@@ -4293,9 +4452,11 @@ public struct AssistantView: View {
             TextField("名字（列表里显示这一行）", text: $personaDraft.title)
                 .textFieldStyle(.plain)
                 .speechRailSingleLineInput(.regular)
+                .accessibilityLabel("角色名称")
             TextEditor(text: $personaDraft.body)
                 .font(SpeechRailDesignTokens.Typography.body)
                 .frame(minHeight: SpeechRailDesignTokens.Layout.personaEditorMinimumHeight)
+                .accessibilityLabel("角色设定正文")
                 .overlay {
                     RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                         .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
@@ -4304,12 +4465,14 @@ public struct AssistantView: View {
                 Spacer(minLength: 0)
                 Button("取消") { isCreatingPersona = false }
                     .speechRailButton(.secondary)
+                    .keyboardShortcut(.cancelAction)
                 Button("保存") {
                     if preferences.addPersona(title: personaDraft.title, body: personaDraft.body) != nil {
                         isCreatingPersona = false
                     }
                 }
                 .speechRailButton(.primary)
+                .keyboardShortcut(.defaultAction)
                 .disabled(
                     personaDraft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || personaDraft.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -4318,6 +4481,10 @@ public struct AssistantView: View {
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
         .frame(width: SpeechRailDesignTokens.Layout.Sheet.formWidth)
+        .onKeyPress(.escape) {
+            isCreatingPersona = false
+            return .handled
+        }
     }
 
     private var configurationHelpSheet: some View {
@@ -4338,11 +4505,16 @@ public struct AssistantView: View {
             HStack {
                 Spacer(minLength: 0)
                 Button("关闭") { isShowingConfigHelp = false }
-                    .speechRailButton(.secondary)
+                    .speechRailButton(.primary)
+                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
         .frame(width: SpeechRailDesignTokens.Layout.Sheet.formWidth)
+        .onKeyPress(.escape) {
+            isShowingConfigHelp = false
+            return .handled
+        }
     }
 
     // MARK: - 辅助面板响应式联动（接入中央 WindowLayoutContract）

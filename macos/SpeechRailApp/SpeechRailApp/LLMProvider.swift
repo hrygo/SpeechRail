@@ -597,6 +597,7 @@ public struct LLMConfiguration: Sendable, Equatable {
 public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
     case assistant
     case minutes
+    case captions
     case teleprompter
     case audiobook
 
@@ -606,6 +607,7 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
         switch self {
         case .assistant: "语音助手"
         case .minutes: "会议纪要"
+        case .captions: "实时字幕翻译"
         case .teleprompter: "AI 提词器"
         case .audiobook: "有声书工坊"
         }
@@ -615,6 +617,7 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
         switch self {
         case .assistant: "语音助手与会议中的内心 OS，共用这一类对话能力。"
         case .minutes: "会后长任务，适合结构化输出能力更强的模型。"
+        case .captions: "将外语视频或音频实时流式翻译为中文字幕；中文音频自动直通不调用。"
         case .teleprompter: "主动点击才发送原稿，跟读和直播过程中不会调用。"
         case .audiobook: "主动点击分析全书时才发送正文窗口，阅读或听书过程中不会调用。"
         }
@@ -622,7 +625,7 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
 
     public var requiredOperation: LLMOperation {
         switch self {
-        case .minutes, .teleprompter, .audiobook: .chat
+        case .minutes, .captions, .teleprompter, .audiobook: .chat
         case .assistant: .responses
         }
     }
@@ -1347,6 +1350,58 @@ public actor LLMProvider {
                 delivery.finish()
             } catch {
                 delivery.finish(throwing: error)
+            }
+        }
+        delivery.cancelWhenTerminated { task.cancel() }
+        return delivery.stream
+    }
+
+    /// 专供实时字幕的低延迟流式翻译。设置紧凑超时预算（firstTextTimeout=8s, stallTimeout=5s, maxOutputTokens=256），保证字幕翻译绝不挂起。
+    public func streamTranslation(
+        configuration: LLMConfiguration,
+        prompt: String,
+        instructions: String,
+        apiKey: String?
+    ) -> AsyncThrowingStream<String, Error> {
+        let messages = [
+            LLMMessage(role: .developer, text: instructions),
+            LLMMessage(role: .user, text: prompt)
+        ]
+        let delivery = LLMStreamDelivery()
+        let task = Task {
+            do {
+                try await self.runStream(
+                    configuration: configuration,
+                    messages: messages,
+                    apiKey: apiKey,
+                    maxOutputTokens: 256,
+                    instructions: instructions,
+                    firstTextTimeout: .seconds(8),
+                    stallTimeout: .seconds(5),
+                    onDelta: { try delivery.yield($0) }
+                )
+                delivery.finish()
+            } catch {
+                if configuration.compatibilityMode == .openAICompatible {
+                    do {
+                        let text = try await self.complete(
+                            configuration: configuration,
+                            messages: messages,
+                            apiKey: apiKey,
+                            maxOutputTokens: 256,
+                            instructions: instructions,
+                            timeout: 8
+                        )
+                        if !text.isEmpty {
+                            try delivery.yield(text)
+                        }
+                        delivery.finish()
+                    } catch {
+                        delivery.finish(throwing: error)
+                    }
+                } else {
+                    delivery.finish(throwing: error)
+                }
             }
         }
         delivery.cancelWhenTerminated { task.cancel() }

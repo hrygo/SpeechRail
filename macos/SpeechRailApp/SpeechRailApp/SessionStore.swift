@@ -69,7 +69,8 @@ public actor SessionStore: SessionArchiveWriting {
     /// 索引是**派生数据**：内容永远在权威表里，索引坏了重建即可。
     /// v10（MA-14）：`knowledge_execution_event` 双时间事件日志 + `knowledge_supersession`。
     /// v11（MA-11）：`minutes.body_origin` + `parent_minutes_id`——用户改纪要产生**新版本**。
-    public static let schemaVersion: Int32 = 14
+    /// v15：`session.target_bundle_id`, `session.target_app_name`, `line.source_language`, `line.translated_text`
+    public static let schemaVersion: Int32 = 15
 
     let directory: URL
     let fileManager: FileManager
@@ -200,6 +201,7 @@ public actor SessionStore: SessionArchiveWriting {
             try migrateV12ToV13()
             }
             if version < 14 { try migrateV13ToV14() }
+            if version < 15 { try migrateV14ToV15() }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
         } catch {
@@ -218,8 +220,9 @@ public actor SessionStore: SessionArchiveWriting {
         INSERT INTO session (
             id, kind, title, state, created_at, started_at, ended_at, engine_profile,
             audio_source, diarization, diarization_note, llm_endpoint, llm_model,
-            persona_id, persona_title, voice_id, voice_name, end_reason
-        ) VALUES (?, ?, ?, 'recording', ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL);
+            persona_id, persona_title, voice_id, voice_name, end_reason,
+            target_bundle_id, target_app_name
+        ) VALUES (?, ?, ?, 'recording', ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?);
         """
         try withStatement(sql) { statement in
             bind(statement, 1, id)
@@ -237,6 +240,8 @@ public actor SessionStore: SessionArchiveWriting {
             bind(statement, 13, draft.persona?.title)
             bind(statement, 14, draft.voice?.id)
             bind(statement, 15, draft.voice?.name)
+            bind(statement, 16, draft.targetBundleID)
+            bind(statement, 17, draft.targetAppName)
             try step(statement)
         }
         guard let record = try session(id: id) else {
@@ -292,7 +297,8 @@ public actor SessionStore: SessionArchiveWriting {
     func storedLine(id: String) throws -> TranscriptLine? {
         try withStatement("""
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
-               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual
+               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual,
+               source_language, translated_text
         FROM line WHERE id = ?;
         """) { statement in
             bind(statement, 1, id)
@@ -317,10 +323,12 @@ public actor SessionStore: SessionArchiveWriting {
         let sql = """
         INSERT INTO line (
             id, session_id, ordinal, role, speaker_label, text, t_start, t_end,
-            source, status, interrupted, device_switch, starred, timing_quality, created_at
+            source, status, interrupted, device_switch, starred, timing_quality, created_at,
+            source_language, translated_text
         ) VALUES (
             ?, ?, (SELECT COALESCE(MAX(ordinal), 0) + 1 FROM line WHERE session_id = ?),
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?,
+            ?, ?
         );
         """
         try withStatement(sql) { statement in
@@ -339,12 +347,35 @@ public actor SessionStore: SessionArchiveWriting {
             bind(statement, 13, draft.timingQuality?.rawValue)
             // 有观测时刻就用它；没有才退回"这一刻"（D09）。
             bind(statement, 14, (draft.createdAt ?? Date()).timeIntervalSince1970)
+            bind(statement, 15, draft.sourceLanguage)
+            bind(statement, 16, draft.translatedText)
             try step(statement)
         }
         guard let ordinal = try scalarInt("SELECT ordinal FROM line WHERE id = ?;", args: [.text(id)]) else {
             throw SessionStoreError.statementFailed("行写入后读不回序号")
         }
         return ordinal
+    }
+
+    /// 实时字幕流式翻译完成后，原位补写该行的源语言与中文译文，原文 `text` 与时间码不动。
+    @discardableResult
+    public func attachLineTranslation(
+        lineID: String,
+        translatedText: String?,
+        sourceLanguage: String?
+    ) throws -> TranscriptLine {
+        try withStatement(
+            "UPDATE line SET translated_text = ?, source_language = COALESCE(?, source_language) WHERE id = ?;"
+        ) { statement in
+            bind(statement, 1, translatedText)
+            bind(statement, 2, sourceLanguage)
+            bind(statement, 3, lineID)
+            try step(statement)
+        }
+        guard let saved = try storedLine(id: lineID) else {
+            throw SessionStoreError.statementFailed("译文对应的转录行不存在")
+        }
+        return saved
     }
 
     /// 分人链路只允许改归属列，**正文一个字不动**（§15.3 第 2 条）。
@@ -1691,7 +1722,7 @@ public actor SessionStore: SessionArchiveWriting {
                 continue
             }
             let line = try withStatement(
-                "SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status, interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual FROM line WHERE id = ? LIMIT 1;"
+                "SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status, interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual, source_language, translated_text FROM line WHERE id = ? LIMIT 1;"
             ) { statement -> TranscriptLine? in
                 bind(statement, 1, lineID)
                 guard try step(statement) == SQLITE_ROW else { return nil }
@@ -1863,10 +1894,10 @@ public actor SessionStore: SessionArchiveWriting {
                 summaries.append(
                     SessionSummary(
                         record: record,
-                        lineCount: Int(columnInt(statement, 18)),
-                        speakerCount: Int(columnInt(statement, 19)),
-                        openInterruption: columnText(statement, 20).map(SessionInterruptionReason.init(reading:)),
-                        latestMinutesStatus: columnText(statement, 21).flatMap(MinutesStatus.init(rawValue:))
+                        lineCount: Int(columnInt(statement, 20)),
+                        speakerCount: Int(columnInt(statement, 21)),
+                        openInterruption: columnText(statement, 22).map(SessionInterruptionReason.init(reading:)),
+                        latestMinutesStatus: columnText(statement, 23).flatMap(MinutesStatus.init(rawValue:))
                     )
                 )
             }
@@ -1878,7 +1909,8 @@ public actor SessionStore: SessionArchiveWriting {
     public func lines(sessionID: String, includePartial: Bool = false) throws -> [TranscriptLine] {
         let sql = """
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
-               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual
+               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual,
+               source_language, translated_text
         FROM line WHERE session_id = ? \(includePartial ? "" : "AND status = 'final'")
         ORDER BY ordinal ASC;
         """
@@ -1896,7 +1928,8 @@ public actor SessionStore: SessionArchiveWriting {
         let limit = max(1, min(200, limit))
         let sql = """
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
-               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual
+               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual,
+               source_language, translated_text
         FROM line WHERE session_id = ? AND status = 'final' \(beforeOrdinal == nil ? "" : "AND ordinal < ?")
         ORDER BY ordinal DESC LIMIT ?;
         """
@@ -1915,7 +1948,8 @@ public actor SessionStore: SessionArchiveWriting {
     public func linesRange(sessionID: String, ordinals: ClosedRange<Int>) throws -> [TranscriptLine] {
         let sql = """
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
-               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual
+               interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual,
+               source_language, translated_text
         FROM line WHERE session_id = ? AND status = 'final' AND ordinal >= ? AND ordinal <= ? ORDER BY ordinal ASC;
         """
         return try withStatement(sql) { statement in
@@ -1942,7 +1976,8 @@ public actor SessionStore: SessionArchiveWriting {
             .replacingOccurrences(of: "_", with: "\\_") + "%"
         let sql = """
         SELECT l.id, l.session_id, l.ordinal, l.role, l.speaker_label, l.text, l.t_start, l.t_end,
-               l.source, l.status, l.interrupted, l.device_switch, l.starred, l.timing_quality, l.created_at, l.attribution_json, l.speaker_label_is_manual
+               l.source, l.status, l.interrupted, l.device_switch, l.starred, l.timing_quality, l.created_at, l.attribution_json, l.speaker_label_is_manual,
+               l.source_language, l.translated_text
         FROM line l JOIN session s ON s.id = l.session_id
         WHERE l.status = 'final' AND l.text LIKE ? ESCAPE '\\'
         \(kind == nil ? "" : "AND s.kind = ?")
@@ -3549,7 +3584,7 @@ public actor SessionStore: SessionArchiveWriting {
     static let sessionColumns = """
     id, kind, title, state, created_at, started_at, ended_at, engine_profile, audio_source,
     diarization, diarization_note, llm_endpoint, llm_model, persona_id, persona_title,
-    voice_id, voice_name, end_reason
+    voice_id, voice_name, end_reason, target_bundle_id, target_app_name
     """
 
     private static func sessionRecord(from statement: OpaquePointer) -> SessionRecord? {
@@ -3579,7 +3614,9 @@ public actor SessionStore: SessionArchiveWriting {
             llmModel: columnText(statement, 12),
             persona: persona,
             voice: voice,
-            endReason: columnText(statement, 17).flatMap(SessionEndReason.init(rawValue:))
+            endReason: columnText(statement, 17).flatMap(SessionEndReason.init(rawValue:)),
+            targetBundleID: columnText(statement, 18),
+            targetAppName: columnText(statement, 19)
         )
     }
 
@@ -3603,7 +3640,9 @@ public actor SessionStore: SessionArchiveWriting {
             attributionUnits: columnText(statement, 15).flatMap { value in
                 try? JSONDecoder().decode([TranscriptAttributionUnit].self, from: Data(value.utf8))
             } ?? [],
-            speakerLabelIsManual: columnInt(statement, 16) != 0
+            speakerLabelIsManual: columnInt(statement, 16) != 0,
+            sourceLanguage: sqlite3_column_count(statement) > 17 ? columnText(statement, 17) : nil,
+            translatedText: sqlite3_column_count(statement) > 18 ? columnText(statement, 18) : nil
         )
     }
 

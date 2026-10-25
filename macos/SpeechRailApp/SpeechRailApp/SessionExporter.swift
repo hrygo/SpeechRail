@@ -58,17 +58,20 @@ public struct SessionExportPayload: Sendable {
     public var lines: [TranscriptLine]
     public var speakerNames: [String: String]
     public var minutes: MinutesVersion?
+    public var captionDisplayMode: CaptionDisplayMode
 
     public init(
         record: SessionRecord,
         lines: [TranscriptLine],
         speakerNames: [String: String] = [:],
-        minutes: MinutesVersion? = nil
+        minutes: MinutesVersion? = nil,
+        captionDisplayMode: CaptionDisplayMode = .bilingual
     ) {
         self.record = record
         self.lines = lines
         self.speakerNames = speakerNames
         self.minutes = minutes
+        self.captionDisplayMode = captionDisplayMode
     }
 
     var title: String {
@@ -180,7 +183,13 @@ public enum SessionExporter {
             // 未封存的记录导出来是「还没结束」，不是「00:00」——后者会让人以为这场会议没录上。
             rows.append("| 时长 | 未结束 |")
         }
-        rows.append("| 音频来源 | \(payload.record.audioSource.title) |")
+        let audioSourceText: String
+        if let appName = payload.record.targetAppName, !appName.isEmpty {
+            audioSourceText = "\(payload.record.audioSource.title) · \(appName)"
+        } else {
+            audioSourceText = payload.record.audioSource.title
+        }
+        rows.append("| 音频来源 | \(audioSourceText) |")
         rows.append("| 识别精度 | \(payload.record.engineProfile) |")
         rows.append("| 说话人 | \(diarizationText(payload.record)) |")
         if let voice = payload.record.voice {
@@ -242,7 +251,20 @@ public enum SessionExporter {
             }
             if end <= start { end = start + 0.5 }
             previousEnd = end
-            let text = payload.transcriptText(for: line)
+            let rawText = payload.transcriptText(for: line)
+            let text: String
+            if let translated = line.translatedText, !translated.isEmpty {
+                switch payload.captionDisplayMode {
+                case .chineseOnly:
+                    text = translated
+                case .originalOnly:
+                    text = rawText
+                case .bilingual:
+                    text = "\(translated)\n\(rawText)"
+                }
+            } else {
+                text = rawText
+            }
             blocks.append(
                 """
                 \(index + 1)

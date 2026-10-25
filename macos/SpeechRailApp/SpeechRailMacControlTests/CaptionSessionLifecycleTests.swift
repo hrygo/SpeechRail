@@ -1046,6 +1046,67 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertTrue(persistedLines.isEmpty)
     }
 
+    func testBandContentDualLanguageProjectionWithDisplayModes() {
+        let line = CaptionSession.Line(
+            id: "line-1",
+            ordinal: 1,
+            text: "Hello world",
+            translatedText: "你好世界"
+        )
+        // 1. 双语模式
+        let bilingualContent = CaptionBandContent(
+            lines: [line],
+            windowUnits: nil,
+            partialText: nil,
+            displayMode: .bilingual
+        )
+        XCTAssertEqual(bilingualContent.rows.count, 1)
+        XCTAssertEqual(bilingualContent.rows.first?.primaryText, "你好世界")
+        XCTAssertEqual(bilingualContent.rows.first?.secondaryText, "Hello world")
+
+        // 2. 仅中文模式
+        let chineseContent = CaptionBandContent(
+            lines: [line],
+            windowUnits: nil,
+            partialText: nil,
+            displayMode: .chineseOnly
+        )
+        XCTAssertEqual(chineseContent.rows.count, 1)
+        XCTAssertEqual(chineseContent.rows.first?.primaryText, "你好世界")
+        XCTAssertNil(chineseContent.rows.first?.secondaryText)
+
+        // 3. 仅原文模式
+        let originalContent = CaptionBandContent(
+            lines: [line],
+            windowUnits: nil,
+            partialText: nil,
+            displayMode: .originalOnly
+        )
+        XCTAssertEqual(originalContent.rows.count, 1)
+        XCTAssertEqual(originalContent.rows.first?.primaryText, "Hello world")
+        XCTAssertNil(originalContent.rows.first?.secondaryText)
+    }
+
+    func testSelectTargetUpdatesPlacementModeAndDraft() async throws {
+        let harness = try await makeHarness()
+        let targetApp = CaptionTargetApp(
+            bundleID: "com.apple.Safari",
+            appName: "Safari",
+            windowID: 1234,
+            pid: 5678
+        )
+
+        // 选择应用窗口 -> 吸附目标窗口模式
+        await harness.session.selectTarget(.app(targetApp))
+        XCTAssertEqual(harness.session.audioTarget, .app(targetApp))
+        XCTAssertEqual(harness.session.placementMode, .dockedToTargetWindow)
+
+        // 切换为麦克风 -> 自由悬停模式
+        await harness.session.selectTarget(.microphone)
+        XCTAssertEqual(harness.session.audioTarget, .microphone)
+        XCTAssertEqual(harness.session.placementMode, .freeFloatingPinned)
+    }
+
     @MainActor
     private final class Harness {
         let directory: URL

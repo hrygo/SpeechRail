@@ -173,10 +173,17 @@ struct CaptionBandMetrics: Equatable {
         var rows = 0
         for line in content.rows.reversed() where rows < limit {
             rows += visualRowCount(
-                for: line.text,
+                for: line.primaryText,
                 fontSize: fontSize,
                 availableWidth: textAvailableWidth(contentWidth: width, isPartial: line.isPartial)
             )
+            if let secondary = line.secondaryText, !secondary.isEmpty {
+                rows += visualRowCount(
+                    for: secondary,
+                    style: .callout,
+                    availableWidth: textAvailableWidth(contentWidth: width, isPartial: line.isPartial)
+                )
+            }
         }
         let blockedHeight = blocked.map {
             blockedRowHeight(title: $0.title, detail: $0.detail, contentWidth: width)
@@ -200,6 +207,7 @@ public final class CaptionBandWindowController: NSObject {
     private let defaults: UserDefaults
     private var panel: CaptionBandPanel?
     private var metrics = CaptionBandMetrics(visualRowCount: 2, fontSize: .standard, isHovering: false)
+    private let tracker = TargetWindowTracker()
 
     private let onOpenActiveSession: () -> Void
 
@@ -212,6 +220,9 @@ public final class CaptionBandWindowController: NSObject {
         self.defaults = defaults
         self.onOpenActiveSession = onOpenActiveSession
         super.init()
+        tracker.onGeometryChanged = { [weak self] geometry in
+            self?.handleTargetGeometryChanged(geometry)
+        }
     }
 
     /// 出现 / 隐藏。会话层只发这一个信号（`CaptionSession.presentBand`），
@@ -226,10 +237,31 @@ public final class CaptionBandWindowController: NSObject {
         panel.alphaValue = 1
         // `orderFrontRegardless`：非激活面板不调用 `makeKeyAndOrderFront`——那会把 App 激活。
         panel.orderFrontRegardless()
+        updateTrackingState()
     }
 
     public func hide() {
+        tracker.stopTracking()
         panel?.orderOut(nil)
+    }
+
+    public func updateTrackingState() {
+        if case .app(let target) = session.audioTarget, session.placementMode == .dockedToTargetWindow {
+            tracker.startTracking(target: target)
+        } else {
+            tracker.stopTracking()
+        }
+    }
+
+    private func handleTargetGeometryChanged(_ geometry: TargetWindowTracker.TargetWindowGeometry?) {
+        guard session.placementMode == .dockedToTargetWindow, let panel else { return }
+        guard let geometry else { return }
+        let targetFrame = geometry.frame
+        let bandWidth = panel.frame.width
+        let bandHeight = panel.frame.height
+        let bandX = targetFrame.midX - bandWidth / 2
+        let bandY = targetFrame.minY + SpeechRailDesignTokens.CaptionBand.dockedBottomInset
+        panel.setFrame(NSRect(x: bandX, y: bandY, width: bandWidth, height: bandHeight), display: true, animate: false)
     }
 
     private func ensurePanel() -> CaptionBandPanel {
@@ -391,6 +423,10 @@ extension CaptionBandWindowController: NSWindowDelegate {
     public func windowDidMove(_ notification: Notification) {
         guard let panel else { return }
         remember(panel)
+        if session.placementMode == .dockedToTargetWindow {
+            session.placementMode = .freeFloatingPinned
+            tracker.stopTracking()
+        }
     }
 
     public func windowDidResize(_ notification: Notification) {
@@ -497,7 +533,7 @@ struct CaptionBandView: View {
         ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(content.rows) { line in
-                    lineRow(text: line.text, isPartial: line.isPartial)
+                    lineRow(line: line)
                         .id(line.id)
                 }
             }
@@ -529,21 +565,38 @@ struct CaptionBandView: View {
         .onChange(of: content) { _, _ in scrollToLatestIfFollowing() }
     }
 
-    private func lineRow(text: String, isPartial: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text(text)
-                .font(fontSize.font)
-                .foregroundStyle(
-                    isPartial
-                        ? SpeechRailDesignTokens.Color.inkSecondary
-                        : SpeechRailDesignTokens.Color.ink
-                )
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if isPartial {
-                Text("正在识别…")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+    private func lineRow(line: CaptionBandContent.Row) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(line.primaryText)
+                    .font(fontSize.font)
+                    .foregroundStyle(
+                        line.isPartial
+                            ? SpeechRailDesignTokens.Color.inkSecondary
+                            : SpeechRailDesignTokens.Color.ink
+                    )
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if line.isTranslating {
+                    HStack(spacing: 3) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Text("翻译中")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    }
+                } else if line.isPartial {
+                    Text("正在识别…")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                }
+            }
+            if let secondary = line.secondaryText, !secondary.isEmpty {
+                Text(secondary)
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Layout.captionLinePaddingH)
@@ -567,7 +620,21 @@ struct CaptionBandView: View {
                 }
             }
             fontMenu
+            displayModeMenu
+            targetAppButton
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+            if session.audioTarget?.isApp == true {
+                iconButton(
+                    systemImage: session.placementMode == .dockedToTargetWindow ? "dock.rectangle" : "macwindow.on.rectangle",
+                    label: session.placementMode == .dockedToTargetWindow ? "吸附于目标窗口（点击转为自由悬停）" : "自由悬停（点击吸附至窗口）"
+                ) {
+                    if session.placementMode == .dockedToTargetWindow {
+                        session.placementMode = .freeFloatingPinned
+                    } else {
+                        session.placementMode = .dockedToTargetWindow
+                    }
+                }
+            }
             iconButton(systemImage: "doc.on.doc", label: "复制这一段") {
                 copyCurrentSegment()
             }
@@ -590,6 +657,65 @@ struct CaptionBandView: View {
         )
         .padding(.horizontal, SpeechRailDesignTokens.Layout.captionBandToolbarPaddingH)
         .accessibilityIdentifier("caption-band-toolbar")
+    }
+
+    private var targetAppButton: some View {
+        Button {
+            Task { await session.promptSelectTarget() }
+        } label: {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Image(systemName: session.audioTarget?.isApp == true ? "macwindow" : "mic.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                Text(session.audioTarget?.displayTitle ?? "选择目标")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Layout.captionBandTagPaddingH)
+            .padding(.vertical, SpeechRailDesignTokens.Layout.captionBandTagPaddingV)
+        }
+        .buttonStyle(.plain)
+        .help("切换收音目标应用或麦克风")
+        .speechRailPointerCursor()
+    }
+
+    private var displayModeMenu: some View {
+        Menu {
+            ForEach(CaptionDisplayMode.allCases, id: \.self) { mode in
+                Button {
+                    session.displayMode = mode
+                } label: {
+                    if session.displayMode == mode {
+                        Label(mode.title, systemImage: "checkmark")
+                    } else {
+                        Text(mode.title)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Image(systemName: "character.book.closed")
+                    .font(.system(size: 11))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text(session.displayMode.title)
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Image(systemName: "chevron.down")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Layout.captionBandTagPaddingH)
+            .padding(.vertical, SpeechRailDesignTokens.Layout.captionBandTagPaddingV)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel("显示模式 \(session.displayMode.title)")
+        .speechRailPointerCursor()
     }
 
     private var fontMenu: some View {
@@ -778,6 +904,14 @@ struct CaptionBandView: View {
         case .serviceNotReady, .serviceBusy, .streamFailed:
             Button(reason.canResume ? "重新接上" : "重试") {
                 Task { await session.retry() }
+            }
+        case .noTargetSelected:
+            Button("选择目标窗口") {
+                Task { await session.promptSelectTarget() }
+            }
+        case .systemAudioUnavailable:
+            Button("切换为麦克风收音") {
+                Task { await session.selectTarget(.microphone) }
             }
         }
     }

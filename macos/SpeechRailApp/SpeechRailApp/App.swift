@@ -359,6 +359,7 @@ struct SpeechRailApp: App {
         // 分人现在是任务级 opt-in，能力由服务能力快照与 `health.diarization` 报告，
         // 不再按档位拦截。
         captionSession.diarizationPreference = { sessionPreferences.captionsDiarizationEnabled }
+        captionSession.wireProductionDependencies(preferences: sessionPreferences)
         assistantSession.availableVoices = { [weak appModel] in
             (appModel?.safeVoiceCatalog?.data ?? []).filter(\.available).map(\.name)
         }
