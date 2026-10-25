@@ -697,8 +697,7 @@ struct CaptionBandView: View {
         guard let tiering, tiering.stablePrefix + tiering.volatileTail == text else {
             return Text(text).foregroundStyle(baseColor)
         }
-        return Text(tiering.stablePrefix).foregroundStyle(baseColor)
-            + Text(tiering.volatileTail).foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+        return Text("\(Text(tiering.stablePrefix).foregroundStyle(baseColor))\(Text(tiering.volatileTail).foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary))")
     }
 
     // MARK: 悬停工具条
@@ -961,13 +960,13 @@ struct CaptionBandView: View {
 
     private var statusIndicatorColor: Color {
         if session.blocked != nil {
-            return SpeechRailDesignTokens.Color.amber
+            return SpeechRailDesignTokens.Color.attention
         }
         switch session.phase {
         case .running:
             return SpeechRailDesignTokens.Color.rail
         case .paused:
-            return SpeechRailDesignTokens.Color.amber
+            return SpeechRailDesignTokens.Color.attention
         case .idle, .preparing, .ending:
             return SpeechRailDesignTokens.Color.inkTertiary.opacity(0.6)
         }
