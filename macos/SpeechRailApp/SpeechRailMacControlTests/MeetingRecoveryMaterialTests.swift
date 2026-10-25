@@ -97,6 +97,44 @@ final class MeetingRecoveryMaterialTests: XCTestCase {
         XCTAssertEqual(lines.first?["speaker_label_is_manual"] as? Bool, false)
     }
 
+    /// 实时字幕的导出按显示模式投影：双语对照、仅中文、仅原文三种都走同一份 SRT 时间轴。
+    func testCaptionSRTProjectionFollowsCaptionDisplayMode() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "The budget is approved", source: .microphone, tStart: 0, tEnd: 3), id: "caption-en")
+        _ = try await store.attachLineTranslation(
+            lineID: "caption-en", translatedText: "预算已批准", sourceLanguage: "en"
+        )
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "这句本来就是中文", source: .microphone, tStart: 3, tEnd: 6), id: "caption-zh")
+
+        let sessions = try await store.listSessions()
+        let record = try XCTUnwrap(sessions.first)
+        let lines = try await store.lines(sessionID: id)
+
+        let bilingual = SessionExporter.export(
+            SessionExportPayload(record: record.record, lines: lines, captionDisplayMode: .bilingual),
+            as: .srt
+        )
+        XCTAssertTrue(bilingual.contains("预算已批准\nThe budget is approved"))
+        XCTAssertTrue(bilingual.contains("这句本来就是中文"), "中文行没有译文时原样导出")
+
+        let chineseOnly = SessionExporter.export(
+            SessionExportPayload(record: record.record, lines: lines, captionDisplayMode: .chineseOnly),
+            as: .srt
+        )
+        XCTAssertTrue(chineseOnly.contains("预算已批准"))
+        XCTAssertFalse(chineseOnly.contains("The budget is approved"), "仅中文模式不带原文")
+
+        let originalOnly = SessionExporter.export(
+            SessionExportPayload(record: record.record, lines: lines, captionDisplayMode: .originalOnly),
+            as: .srt
+        )
+        XCTAssertTrue(originalOnly.contains("The budget is approved"))
+        XCTAssertFalse(originalOnly.contains("预算已批准"), "仅原文模式不带译文")
+    }
+
     func testLiveAndStoredPresentationKeepMixedSpeakersUnicodeAndUnknownWords() {
         let units: [TranscriptAttributionUnit] = [
             .init(id: "a", textStart: 1, textEnd: 3, speakerLabel: "A"),

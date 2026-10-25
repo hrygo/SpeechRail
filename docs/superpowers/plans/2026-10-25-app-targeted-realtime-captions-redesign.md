@@ -2,13 +2,13 @@
 title: "实时字幕模块重构详细工程实施方案（研发执行手册）"
 status: approved
 audience: "SpeechRail 初级/中级研发工程师、测试工程师、Code Reviewer"
-version: "3.0.0"
+version: "3.1.0"
 date: 2026-10-25
 ---
 
 # 实时字幕模块重构详细工程实施方案（研发执行手册）
 
-> **致研发工程师**：本文档是可直接照单编码的**工程级执行手册（Runbook & Implementation Blueprint）**。文档已基于当前仓库 `SpeechRail 5.0.0` 源码完成逐行对账，明确了每个文件的修改位置、行号、数据结构、完整核心代码模板、SQL 迁移语句、构建系统登记方式以及单元测试验收命令。请严格按 **Task 1 → Task 5** 顺序执行，每完成一个 Task 必须跑通对应的单元测试门禁后再进入下一个 Task。
+> **致研发工程师**：本文档是可直接照单编码的**工程级执行手册（Runbook & Implementation Blueprint）**。文档已基于当前仓库 `SpeechRail 5.0.0` 源码完成逐行对账，并结合同声传译（SimulMT / SimulST）与流式语音识别领域的最新学术与工业界最佳实践（LocalAgreement-2、Conversational SimulMT、Simul-LLM、Volatile Range 视觉分层），在 **v3.1.0** 中对**「字随话出」稳定性分层**与**「流式翻译 Context 工程」**进行了辩证重构。请严格按 **Task 1 → Task 5** 顺序执行，每完成一个 Task 必须跑通对应的单元测试门禁后再进入下一个 Task。
 
 ---
 
@@ -25,29 +25,42 @@ date: 2026-10-25
 | 编号 | 决策维度 | 已锁定方案 | 工程实现硬约束 |
 | :--- | :--- | :--- | :--- |
 | **D1** | **音频采集源** | **本机应用为主 + 麦克风可选** | 默认使用 `SystemAudioCapture`（XPC + `CoreAudioTapCapture`）按目标应用 `bundleID` 抓音；保留 `MicrophoneCapture` 作为备选切换项。 |
-| **D2** | **实时中译引擎** | **复用 `LLMProvider` 流式上下文翻译** | 新增 `LLMModule.captions`；中文音频（汉字占比 $\ge 55\%$）0 延迟直通免翻；外语音频走「Partial 节流单飞预览翻 + Completed 携带前 3 句上下文流式精翻」。 |
+| **D2** | **实时中译引擎** | **复用 `LLMProvider` 双阶段流式上下文翻译** | 新增 `LLMModule.captions`；中文音频（汉字字符比或词元比 $\ge 55\%$ 且不含日文假名）0 延迟直通免翻；外语音频走「Stage 1：Partial 节流单飞预览翻（带 LocalAgreement-2 软前缀锚定）+ Stage 2：Completed 携带前 3 句**双语平行上下文**流式精翻 + 定稿瞬时草稿继承防白屏」。 |
 | **D3** | **字幕带窗口跟随** | **智能吸附 + 自由悬浮切换** | 默认 `.dockedToTargetWindow`（吸附在目标应用窗口底部内侧，随窗口移动/缩放/全屏自动跟随；切到 Obsidian 等其他应用记笔记时保持置顶可见）；用户手动拖动字幕带后自动切为 `.freeFloatingPinned`，工具栏提供「吸附回窗口」按钮一键归位。 |
 | **D4** | **目标应用选择交互** | **屏幕窗口拾取器（Window Picker）** | 提供类似 macOS 截图（`⌘⇧4` 后按空格）的全屏鼠标悬停高亮拾取器 + 底部「正在发声/运行的应用图标排 + 麦克风按钮」快捷胶囊栏。 |
 
+### 1.3 核心技术深水区：辩证推理与业界最佳实践对齐（v3.1.0 增补）
+
+在实时字幕场景中，**“字随话出”（低延迟增量上屏）**与**“流式翻译 Context 工程”**面临着低延迟（Latency）、视觉抗闪烁（Anti-Flicker）与跨语系翻译准确度（Quality）的天然三角悖论。若盲目照搬离线翻译或单一论文方案，极易引发严重线上退化。本方案经辩证推演后锁定以下 4 项工程决策：
+
+| 核心矛盾议题 | 正题（常见直觉/激进方案） | 反题（在 SpeechRail 真实场景下的缺陷与反例） | 合题（SpeechRail v3.1.0 锁定的业界最佳方案） |
+| :--- | :--- | :--- | :--- |
+| **议题 A：流式翻译的前缀锁定策略**<br>（Hard Prefix Constraint vs. 跨语系倒装） | **硬前缀强制续写（Assistant Prefill / Hard Prefix）**：如部分同传系统将上一轮 Partial 译文强制作为 Decoder 输入前缀，要求 LLM 只能往后追加字词，实现“绝对不改字”。 | 1. **语序倒装陷阱（SVO/SOV $\rightarrow$ 中文）**：英语后置从句、日语/德语谓语后置极普遍（如 Partial 1 为 `"I think the latency..."` 译为 `"我认为延迟……"`，Partial 2 出现 `"is unlikely to be fixed unless..."` 或否定后置），硬锁前缀会迫使模型造出严重欧化病句甚至正话反说。<br>2. **多端点协议异构**：`LLMProvider` 需兼容 OpenAI `/v1/responses`、`/v1/chat/completions` 及本地 Ollama/vLLM，诸多端点或推理模型不支持 Assistant Prefill。 | **LocalAgreement-2 稳定前缀提取 + 提示词软锚定（Soft Prefix Anchor）+ 定稿瞬时继承**：<br>1. 在协调器内对相邻两次 Partial 译文提取最长公共前缀（LCP，扣除末尾 2 个易变字）作为 `stabilizedDraft`；<br>2. 将草稿通过 Prompt 的 `【当前句已上屏预览译文】` 传入，指示模型**“若核心语义与极性未反转，优先沿用前半句措辞；若出现倒装或否定则允许重排”**；<br>3. 句子定稿（Completed）瞬间，`Line.translatedText` **先原位继承 `partialTranslatedText`**，消除“中文预览 → 闪回英文 → 重出中文”的视觉白屏。 |
+| **议题 B：流式翻译的 Context 结构**<br>（单语原文滑窗 vs. 双语平行滑窗 vs. 长上下文） | **单语原文滑窗**（仅传前 3 句源语言 `text`）或 **无界长历史灌入**（传入前 20 句全文）。 | 1. **只传源语言原文的致命缺陷**：LLM 看不到自己前 3 句选定的中文译词，导致同一人名、专业术语、代词（他/她/它）在相邻句之间反复漂移（如前句译“史密斯”，后句译“斯密斯”）。<br>2. **长历史灌入的副作用**：每 3~5 秒一次请求，长上下文不仅拉高 TTFT，且轻量模型（7B/8B）极易把前文未翻完的句子一并复读输出。<br>3. **自污染陷阱（Self-Contamination）**：若先将定稿行 `apply` 进 `lines` 再取 `lines.suffix(3)`，当前句自己会混入 `【前文背景】`！ | **去重防自污染 + 双语平行滑窗（Parallel Source-Target Turns）+ 静态前缀缓存对齐**：<br>1. **严格排除当前句**：在 `didSaveTranscript` 插入新行前提取历史（或显式过滤 `line.id != currentLineID`）；<br>2. **双语平行对（`CaptionContextTurn`）**：前文窗口（Partial 2 句 / Completed 3 句）采用 `"原文：<src> → 译文：<tgt>"` 成对注入（Conversational SimulMT, [arXiv:2402.10552](https://arxiv.org/abs/2402.10552)）；<br>3. **KV Cache 友好排布**：将 `systemInstructions` + 可选会话术语表（`sessionGlossary`）固定在消息头部，动态上下文按时间正序排列，最大化 Prompt Caching 命中率。 |
+| **议题 C：“字随话出”的预览稳定性与纠错自由度**<br>（ASR Token Rollback vs. Prefix-Free Review） | **早期即锁死识别前缀**（`stable_prefix_codepoints > 0`），禁止后续修改已显示的字。 | 1. **声学右上下文缺失**：中英文同音词与连读在缺乏后续 1~2 秒声学特征时必然存在歧义；<br>2. **伪独立共识**：`BoundQwen3Decoder` 在 4 秒后启用了 `rollback_tokens = 5` 的前缀复用启发式，相邻两次预览前缀相同**部分源于被喂了相同 Token 前缀**，不能当作声学绝对正确的证明。 | **后端两级纠错（回退预览 + Prefix-Free 整段/窗口复核）+ 客户端视觉分层 + 吐字平滑**：<br>1. **后端**：前 4 秒（`initial_unfixed_samples = 64_000`）完全自由重塑，4 秒后回退末尾 5 个 Token 省算力；定稿（`full_segment` 或 `revision_window_v1` 14s 窗）执行 **100% 无前缀约束重解码 + `Qwen3-ForcedAligner` 边界裁剪**；<br>2. **客户端视觉分层**：计算相邻 `partialText` 的公共前缀（扣除末尾活跃区），在 UI 上区分**稳定前缀**与**活跃识别尾部**，避免整行同色闪烁。 |
+| **议题 D：Partial 翻译触发策略**<br>（高频逐包触发 vs. 多维自适应门控） | 每收到一次 500ms ASR `partial` 快照即调用一次 LLM 流式翻译。 | 8 秒长句会产生 16 次并发/取消的 LLM 请求，打爆本地推理队列或触发云端 API 429 限流，且 1~2 个字母的变化毫无重翻价值。 | **四维自适应门控 + 定稿同文短路（Idempotent Short-Circuit）**：<br>1. **字符/词增量门控**：有效字符变化 $\ge 10$（或拉丁词增量 $\ge 3$）或命中子句标点边界（`,.;?!，。；？！、`）；<br>2. **450ms 防抖 + 单飞取消**；<br>3. **定稿同文短路与失败兜底**：若定稿原文与已完整生成的 Partial 预览原文完全一致且无新增上下文冲突，或 Stage 2 网络异常时，无缝保留预览译文，实现零白屏容错。 |
+
 ---
 
-## 2. 工程师必读：5 条红线与避坑指南（防踩坑清单）
+## 2. 工程师必读：6 条红线与避坑指南（防踩坑清单）
 
-在动手写第一行代码前，所有研发人员必须熟记以下 5 条仓库红线：
+在动手写第一行代码前，所有研发人员必须熟记以下 6 条仓库红线：
 
 1. **红线 1：SPM Target 与 Xcode App Target 的物理隔离**
    - `Package.swift` 中，`SpeechRailAppSupport` 是参与 `swift test` 的核心逻辑库，**不包含** `CaptureHelperClient.swift`（`SystemAudioCapture`）和 `CaptionBandWindow.swift`（它们在 `Package.swift` 的 `exclude` 列表中，只在 Xcode `SpeechRailApp` target 编译）。
-   - **做法**：绝对禁止在 `CaptionSession.swift` 中直接写 `SystemAudioCapture(...)` 或引用 `NSPanel`。必须在 `CaptionSession.swift` 中通过协议/闭包（`audioSourceForTarget: @MainActor (CaptionAudioTarget) -> AudioChunkSource`）解耦，并在新增的 App-only 文件 `CaptionSessionProductionWiring.swift` 中注入真实实现。
+   - **做法**：绝对禁止在 `CaptionSession.swift` 中直接写 `SystemAudioCapture(...)` 或引用 `NSPanel`。必须在 `CaptionSession.swift` 中通过协议/闭包（`makeAudioSourceForTarget: @MainActor (CaptionAudioTarget) -> AudioChunkSource`）解耦，并在新增的 App-only 文件 `CaptionSessionProductionWiring.swift` 中注入真实实现。
 2. **红线 2：严禁读取 `kCGWindowName`（防止触发屏幕录制 TCC 权限弹窗）**
    - 调用 `CGWindowListCopyWindowInfo` 获取窗口列表时，只允许读取 `kCGWindowNumber`、`kCGWindowOwnerPID`、`kCGWindowBounds`、`kCGWindowLayer`。
    - **绝对禁止读取 `kCGWindowName`**：一旦读取该键或调用截屏 API，macOS 会弹出「屏幕与系统音频录制」高危权限弹窗。应用名称与图标一律通过 `NSRunningApplication(processIdentifier: pid)` 的 `.localizedName` 与 `.icon` 获取。
 3. **红线 3：不修改 Python 服务端与 `/v1/realtime` WebSocket 契约**
    - `contracts/realtime-openai.md` 是冻结契约。`RealtimeASRClient` 保持 `language: nil`（服务端 `qwen3_streaming.py` 默认即启用 30 语种 `"auto"` 识别）。
-   - 客户端通过 `CaptionLanguageDetector`（Unicode 汉字占比 + `NLLanguageRecognizer`）在本地毫秒级判定识别出的文本是否为中文。
+   - 客户端通过 `CaptionLanguageDetector`（日文假名优先排除 + CJK 字符比/词元比双指标 + `NLLanguageRecognizer`）在本地 `< 0.1ms` 判定识别出的文本是否为中文。
 4. **红线 4：`SessionStore.sessionColumns` 列下标偏移保护**
    - 在 `SessionStore.swift:1864` 的 `listSessions` 中，子查询列紧跟在 `Self.sessionColumns` 之后（原先 `sessionColumns` 共 18 列，下标 `0...17`，子查询使用硬编码下标 `18, 19, 20, 21`）。
    - 当我们在 `sessionColumns` 末尾追加 `target_bundle_id, target_app_name`（变成 20 列，下标 `0...19`）时，**必须同步把 `listSessions` 中的子查询读取下标从 `18, 19, 20, 21` 更新为 `20, 21, 22, 23`**！否则会导致会话列表的行数统计与中断状态读错列。
-5. **红线 5：视觉常量必须集中注册在 `SpeechRailDesignTokens.swift`**
+5. **红线 5：提取翻译上下文时严禁混入当前句（防止 Context 自污染）**
+   - 在 `CaptionSession.didSaveTranscript` 中，**必须在将当前定稿行 `apply` 进 `transcriptPresentation` 之前提取 `lines.suffix(3)`**（或显式过滤 `$0.id != command.lineID`）。若先 `apply` 再取 `suffix(3)`，当前句本身会成为 `【前文背景】` 的最后一句，造成小模型漏翻或复读幻觉！
+6. **红线 6：视觉常量必须集中注册在 `SpeechRailDesignTokens.swift`**
    - 视图代码中禁止散落裸色值或魔法尺寸常量，所有新增尺寸/颜色语义 Token 先登记到 `SpeechRailDesignTokens.swift`。
 
 ---
@@ -78,16 +91,17 @@ date: 2026-10-25
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
 │  │ CaptionSession.swift                                                   │  │
 │  │ • 持有 audioTarget (.appWindow / .microphone) & displayMode            │  │
-│  │ • 统一在 didSaveTranscript 汇聚标准流与 windowCapture 定稿行             │  │
+│  │ • 维护 partialText 稳定前缀分层与定稿瞬间草稿译文无缝交接（防白屏闪烁）  │  │
+│  │ • 在 didSaveTranscript 唯一汇聚点先取前 3 句双语历史、再触发精翻         │  │
 │  └──────┬───────────────────────────────────────────────────┬─────────────┘  │
-│         │ 原文 partial / completed                           │ 译文持久化      │
+│         │ 原文 partial / completed + 双语平行 Context         │ 译文持久化      │
 │         ▼                                                   ▼                │
 │  ┌──────────────────────────────────────┐  ┌──────────────────────────────┐  │
 │  │ CaptionTranslator.swift              │  │ SessionStore (Schema v15)    │  │
 │  │ • CaptionLanguageDetector (汉字直通)  │  │ • session: +target_bundle_id │  │
-│  │ • Partial 500ms 节流单飞预览翻        │  │            +target_app_name  │  │
-│  │ • Completed 前 3 句上下文流式精翻      │  │ • line:    +source_language  │  │
-│  │ • 调用 LLMProvider.streamTranslation │  │            +translated_text  │  │
+│  │ • Stage 1: Partial 节流 + LCP 软锚定  │  │            +target_app_name  │  │
+│  │ • Stage 2: 前 3 句双语平行对流式精翻   │  │ • line:    +source_language  │  │
+│  │ • 可选 Session Glossary 静态前缀缓存  │  │            +translated_text  │  │
 │  └──────────────────────────────────────┘  └──────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -383,8 +397,19 @@ swift test --package-path macos/SpeechRailApp --filter "SessionStore|SessionExpo
 2. 在 `LLMProvider` actor 中新增 `streamTranslation` 方法：
    - 优先使用 `stream()`（Responses 流式）或当端点仅支持 `/chat/completions` 时回退 `completeChatText()`，设置紧凑超时预算（`firstTextTimeout = .seconds(8)`，`stallTimeout = .seconds(5)`，`maxOutputTokens = 256`），保证字幕翻译绝不挂起。
 
-#### Step 2.2：新建 `macos/SpeechRailApp/SpeechRailApp/CaptionTranslator.swift`
-创建该文件并加入 `Package.swift` 的 `SpeechRailAppSupport` `sources` 列表及 `project.pbxproj`：
+#### Step 2.2：新建/升级 `macos/SpeechRailApp/SpeechRailApp/CaptionTranslator.swift`
+创建或升级该文件并加入 `Package.swift` 的 `SpeechRailAppSupport` `sources` 列表及 `project.pbxproj`：
+
+**核心工程机制（v3.1.0 业界最佳实践）**：
+1. **`CaptionLanguageDetector`（中日消歧 + 字符比/词元比双指标）**：
+   - 先检测平假名/片假名（`0x3040...0x30FF`），避免日文汉字被误判为中文；
+   - 同时计算 `cjkCharRatio`（汉字占非空有效字符比）与 `cjkTokenRatio`（汉字数占“汉字数 + 拉丁单词数”之比），解决 `"今天讨论 API Design"` 这类中英夹杂短句被误判为外语的问题。
+2. **`CaptionContextTurn`（双语平行上下文对）**：
+   - 将历史句建模为 `(sourceText, translatedText)` 双语对，格式化为 `"原文：<src> → 译文：<tgt>"`（若前文是中文直通句则只输出原文），为大模型提供明确的专名译法与代词指代锚点（参考 [Conversational SimulMT, arXiv:2402.10552](https://arxiv.org/abs/2402.10552)）。
+3. **LocalAgreement-2 软前缀锚定（Soft Prefix Anchor）+ 同文短路（Idempotent Short-Circuit）**：
+   - 协调器维护 `lastPartialTranslation` 与 `stabilizedDraftPrefix`（取连续两次 Partial 译文的公共前缀并回退末尾 2 个易变汉字）；
+   - 将 `stabilizedDraftPrefix`（或上一轮草稿）通过 `priorDraftTranslation` 传入 Prompt， instructing 模型在核心语义与极性未反转时优先保持前半句措辞稳定，同时允许在遇到跨语系倒装或句末否定时重排全句（参考 [Simul-LLM, arXiv:2312.04691](https://arxiv.org/abs/2312.04691)）；
+   - 当 Stage 2 定稿原文 `trimmed` 与已完成 Stage 1 预览的原文 `lastCompletedPartialSourceText` 完全一致且 `lastCompletedPartialTranslation` 非空时，或当 Stage 2 网络失败时，支持直接复用预览译文兜底，实现零白屏与零重复算力浪费。
 
 ```swift
 import Foundation
@@ -395,6 +420,11 @@ public enum CaptionLanguageDetector: Sendable {
     public struct DetectionResult: Equatable, Sendable {
         public let languageCode: String
         public let isChinese: Bool
+
+        public init(languageCode: String, isChinese: Bool) {
+            self.languageCode = languageCode
+            self.isChinese = isChinese
+        }
     }
 
     /// 判定一段识别文本是否已经是中文（免翻译直通）。
@@ -406,16 +436,28 @@ public enum CaptionLanguageDetector: Sendable {
 
         var cjkCount = 0
         var meaningfulCount = 0
+        var latinWordCount = 0
+        var inLatinWord = false
+
         for scalar in trimmed.unicodeScalars {
             if CharacterSet.whitespacesAndNewlines.contains(scalar)
                 || CharacterSet.punctuationCharacters.contains(scalar)
                 || CharacterSet.decimalDigits.contains(scalar) {
+                inLatinWord = false
                 continue
             }
             meaningfulCount += 1
             // CJK Unified Ideographs + Extension A
             if (0x4E00...0x9FFF).contains(scalar.value) || (0x3400...0x4DBF).contains(scalar.value) {
                 cjkCount += 1
+                inLatinWord = false
+            } else if CharacterSet.letters.contains(scalar) {
+                if !inLatinWord {
+                    latinWordCount += 1
+                    inLatinWord = true
+                }
+            } else {
+                inLatinWord = false
             }
         }
 
@@ -432,8 +474,11 @@ public enum CaptionLanguageDetector: Sendable {
             return DetectionResult(languageCode: "ja", isChinese: false)
         }
 
-        let cjkRatio = Double(cjkCount) / Double(meaningfulCount)
-        if cjkRatio >= 0.55 {
+        let cjkCharRatio = Double(cjkCount) / Double(meaningfulCount)
+        let tokenTotal = cjkCount + latinWordCount
+        let cjkTokenRatio = tokenTotal > 0 ? Double(cjkCount) / Double(tokenTotal) : 0
+
+        if cjkCharRatio >= 0.55 || (cjkCount > 0 && cjkTokenRatio >= 0.55) {
             return DetectionResult(languageCode: "zh", isChinese: true)
         }
 
@@ -450,7 +495,28 @@ public enum CaptionLanguageDetector: Sendable {
     }
 }
 
+/// 双语平行上下文回合（Conversational SimulMT 最佳实践：同时携带源语言与已定稿中文译文以锁定专名与指代）。
+public struct CaptionContextTurn: Equatable, Sendable {
+    public let sourceText: String
+    public let translatedText: String?
+
+    public init(sourceText: String, translatedText: String? = nil) {
+        self.sourceText = sourceText
+        self.translatedText = translatedText
+    }
+
+    public var formattedPromptLine: String {
+        let src = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let tgt = translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !tgt.isEmpty, tgt != src {
+            return "原文：\(src) → 译文：\(tgt)"
+        }
+        return "原文：\(src)"
+    }
+}
+
 /// 翻译引擎抽象协议：生产环境注入 `LLMProvider`，单测注入确定性 Fake。
+@MainActor
 public protocol CaptionTranslationClient: Sendable {
     func translateStream(
         sourceText: String,
@@ -458,15 +524,16 @@ public protocol CaptionTranslationClient: Sendable {
     ) -> AsyncThrowingStream<String, any Error>
 }
 
-/// 实时字幕双阶段流式翻译协调器（Stage 1: Partial 节流预览 + Stage 2: Completed 上下文精翻）。
+/// 实时字幕双阶段流式翻译协调器（Stage 1: Partial 节流预览 + LCP 软前缀锚定；Stage 2: Completed 双语平行上下文精翻）。
 @MainActor
 public final class CaptionTranslationCoordinator {
     public static let systemInstructions = """
     你是一个专业的实时视频中文字幕翻译引擎。请将用户输入的【当前句】直接翻译为自然、简练、符合中文母语影视字幕习惯的简体中文。
     硬性规则：
     1. 只输出【当前句】对应的中文译文本身，严禁输出任何引号、前缀标签、解释说明或思考过程。
-    2. 参考【前文背景】保持专业术语、人名和代词指代一致，但绝不要重复翻译【前文背景】中的句子。
-    3. 若原文已经是通顺的中文，原样输出即可。
+    2. 严格参考【前文背景】中的双语对照关系，保持专业术语、人名译法和人称代词（他/她/它）前后一致，但绝不要重复翻译【前文背景】中的句子。
+    3. 若提供了【当前句已上屏草稿】，在核心语义与肯定/否定极性未反转的前提下，优先沿用草稿前半句措辞以减少屏幕闪烁；若后文出现倒装从句或语义反转，则以准确自然为先重排全句。
+    4. 若原文已经是通顺的中文，原样输出即可。
     """
 
     private let makeClient: @MainActor () -> (any CaptionTranslationClient)?
@@ -475,7 +542,8 @@ public final class CaptionTranslationCoordinator {
 
     private var partialTask: Task<Void, Never>?
     private var lastPartialSourceText: String = ""
-    private var lastPartialTriggeredAt: ContinuousClock.Instant?
+    private var lastPartialTranslation: String?
+    private var stabilizedDraftPrefix: String?
     private var finalTasks: [String: Task<Void, Never>] = [:]
 
     public init(
@@ -492,9 +560,17 @@ public final class CaptionTranslationCoordinator {
         partialTask?.cancel()
         partialTask = nil
         lastPartialSourceText = ""
-        lastPartialTriggeredAt = nil
+        lastPartialTranslation = nil
+        stabilizedDraftPrefix = nil
         for task in finalTasks.values { task.cancel() }
         finalTasks.removeAll()
+    }
+
+    /// 计算相邻两次译文或文本的 LocalAgreement-2 稳定前缀（回退末尾 `rollbackCount` 个字符以留出句尾语法调整余量）。
+    public static func localAgreementPrefix(_ previous: String, _ current: String, rollbackChars: Int = 2) -> String? {
+        let common = previous.commonPrefix(with: current).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard common.count > rollbackChars else { return nil }
+        return String(common.dropLast(rollbackChars))
     }
 
     /// Stage 1：当外语 partial 增长时，节流触发单飞预览翻译。
@@ -508,6 +584,8 @@ public final class CaptionTranslationCoordinator {
         guard !trimmed.isEmpty, displayMode != .originalOnly else {
             partialTask?.cancel()
             partialTask = nil
+            lastPartialTranslation = nil
+            stabilizedDraftPrefix = nil
             onUpdate(nil)
             return
         }
@@ -516,6 +594,8 @@ public final class CaptionTranslationCoordinator {
         if detection.isChinese {
             partialTask?.cancel()
             partialTask = nil
+            lastPartialTranslation = nil
+            stabilizedDraftPrefix = nil
             onUpdate(nil)
             return
         }
@@ -529,12 +609,12 @@ public final class CaptionTranslationCoordinator {
         let debounce = partialDebounce
 
         partialTask?.cancel()
-        partialTask = Task { @MainActor in
+        partialTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: debounce)
                 try Task.checkCancellation()
                 var accumulated = ""
-                for try await delta in client.translateStream(sourceText: trimmed, contextLines: contextLines.suffix(2)) {
+                for try await delta in client.translateStream(sourceText: trimmed, contextLines: Array(contextLines.suffix(2))) {
                     try Task.checkCancellation()
                     accumulated += delta
                     let cleaned = Self.cleanSubtitleOutput(accumulated)
@@ -542,13 +622,20 @@ public final class CaptionTranslationCoordinator {
                         onUpdate(cleaned)
                     }
                 }
+                let finalPartial = Self.cleanSubtitleOutput(accumulated)
+                if !finalPartial.isEmpty {
+                    if let prev = self?.lastPartialTranslation {
+                        self?.stabilizedDraftPrefix = Self.localAgreementPrefix(prev, finalPartial)
+                    }
+                    self?.lastPartialTranslation = finalPartial
+                }
             } catch {
                 // Partial 预览取消或失败静默忽略，不影响定稿翻译。
             }
         }
     }
 
-    /// Stage 2：当句子定稿（completed / sealed）时，取消 partial 预览并携带前 3 句上下文精翻。
+    /// Stage 2：当句子定稿（completed / sealed）时，取消 partial 预览并携带前 3 句双语平行上下文精翻。
     public func translateCompletedLine(
         lineID: String,
         sourceText: String,
@@ -559,7 +646,10 @@ public final class CaptionTranslationCoordinator {
     ) {
         partialTask?.cancel()
         partialTask = nil
+        let fallbackDraft = lastPartialTranslation
         lastPartialSourceText = ""
+        lastPartialTranslation = nil
+        stabilizedDraftPrefix = nil
 
         let trimmed = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         let detection = CaptionLanguageDetector.detect(for: trimmed)
@@ -574,7 +664,7 @@ public final class CaptionTranslationCoordinator {
 
         guard let client = makeClient() else {
             Task { @MainActor in
-                await onFinished(lineID, nil, detection.languageCode)
+                await onFinished(lineID, fallbackDraft, detection.languageCode)
             }
             return
         }
@@ -599,21 +689,37 @@ public final class CaptionTranslationCoordinator {
                 let finalCleaned = Self.cleanSubtitleOutput(accumulated)
                 await onFinished(
                     lineID,
-                    finalCleaned.isEmpty ? nil : finalCleaned,
+                    finalCleaned.isEmpty ? fallbackDraft : finalCleaned,
                     detection.languageCode
                 )
             } catch {
-                // 取消或网络错误时保留已有前缀或原文，不抛溃会话。
+                // 网络抖动或超时时兜底保留已流式到达的前缀或 Stage 1 预览译文，绝不退回空白。
+                let salvaged = Self.cleanSubtitleOutput(accumulated)
+                await onFinished(
+                    lineID,
+                    salvaged.isEmpty ? fallbackDraft : salvaged,
+                    detection.languageCode
+                )
             }
         }
     }
 
-    public static func buildUserPrompt(sourceText: String, contextLines: [String]) -> String {
-        if contextLines.isEmpty {
-            return "【当前句】\n\(sourceText)"
+    public static func buildUserPrompt(
+        sourceText: String,
+        contextLines: [String],
+        priorDraftTranslation: String? = nil
+    ) -> String {
+        var sections: [String] = []
+        if !contextLines.isEmpty {
+            let contextJoined = contextLines.joined(separator: "\n")
+            sections.append("【前文背景（仅供参考语境与专名译法，切勿重复翻译）】\n\(contextJoined)")
         }
-        let contextJoined = contextLines.joined(separator: "\n")
-        return "【前文背景（仅供参考语境，切勿翻译）】\n\(contextJoined)\n\n【当前句（请仅将此句译为简练中文字幕）】\n\(sourceText)"
+        if let draft = priorDraftTranslation?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !draft.isEmpty {
+            sections.append("【当前句已上屏草稿（若核心语义未反转请尽量保持前半句稳定）】\n\(draft)")
+        }
+        sections.append("【当前句（请仅将此句译为简练中文字幕）】\n\(sourceText)")
+        return sections.joined(separator: "\n\n")
     }
 
     public static func cleanSubtitleOutput(_ raw: String) -> String {
@@ -629,11 +735,11 @@ public final class CaptionTranslationCoordinator {
 ```
 
 #### Step 2.3：Task 2 验收门禁
-新建 `macos/SpeechRailApp/SpeechRailMacControlTests/CaptionTranslatorTests.swift`（并同步登记到 `project.pbxproj` 的 `SpeechRailAppTests` target），覆盖以下 4 个必测用例：
+新建或更新 `macos/SpeechRailApp/SpeechRailMacControlTests/CaptionTranslatorTests.swift`（并同步登记到 `project.pbxproj` 的 `SpeechRailAppTests` target），覆盖以下必测用例：
 1. `testChineseTextBypassesLLMTranslation`：输入 `"今天我们讨论实时字幕架构"` 及 `"今天讨论 API Design"`，断言 `isChinese == true`，`FakeTranslationClient` 调用次数为 `0`。
 2. `testJapaneseWithKanjiIsDetectedAsNonChinese`：输入 `"今日はいい天気ですね"`，断言 `languageCode == "ja"` 且 `isChinese == false`，触发中文翻译。
 3. `testPartialTranslationDebouncesAndCancelsStaleInFlight`：连续快速输入 3 次英文 partial，断言只保留最后一次流式结果。
-4. `testCompletedLineIncludesUpToThreeContextLines`：验证传入 5 条历史句时，Prompt 中精确携带最近 3 条作为 `【前文背景】`。
+4. `testCompletedLineIncludesUpToThreeContextLines`：验证传入 5 条双语历史句时，Prompt 中精确携带最近 3 条作为 `【前文背景】`，且不包含当前句自身。
 
 运行验证命令：
 ```bash
@@ -643,9 +749,9 @@ swift test --package-path macos/SpeechRailApp --filter CaptionTranslatorTests
 
 ---
 
-### Task 3：`CaptionSession` 重构（支持本机应用目标、热切换与双语状态投影）
+### Task 3：`CaptionSession` 重构（支持本机应用目标、热切换、防自污染双语 Context 与零白屏交接）
 
-**目标**：将 `CaptionSession.swift` 从硬编码麦克风升级为可驱动任意本机应用（`CaptionAudioTarget.app`）或麦克风（`.microphone`），支持会话中切换目标应用，并将双阶段中文译文汇聚到 `CaptionBandContent`。
+**目标**：将 `CaptionSession.swift` 从硬编码麦克风升级为可驱动任意本机应用（`CaptionAudioTarget.app`）或麦克风（`.microphone`），支持会话中切换目标应用，并在 `didSaveTranscript` 汇聚点实现**防自污染双语平行上下文提取**与**定稿瞬间预览译文无缝交接**。
 
 #### Step 3.1：升级 `CaptionSession.swift`
 打开 `macos/SpeechRailApp/SpeechRailApp/CaptionSession.swift`：
@@ -700,6 +806,12 @@ swift test --package-path macos/SpeechRailApp --filter CaptionTranslatorTests
    /// 由 App 层注入：提供翻译客户端（读取 SessionPreferences 中 .captions 模块的 LLM 配置）。
    public var makeTranslationClient: (@MainActor () -> (any CaptionTranslationClient)?)?
    ```
+   - 在 `partialText.didSet` 中构造双语平行上下文传入 `schedulePartialTranslation`：
+     ```swift
+     let context = lines.suffix(2).map {
+         CaptionContextTurn(sourceText: $0.text, translatedText: $0.translatedText).formattedPromptLine
+     }
+     ```
 
 4. **打通 `startPipeline()` 中的动态音源与 `SessionDraft`**：
    - 在 `startPipeline()`（约第 495 行）中：
@@ -735,12 +847,68 @@ swift test --package-path macos/SpeechRailApp --filter CaptionTranslatorTests
    }
    ```
 
-6. **在 `didSaveTranscript` 唯一汇聚点触发定稿翻译**：
-   - 在 `didSaveTranscript(_ command: TranscriptPersistenceQueue.Command, ordinal: Int)`（约第 1280 行）中，当 `sessionID == command.sessionID && command.formal` 时：
-     - 取当前 `lines.suffix(3).map(\.text)` 作为 `contextLines`；
-     - 调用 `translationCoordinator.translateCompletedLine(...)`：
-       - `onStreamingUpdate` 回调中调用 `transcriptPresentation.update(id: command.lineID) { $0.translatedText = partialTranslation; $0.isTranslating = true }`；
-       - `onFinished` 回调中调用 `coordinator.attachLineTranslation(lineID: command.lineID, translatedText: finalTranslation, sourceLanguage: lang)` 并更新 `isTranslating = false`。
+6. **【关键工程升级】在 `didSaveTranscript` 唯一汇聚点先提取双语平行历史、继承预览草稿、再触发定稿精翻**：
+   - 在 `didSaveTranscript(_ command: TranscriptPersistenceQueue.Command, ordinal: Int)`（约第 1573 行）中，当 `sessionID == command.sessionID && command.formal` 时：
+     1. **先在 `transcriptPresentation.apply` 之前提取历史上下文**（过滤掉 `id == command.lineID`），杜绝当前句混入 `【前文背景】` 的自污染 Bug；
+     2. **双语平行格式化**：将前 3 句封装为 `CaptionContextTurn(sourceText: $0.text, translatedText: $0.translatedText).formattedPromptLine`；
+     3. **定稿瞬间草稿继承**：将新行的 `translatedText` 先初始化为当前 `partialTranslatedText`（消除定稿瞬间中文消失、闪回外语再重出中文的视觉断层），随后由 `translateCompletedLine` 的流式回调实时覆盖并在 `onFinished` 落库 SQLite：
+     ```swift
+     if sessionID == command.sessionID, command.formal {
+         // 1. 在 apply 新行前提取前 3 句双语平行历史（严禁混入当前句 command.lineID）
+         let contextLines = Array(
+             lines
+                 .filter { $0.id != command.lineID }
+                 .suffix(3)
+                 .map { CaptionContextTurn(sourceText: $0.text, translatedText: $0.translatedText).formattedPromptLine }
+         )
+         let initialDraftTranslation = partialTranslatedText
+         let lineID = command.lineID
+         let sourceText = command.text
+
+         lineByItem[itemIdentity] = (lineID: lineID, ordinal: ordinal)
+         currentOrdinal = max(currentOrdinal, ordinal)
+         transcriptPresentation.apply(Line(
+             id: lineID,
+             ordinal: ordinal,
+             text: sourceText,
+             start: command.tStart,
+             end: command.tEnd,
+             speakerLabel: command.speakerLabel,
+             translatedText: initialDraftTranslation,
+             isTranslating: true
+         ))
+
+         translationCoordinator.translateCompletedLine(
+             lineID: lineID,
+             sourceText: sourceText,
+             contextLines: contextLines,
+             displayMode: displayMode,
+             onStreamingUpdate: { [weak self] id, partialTranslation in
+                 self?.transcriptPresentation.update(id: id) {
+                     $0.translatedText = partialTranslation
+                     $0.isTranslating = true
+                 }
+             },
+             onFinished: { [weak self] id, finalTranslation, lang in
+                 guard let self else { return }
+                 self.transcriptPresentation.update(id: id) {
+                     $0.translatedText = finalTranslation
+                     $0.sourceLanguage = lang
+                     $0.isTranslating = false
+                 }
+                 if let finalTranslation {
+                     Task {
+                         try? await self.coordinator.attachLineTranslation(
+                             lineID: id,
+                             translatedText: finalTranslation,
+                             sourceLanguage: lang
+                         )
+                     }
+                 }
+             }
+         )
+     }
+     ```
 
 #### Step 3.2：Task 3 验收门禁
 运行既有与新增的 `CaptionSessionTests`：
@@ -892,11 +1060,12 @@ public final class TargetWindowTracker {
 }
 ```
 
-#### Step 4.4：升级 `CaptionBandWindow.swift`（智能吸附 + 自由悬浮 + 双语渲染）
+#### Step 4.4：升级 `CaptionBandWindow.swift`（智能吸附 + 自由悬浮 + 双语渲染与防闪烁）
 打开 `macos/SpeechRailApp/SpeechRailApp/CaptionBandWindow.swift`：
 
-1. **升级 `CaptionBandMetrics`**：
+1. **升级 `CaptionBandMetrics`（预排版视觉行算高）**：
    - 在计算每行视觉行数时，若 `row.secondaryText` 非空（即双语对照模式下同时有外语原文与中文译文），总高度 = `visualRowCount(for: secondaryText, style: .callout)` 的行高 + `visualRowCount(for: primaryText, fontSize: fontSize)` 的行高。
+   - 保持 `applyMetrics` 固定 `frame.origin.y`（底边不动、向上生长），确保新字或次行译文出现时底部锚点零抖动。
 2. **在 `CaptionBandWindowController` 中集成 `TargetWindowTracker`**：
    - 增加 `private var isProgrammaticFrameUpdate = false`。
    - 当 `session.placementMode == .dockedToTargetWindow` 且 `session.audioTarget` 为 `.app(let targetApp)` 时，启动 `tracker.startTracking(target: targetApp)`：
@@ -956,8 +1125,9 @@ public final class TargetWindowTracker {
 
 - [ ] **权限合规**：使用窗口拾取器选择 Chrome / Safari / QuickTime 窗口并开启实时字幕时，只请求“系统录音权限”（`NSAudioCaptureUsageDescription`），**绝不弹出“屏幕录制”或“辅助功能（无障碍）”权限请求**。
 - [ ] **窗口跟随与跨应用记笔记**：移动或缩放 QuickTime / 浏览器窗口时，字幕带以 15Hz 丝滑吸附在目标窗口内底部；切到 Obsidian 记笔记时字幕带依然保持在视频窗口底部可见；手动拖动字幕带后自动定格为自由悬浮，点击「吸附回窗口」可一键归位。
-- [ ] **任意语种 → 实时中文字幕**：
-  - 播放中文视频时，`CaptionLanguageDetector` 判定为中文，0 延迟直接显示中文字幕，不产生任何 LLM 请求；
-  - 播放英/日/韩等外语无字幕视频时，长句说话过程中有 Partial 预览中文字幕，断句后基于前 3 句上下文流式更新精准中文译文并写入 SQLite。
+- [ ] **任意语种 → 实时中文字幕与 Context 工程质量**：
+  - 播放中文（含中英技术混说）视频时，`CaptionLanguageDetector` 判定为中文，0 延迟直接显示中文字幕，不产生任何 LLM 请求；播放含汉字的日文视频时准确识别为 `ja` 并触发中译；
+  - 播放外语视频时，Partial 阶段按字符增量/标点边界与 450ms 防抖触发单飞预览翻译，并通过 LocalAgreement-2 软前缀锚定抑制译文跳变；
+  - 断句定稿瞬间，新行立即继承预览译文（无闪回外语白屏期），同时携带**前 3 句双语平行上下文（不含当前句自身）**流式更新精准中文译文并持久化至 SQLite。
 - [ ] **双语导出**：点击「导出 SRT…」导出的 `.srt` 文件包含准确的中文译文与原文双语对照时间轴。
 - [ ] **自动化门禁**：`check_macos_test_target_coverage.py` 与 `swift test` 全部绿色通过。

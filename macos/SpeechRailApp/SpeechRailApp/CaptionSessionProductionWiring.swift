@@ -7,6 +7,11 @@ import Foundation
 ///
 /// 内部复用成熟稳定的 `AudioSourceCoordinator` 系统音频采集通道与 CoreAudio tap，
 /// 保持 24kHz / 单声道 / PCM16 输出，离开会话时即刻释放音频设备与 tap。
+///
+/// `AudioSourceCoordinator` 是 `@MainActor`（它同时服务会话设置界面），所以这一个
+/// 适配器整体也在主线程上：`start()` / `stop()` 是协议里的 `async` 要求，调用方本来
+/// 就要 await，跨隔离域的开销落在一次跳转上，采集本身仍在 tap 的实时线程里跑。
+@MainActor
 public final class AppAudioTapChunkSource: AudioChunkSource, @unchecked Sendable {
     private let target: CaptionTargetApp
     private let coordinator = AudioSourceCoordinator()
@@ -45,19 +50,44 @@ public final class LLMTranslationClient: CaptionTranslationClient {
 
     public func translateStream(
         sourceText: String,
-        contextLines: [String]
+        contextLines: [String],
+        priorDraftTranslation: String?,
+        systemInstructions: String? = nil
     ) -> AsyncThrowingStream<String, any Error> {
         let resolved = preferences.resolvedLLMConfiguration(for: .captions)
         let prompt = CaptionTranslationCoordinator.buildUserPrompt(
             sourceText: sourceText,
-            contextLines: contextLines
+            contextLines: contextLines,
+            priorDraftTranslation: priorDraftTranslation
         )
-        return provider.streamTranslation(
-            configuration: resolved.configuration,
-            prompt: prompt,
-            instructions: CaptionTranslationCoordinator.systemInstructions,
-            apiKey: resolved.apiKey
-        )
+        let configuration = resolved.configuration
+        let apiKey = resolved.apiKey
+        let instructions = systemInstructions ?? CaptionTranslationCoordinator.systemInstructions
+        let provider = self.provider
+
+        // `LLMProvider` 是 actor，取它的流必须跨隔离域 await；而字幕翻译器要的是
+        // **同步返回**的流（取消消费者即取消这一次翻译）。这里用一层桥接把两者对上：
+        // 消费端终止 -> 取消桥接任务 -> 取消 provider 的流。首字节之前只有这一次跳转，
+        // 不额外引入排队或缓冲。
+        let (stream, continuation) = AsyncThrowingStream<String, any Error>.makeStream()
+        let bridge = Task {
+            do {
+                let deltas = await provider.streamTranslation(
+                    configuration: configuration,
+                    prompt: prompt,
+                    instructions: instructions,
+                    apiKey: apiKey
+                )
+                for try await delta in deltas {
+                    continuation.yield(delta)
+                }
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
+        continuation.onTermination = { _ in bridge.cancel() }
+        return stream
     }
 }
 

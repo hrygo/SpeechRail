@@ -600,12 +600,31 @@ public struct SessionLibraryView: View {
             SessionConclusionBand(
                 tone: .healthy,
                 title: "现在就可以开始字幕",
-                message: "精准抓取目标视频窗口声音或麦克风，支持实时中文字幕与双语对照。开始后字幕带吸附于窗口或贴在屏幕底部。",
-                hint: "⌘⇧L 可开始、暂停或继续；点击字幕带的 ✕ 结束并保存。"
-                    + "字幕带不抢焦点，所以 esc 不会关掉它。"
+                message: "精准抓取目标视频窗口声音或麦克风，支持实时中文字幕与双语对照。开始后字幕带智能吸附于窗口底部或自由悬浮。",
+                hint: "⌘⇧L 可随时开启、暂停或继续；点击字幕带的 ✕ 结束并保存。"
             ) {
-                Button("字幕设置") { openSettings() }
-                    .speechRailButton(.secondary)
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Button(caption.audioTarget == nil ? "选择窗口并开启字幕" : "开启字幕") {
+                        Task {
+                            if caption.audioTarget == nil {
+                                await caption.promptSelectTarget()
+                            } else {
+                                await caption.openBand()
+                            }
+                        }
+                    }
+                    .speechRailButton(.primary)
+
+                    if caption.audioTarget != nil {
+                        Button("重新选择目标…") {
+                            Task { await caption.promptSelectTarget() }
+                        }
+                        .speechRailButton(.secondary)
+                    }
+
+                    Button("字幕设置") { openSettings() }
+                        .speechRailButton(.secondary)
+                }
             }
 
             HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
@@ -641,6 +660,7 @@ public struct SessionLibraryView: View {
                         SessionHairline()
                         VStack(alignment: .leading, spacing: 10) {
                             SessionKVRow("收音目标", caption.audioTarget?.displayTitle ?? "按窗口选择 / 麦克风")
+                            SessionKVRow("源语言", caption.sourceLanguage.title)
                             SessionKVRow("翻译模式", caption.displayMode.title)
                             SessionKVRow("字幕带位置", caption.placementMode == .dockedToTargetWindow ? "吸附目标窗口" : "自由悬停")
                             SessionKVRow("识别精度", profileRowText)

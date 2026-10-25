@@ -316,6 +316,39 @@ public enum CaptionDisplayMode: String, CaseIterable, Codable, Identifiable, Sen
     }
 }
 
+/// 实时字幕的源语种预设偏好。
+///
+/// 默认 `.auto` 自动识别；指定语种（如英语、日语）后，可彻底消除 ASR 首字语言漂移并激活专项翻译提示词。
+public enum CaptionSourceLanguage: String, CaseIterable, Codable, Identifiable, Sendable {
+    case auto = "auto"
+    case english = "en"
+    case japanese = "ja"
+    case korean = "ko"
+    case chinese = "zh"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .auto: "自动识别"
+        case .english: "英语"
+        case .japanese: "日语"
+        case .korean: "韩语"
+        case .chinese: "中文"
+        }
+    }
+
+    public var shortLabel: String {
+        switch self {
+        case .auto: "自动"
+        case .english: "英语"
+        case .japanese: "日语"
+        case .korean: "韩语"
+        case .chinese: "中文"
+        }
+    }
+}
+
 /// 字幕浮层与目标窗口的绑定状态（决策 D3）。
 public enum CaptionBandPlacementMode: String, Codable, Sendable, Equatable {
     /// 智能吸附在目标应用窗口底部内侧，随窗口移动、缩放、全屏自动跟随

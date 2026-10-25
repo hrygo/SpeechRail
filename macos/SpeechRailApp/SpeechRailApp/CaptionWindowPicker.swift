@@ -162,8 +162,10 @@ public struct WindowPickerOverlayView: View {
                     windowHighlight(hovered: hovered, localFrame: localFrame)
                 }
 
-                // 底部快捷栏
+                // 顶端指引与底部快捷栏
                 VStack {
+                    topGuidanceBanner
+                        .padding(.top, 40)
                     Spacer()
                     bottomControlBar
                         .padding(.bottom, 48)
@@ -181,6 +183,31 @@ public struct WindowPickerOverlayView: View {
             }
         }
         .ignoresSafeArea()
+    }
+
+    private var topGuidanceBanner: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Image(systemName: "macwindow.badge.plus")
+                .font(.system(size: 14))
+                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+            Text("移动鼠标轻点任意窗口，字幕带将智能吸附于其底部")
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .background(
+            Capsule()
+                .fill(SpeechRailDesignTokens.Surface.floatingToolbarMaterial)
+        )
+        .overlay(
+            Capsule()
+                .stroke(
+                    SpeechRailDesignTokens.Color.separator,
+                    lineWidth: SpeechRailDesignTokens.Stroke.hairline
+                )
+        )
+        .shadow(color: .black.opacity(0.15), radius: 10, x: 0, y: 4)
     }
 
     private func screenToLocal(_ screenRect: CGRect, proxy: GeometryProxy) -> CGRect {
@@ -248,6 +275,25 @@ public struct WindowPickerOverlayView: View {
         .allowsHitTesting(false)
     }
 
+    private var suggestedApps: [CaptionTargetApp] {
+        if !audioApps.isEmpty {
+            return audioApps
+        }
+        var seen = Set<String>()
+        var list: [CaptionTargetApp] = []
+        for win in windows where !seen.contains(win.bundleID) {
+            seen.insert(win.bundleID)
+            list.append(CaptionTargetApp(
+                bundleID: win.bundleID,
+                appName: win.appName,
+                windowID: win.id,
+                pid: win.pid
+            ))
+            if list.count >= 4 { break }
+        }
+        return list
+    }
+
     private var bottomControlBar: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
             // 提示文案
@@ -263,15 +309,16 @@ public struct WindowPickerOverlayView: View {
             Divider()
                 .frame(height: 20)
 
-            // 发声应用快捷按钮
-            if !audioApps.isEmpty {
+            // 发声或可见应用快捷按钮
+            if !suggestedApps.isEmpty {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    ForEach(audioApps.prefix(3), id: \.bundleID) { app in
+                    ForEach(suggestedApps.prefix(4), id: \.bundleID) { app in
+                        let isAudio = audioApps.contains(where: { $0.bundleID == app.bundleID })
                         Button {
                             onSelectTarget(.app(app))
                         } label: {
                             HStack(spacing: 4) {
-                                Image(systemName: "speaker.wave.2.fill")
+                                Image(systemName: isAudio ? "speaker.wave.2.fill" : "macwindow")
                                     .font(.system(size: 11))
                                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                                 Text(app.appName)
@@ -282,6 +329,7 @@ public struct WindowPickerOverlayView: View {
                             .background(SpeechRailDesignTokens.Color.rail.opacity(0.1), in: Capsule())
                         }
                         .buttonStyle(.plain)
+                        .speechRailPointerCursor()
                     }
                 }
 
@@ -304,18 +352,28 @@ public struct WindowPickerOverlayView: View {
                 .background(SpeechRailDesignTokens.Color.inkSecondary.opacity(0.12), in: Capsule())
             }
             .buttonStyle(.plain)
+            .speechRailPointerCursor()
 
             // 取消按钮
             Button {
                 onCancel()
             } label: {
-                Text("取消 (Esc)")
-                    .font(SpeechRailDesignTokens.Typography.callout)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                HStack(spacing: 4) {
+                    Text("取消")
+                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Text("Esc")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(SpeechRailDesignTokens.Color.inkSecondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
             }
             .buttonStyle(.plain)
+            .speechRailPointerCursor()
             .keyboardShortcut(.escape, modifiers: [])
         }
         .padding(.horizontal, 16)
@@ -323,7 +381,10 @@ public struct WindowPickerOverlayView: View {
         .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(SpeechRailDesignTokens.Color.hairline, lineWidth: 1)
+                .stroke(
+                    SpeechRailDesignTokens.Color.separator,
+                    lineWidth: SpeechRailDesignTokens.Stroke.hairline
+                )
         )
         .shadow(color: .black.opacity(0.2), radius: 12, x: 0, y: 6)
     }

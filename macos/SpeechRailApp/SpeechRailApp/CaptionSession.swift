@@ -86,10 +86,19 @@ struct CaptionBandContent: Equatable, Sendable {
             case window(String)
             case partial
         }
+        /// 未定稿原文的视觉分层（`spec §11.1`）：稳定前缀提高对比度，活跃尾部保持次级色。
+        ///
+        /// 两段拼接等于该行原文；`isSecondary` 表示原文画在次行（双语模式下已有译文时）。
+        struct SourceTiering: Equatable, Sendable {
+            let stablePrefix: String
+            let volatileTail: String
+            let isSecondary: Bool
+        }
         let id: ID
         let text: String
         let primaryText: String
         let secondaryText: String?
+        let sourceTiering: SourceTiering?
         let isPartial: Bool
         let isTranslating: Bool
 
@@ -98,6 +107,7 @@ struct CaptionBandContent: Equatable, Sendable {
             text: String,
             primaryText: String? = nil,
             secondaryText: String? = nil,
+            sourceTiering: SourceTiering? = nil,
             isPartial: Bool,
             isTranslating: Bool = false
         ) {
@@ -105,6 +115,7 @@ struct CaptionBandContent: Equatable, Sendable {
             self.text = text
             self.primaryText = primaryText ?? text
             self.secondaryText = secondaryText
+            self.sourceTiering = sourceTiering
             self.isPartial = isPartial
             self.isTranslating = isTranslating
         }
@@ -118,6 +129,7 @@ struct CaptionBandContent: Equatable, Sendable {
         windowUnits: [TranscriptWindowUnit]?,
         partialText: String?,
         partialTranslatedText: String? = nil,
+        partialStablePrefixLength: Int = 0,
         displayMode: CaptionDisplayMode = .bilingual
     ) {
         var rows: [Row] = []
@@ -169,35 +181,68 @@ struct CaptionBandContent: Equatable, Sendable {
 
         let currentPartial = windowUnits?.map(\.text).joined() ?? partialText
         if let currentPartial, !currentPartial.isEmpty {
+            let cleanedPartialTranslation = partialTranslatedText?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // 模型原样回显原句：屏幕上没必要显示两遍，按「没有译文」去重。
+            let translation = (cleanedPartialTranslation?.isEmpty == false
+                && cleanedPartialTranslation != currentPartial) ? partialTranslatedText : nil
+            // 但「是否还在翻」要另算：沿用去重后的 `translation` 判断，会让回显句永久转圈。
+            let isTranslatingPartial = (cleanedPartialTranslation ?? "").isEmpty
             let primary: String
             let secondary: String?
+            var sourceIsSecondary = false
             switch displayMode {
             case .originalOnly:
                 primary = currentPartial
                 secondary = nil
             case .chineseOnly:
-                primary = partialTranslatedText ?? currentPartial
+                primary = translation ?? currentPartial
                 secondary = nil
             case .bilingual:
-                if let partialTranslated = partialTranslatedText, !partialTranslated.isEmpty, partialTranslated != currentPartial {
-                    primary = partialTranslated
+                if let translation {
+                    primary = translation
                     secondary = currentPartial
+                    sourceIsSecondary = true
                 } else {
                     primary = currentPartial
                     secondary = nil
                 }
             }
             let rowID: Row.ID = windowUnits != nil ? .window(windowUnits?.first?.unitID ?? "window") : .partial
+            // 视觉分层只能挂在「原文真的上屏」的那一格：`tieredSourceText` 渲染的是分层里那根
+            // 字符串本身。「仅中文」档只要有译文，原文就不上屏，此时若还挂着分层，
+            // 渲染层会把原文（例如英文）画进本该显示中文的位置。
+            let sourceTextIsOnScreen = displayMode != .chineseOnly || translation == nil
             rows.append(Row(
                 id: rowID,
                 text: primary,
                 primaryText: primary,
                 secondaryText: secondary,
+                sourceTiering: sourceTextIsOnScreen
+                    ? Self.sourceTiering(
+                        for: currentPartial,
+                        stablePrefixLength: partialStablePrefixLength,
+                        isSecondary: sourceIsSecondary
+                    )
+                    : nil,
                 isPartial: true,
-                isTranslating: partialTranslatedText == nil
+                isTranslating: isTranslatingPartial
             ))
         }
         self.rows = rows.filter { !$0.primaryText.isEmpty }
+    }
+
+    /// 把未定稿原文切成「稳定前缀 + 活跃尾部」两段；长度不合法时不分层，整行同色。
+    private static func sourceTiering(
+        for sourceText: String,
+        stablePrefixLength: Int,
+        isSecondary: Bool
+    ) -> Row.SourceTiering? {
+        guard stablePrefixLength > 0, stablePrefixLength < sourceText.count else { return nil }
+        let stable = String(sourceText.prefix(stablePrefixLength))
+        let tail = String(sourceText.dropFirst(stablePrefixLength))
+        guard !stable.isEmpty, !tail.isEmpty else { return nil }
+        return Row.SourceTiering(stablePrefix: stable, volatileTail: tail, isSecondary: isSecondary)
     }
 }
 
@@ -352,22 +397,45 @@ public final class CaptionSession {
     /// 未定稿的增量累加结果。`nil` 表示这一轮还没开始出字。
     public private(set) var partialText: String? {
         didSet {
+            partialStablePrefixLength = CaptionPartialStability.stablePrefixLength(
+                previous: oldValue ?? "",
+                current: partialText ?? ""
+            )
             guard let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
                 partialTranslatedText = nil
                 return
             }
             if oldValue != partialText {
-                let context = lines.suffix(3).map(\.text)
+                let context = lines.suffix(2).map {
+                    CaptionContextTurn(
+                        sourceText: $0.text,
+                        translatedText: $0.translatedText
+                    ).formattedPromptLine
+                }
                 translationCoordinator.schedulePartialTranslation(
                     sourceText: text,
                     contextLines: context,
-                    displayMode: displayMode
+                    displayMode: displayMode,
+                    preferredLanguage: sourceLanguage
                 ) { [weak self] translated in
                     self?.partialTranslatedText = translated
+                    // 中文直通时 `translated` 为 nil：那份草稿不再属于任何一句，一起清掉。
+                    self?.lastPartialTranslation = translated.map {
+                        (sourceText: text, translatedText: $0)
+                    }
                 }
             }
         }
     }
+    /// 未定稿原文的稳定前缀长度（`spec §11.1` 视觉分层；`0` 表示这次还看不出稳定区）。
+    public private(set) var partialStablePrefixLength = 0
+    /// 最近一次到达的未定稿译文，连同它**出自哪一句原文**。
+    ///
+    /// 要单独留一份而不是读 `partialTranslatedText`，有两个理由：
+    /// ① `commit()` 先把 `partialText` 清零，再走 `didSaveTranscript`，那时预览译文已经没了；
+    /// ② 被拒绝/丢弃的预览同样会走到"清零"这一步，只按"最近一次"继承会把上一句的译文
+    ///    挪到下一句上。带上原文，才判断得出这份草稿是不是这一句的前身。
+    private var lastPartialTranslation: (sourceText: String, translatedText: String)?
     /// 采集的真实电平 0…1（浮层页脚那几根柱子读它）。
     public private(set) var level: Double = 0
     public private(set) var sessionID: String?
@@ -414,6 +482,18 @@ public final class CaptionSession {
     }() {
         didSet {
             UserDefaults.standard.set(displayMode.rawValue, forKey: "speechrail.caption.displayMode")
+        }
+    }
+    /// 字幕音频源语种（自动识别 / 英语 / 日语 / 韩语 / 中文），持久化到 UserDefaults。
+    public var sourceLanguage: CaptionSourceLanguage = {
+        if let raw = UserDefaults.standard.string(forKey: "speechrail.caption.sourceLanguage"),
+           let lang = CaptionSourceLanguage(rawValue: raw) {
+            return lang
+        }
+        return .auto
+    }() {
+        didSet {
+            UserDefaults.standard.set(sourceLanguage.rawValue, forKey: "speechrail.caption.sourceLanguage")
         }
     }
     /// 浮层定位模式（智能吸附目标窗口 / 自由悬浮钉住）。
@@ -491,6 +571,7 @@ public final class CaptionSession {
             windowUnits: windowCapture?.visibleUnits,
             partialText: partialText,
             partialTranslatedText: partialTranslatedText,
+            partialStablePrefixLength: partialStablePrefixLength,
             displayMode: displayMode
         )
     }
@@ -1053,6 +1134,7 @@ public final class CaptionSession {
     public func finish() async {
         translationCoordinator.cancelAll()
         partialTranslatedText = nil
+        lastPartialTranslation = nil
         if coordinator.occupancy?.kind == .captions {
             await coordinator.stopCapture(endingWith: .user)
         }
@@ -1067,6 +1149,7 @@ public final class CaptionSession {
         level = 0
         partialText = nil
         partialTranslatedText = nil
+        lastPartialTranslation = nil
         previewIdentity = nil
         sessionStartedAt = nil
         sessionID = nil
@@ -1382,6 +1465,8 @@ public final class CaptionSession {
             )
             let boundary = previewLedger.boundary(identity: identity, itemID: itemID)
             _ = previewLedger.resolveFailure(identity: identity, itemID: itemID)
+            // 预览没有变成正式行：那份草稿不再属于任何一句，别留给下一句继承。
+            lastPartialTranslation = nil
             partialText = recoveryNote?.text ?? previewLedger.visiblePartial
             if let recoveryNote {
                 acceptTranscript(
@@ -1586,23 +1671,48 @@ public final class CaptionSession {
         }
         // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
         if sessionID == command.sessionID, command.formal {
-            lineByItem[itemIdentity] = (lineID: command.lineID, ordinal: ordinal)
-            currentOrdinal = max(currentOrdinal, ordinal)
-            transcriptPresentation.apply(Line(
-                    id: command.lineID, ordinal: ordinal, text: command.text,
-                    start: command.tStart, end: command.tEnd, speakerLabel: command.speakerLabel
-                ))
-
-            let contextLines = Array(lines.suffix(3).map(\.text))
+            // ① 先取前 3 句双语平行历史，并显式排除当前句：若先 apply 再取 suffix，
+            //    当前句自己会混进【前文背景】，轻量模型会漏翻或复读。
+            let contextLines = Array(
+                lines
+                    .filter { $0.id != command.lineID }
+                    .suffix(3)
+                    .map {
+                        CaptionContextTurn(
+                            sourceText: $0.text,
+                            translatedText: $0.translatedText
+                        ).formattedPromptLine
+                    }
+            )
+            // ② 定稿瞬间继承未定稿译文，消除「中文 → 外语 → 中文」的视觉断层。
+            //    但只在**这一句真的会被翻译**时继承：中文句与「仅原文」档不调模型，
+            //    继承上一句的草稿会让这一行先闪出别人的译文，再被 `onFinished(nil)` 抹掉。
+            let initialDraftTranslation = Self.inheritableDraftTranslation(
+                lastPartialTranslation: lastPartialTranslation?.translatedText,
+                lastPartialSourceText: lastPartialTranslation?.sourceText,
+                sourceText: command.text,
+                displayMode: displayMode,
+                preferredLanguage: sourceLanguage
+            )
+            lastPartialTranslation = nil
             let lineID = command.lineID
             let sourceText = command.text
-            transcriptPresentation.update(id: lineID) { $0.isTranslating = true }
+
+            lineByItem[itemIdentity] = (lineID: lineID, ordinal: ordinal)
+            currentOrdinal = max(currentOrdinal, ordinal)
+            transcriptPresentation.apply(Line(
+                    id: lineID, ordinal: ordinal, text: sourceText,
+                    start: command.tStart, end: command.tEnd, speakerLabel: command.speakerLabel,
+                    translatedText: initialDraftTranslation,
+                    isTranslating: true
+                ))
 
             translationCoordinator.translateCompletedLine(
                 lineID: lineID,
                 sourceText: sourceText,
                 contextLines: contextLines,
                 displayMode: displayMode,
+                preferredLanguage: sourceLanguage,
                 onStreamingUpdate: { [weak self] id, partialTranslation in
                     self?.transcriptPresentation.update(id: id) {
                         $0.translatedText = partialTranslation
@@ -1611,16 +1721,21 @@ public final class CaptionSession {
                 },
                 onFinished: { [weak self] id, finalTranslation, lang in
                     guard let self else { return }
+                    // 终态不许把已经上屏的译文抹掉。Stage 2 在首个字符之前就失败时
+                    // （没有可用客户端、网络错、首字超时），协调器给不出终稿，而这一行在
+                    // 定稿瞬间已经继承了预览草稿；退回 nil 等于「中文闪回外语」，
+                    // 正是铁律 4 与 DoD 要消除的那一片空白。
+                    let resolvedTranslation = finalTranslation ?? initialDraftTranslation
                     self.transcriptPresentation.update(id: id) {
-                        $0.translatedText = finalTranslation
+                        if let resolvedTranslation { $0.translatedText = resolvedTranslation }
                         $0.sourceLanguage = lang
                         $0.isTranslating = false
                     }
-                    if let finalTranslation {
+                    if let resolvedTranslation {
                         Task {
                             try? await self.coordinator.attachLineTranslation(
                                 lineID: id,
-                                translatedText: finalTranslation,
+                                translatedText: resolvedTranslation,
                                 sourceLanguage: lang
                             )
                         }
@@ -1649,6 +1764,40 @@ public final class CaptionSession {
         let end = absoluteEnd - startedAt.timeIntervalSince1970
         guard start.isFinite, end.isFinite, start >= 0, end > start else { return nil }
         return (start, end)
+    }
+
+    /// 定稿瞬间可以继承的未定稿草稿。
+    ///
+    /// 判据与 `CaptionTranslationCoordinator.translateCompletedLine` 的短路条件**必须一致**：
+    /// 中文句和「仅原文」档都不进翻译流程，给它们草稿等于把上一句的译文挪到这一行上闪一下。
+    /// 不一致时表现为：混说场景里中文定稿先显示外语译文，一个 runloop 后才消失。
+    static func inheritableDraftTranslation(
+        lastPartialTranslation: String?,
+        lastPartialSourceText: String?,
+        sourceText: String,
+        displayMode: CaptionDisplayMode,
+        preferredLanguage: CaptionSourceLanguage = .auto
+    ) -> String? {
+        let isChinese: Bool
+        switch preferredLanguage {
+        case .chinese:
+            isChinese = true
+        case .english, .japanese, .korean:
+            isChinese = false
+        case .auto:
+            isChinese = CaptionLanguageDetector.detect(for: sourceText).isChinese
+        }
+        guard displayMode != .originalOnly, !isChinese else { return nil }
+        guard let draft = lastPartialTranslation else { return nil }
+        // 草稿必须出自这一句的前身。识别会把一句话改到面目全非，所以看的是"够长的公共前缀"
+        // 而不是逐字相等；对不上就宁可空着，让精翻从零开始，也不要闪出上一句的译文。
+        guard let partialSource = lastPartialSourceText, !partialSource.isEmpty else { return draft }
+        // 门槛同时要有一个绝对下限：只按比例算的话，`"So,"` 这类两三字符的短预览会退化成
+        // "开头一样就继承"——而短促开头在口播里到处都是，上一句的译文就这样被带到下一句。
+        // 代价是短于 4 个字符的预览不再交接，那是"一闪而过"量级，不值得用错句风险去换。
+        let sharedPrefix = partialSource.commonPrefix(with: sourceText).count
+        guard sharedPrefix >= Swift.max(4, partialSource.count - 2) else { return nil }
+        return draft
     }
 
     /// 分人档位下 `timing_quality` 由归属单元给：有对齐结果就是 `aligned`，
