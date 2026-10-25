@@ -1046,6 +1046,311 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertTrue(persistedLines.isEmpty)
     }
 
+    func testBandContentDualLanguageProjectionWithDisplayModes() {
+        let line = CaptionSession.Line(
+            id: "line-1",
+            ordinal: 1,
+            text: "Hello world",
+            translatedText: "你好世界"
+        )
+        // 1. 双语模式
+        let bilingualContent = CaptionBandContent(
+            lines: [line],
+            windowUnits: nil,
+            partialText: nil,
+            displayMode: .bilingual
+        )
+        XCTAssertEqual(bilingualContent.rows.count, 1)
+        XCTAssertEqual(bilingualContent.rows.first?.primaryText, "你好世界")
+        XCTAssertEqual(bilingualContent.rows.first?.secondaryText, "Hello world")
+
+        // 2. 仅中文模式
+        let chineseContent = CaptionBandContent(
+            lines: [line],
+            windowUnits: nil,
+            partialText: nil,
+            displayMode: .chineseOnly
+        )
+        XCTAssertEqual(chineseContent.rows.count, 1)
+        XCTAssertEqual(chineseContent.rows.first?.primaryText, "你好世界")
+        XCTAssertNil(chineseContent.rows.first?.secondaryText)
+
+        // 3. 仅原文模式
+        let originalContent = CaptionBandContent(
+            lines: [line],
+            windowUnits: nil,
+            partialText: nil,
+            displayMode: .originalOnly
+        )
+        XCTAssertEqual(originalContent.rows.count, 1)
+        XCTAssertEqual(originalContent.rows.first?.primaryText, "Hello world")
+        XCTAssertNil(originalContent.rows.first?.secondaryText)
+    }
+
+    func testSelectTargetUpdatesPlacementModeAndDraft() async throws {
+        let harness = try await makeHarness()
+        let targetApp = CaptionTargetApp(
+            bundleID: "com.apple.Safari",
+            appName: "Safari",
+            windowID: 1234,
+            pid: 5678
+        )
+
+        // 选择应用窗口 -> 吸附目标窗口模式
+        await harness.session.selectTarget(.app(targetApp))
+        XCTAssertEqual(harness.session.audioTarget, .app(targetApp))
+        XCTAssertEqual(harness.session.placementMode, .dockedToTargetWindow)
+
+        // 切换为麦克风 -> 自由悬停模式
+        await harness.session.selectTarget(.microphone)
+        XCTAssertEqual(harness.session.audioTarget, .microphone)
+        XCTAssertEqual(harness.session.placementMode, .freeFloatingPinned)
+    }
+
+    // MARK: 未定稿原文的视觉分层（spec §11.1）
+
+    func testBandContentMarksStablePrefixAndVolatileTailForPartialSource() throws {
+        let content = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "今天天气很好我们出去走走吧",
+            partialStablePrefixLength: 7,
+            displayMode: .originalOnly
+        )
+        let row = try XCTUnwrap(content.rows.first)
+        let tiering = try XCTUnwrap(row.sourceTiering)
+        XCTAssertEqual(tiering.stablePrefix, "今天天气很好我")
+        XCTAssertEqual(tiering.volatileTail, "们出去走走吧")
+        XCTAssertFalse(tiering.isSecondary)
+        XCTAssertEqual(tiering.stablePrefix + tiering.volatileTail, row.primaryText)
+    }
+
+    func testBandContentTiersSourceOnSecondaryRowWhenTranslationExists() throws {
+        let content = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "The budget is approved",
+            partialTranslatedText: "预算已批准",
+            partialStablePrefixLength: 6,
+            displayMode: .bilingual
+        )
+        let row = try XCTUnwrap(content.rows.first)
+        XCTAssertEqual(row.primaryText, "预算已批准")
+        XCTAssertEqual(row.secondaryText, "The budget is approved")
+        let tiering = try XCTUnwrap(row.sourceTiering)
+        XCTAssertTrue(tiering.isSecondary)
+        XCTAssertEqual(tiering.stablePrefix + tiering.volatileTail, "The budget is approved")
+    }
+
+    func testBandContentLeavesFlatColorWhenNoStablePrefix() throws {
+        let content = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "Hello world",
+            partialStablePrefixLength: 0,
+            displayMode: .originalOnly
+        )
+        let row = try XCTUnwrap(content.rows.first)
+        XCTAssertNil(row.sourceTiering)
+        XCTAssertNil(row.secondaryText)
+    }
+
+    // MARK: 防自污染双语 Context 与定稿草稿交接（红线 5 / 铁律 1、2、4）
+
+    func testFinalizedLineContextExcludesItselfAndCarriesBilingualHistory() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "one", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 && !$0.session.lines[0].isTranslating }
+        XCTAssertEqual(fake.lastSourceText, "The budget is approved")
+        XCTAssertEqual(fake.lastContextLines, [])
+
+        try await h.emit(.completed(itemID: "two", transcript: "The team will start next week"))
+        try await h.settle { $0.session.lines.count == 2 && !$0.session.lines[1].isTranslating }
+
+        XCTAssertEqual(
+            fake.lastContextLines,
+            ["原文：The budget is approved → 译文：预算已批准"],
+            "前文背景必须是双语平行对，而且只能有前一句"
+        )
+        let background = CaptionTranslationCoordinator.buildUserPrompt(
+            sourceText: "The team will start next week",
+            contextLines: fake.lastContextLines ?? []
+        ).components(separatedBy: "【当前句").first ?? ""
+        XCTAssertFalse(
+            background.contains("The team will start next week"),
+            "当前句自己绝不能出现在【前文背景】里"
+        )
+        XCTAssertEqual(h.session.lines[1].sourceLanguage, "en")
+    }
+
+    func testFinalizedLineInheritsPartialTranslationBeforeStageTwoArrives() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已经批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        _ = try await start(h)
+
+        try await h.emit(.partialSnapshot(itemID: "draft", revision: 1, text: "The budget is approved"))
+        try await h.settle { $0.session.partialTranslatedText == "预算已经批准" }
+
+        // Stage 2 停住不动，观察定稿瞬间是否已经继承预览译文。
+        fake.streamDeltas = []
+        fake.stallForever = true
+        try await h.emit(.completed(itemID: "draft", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 }
+
+        let line = try XCTUnwrap(h.session.lines.first)
+        XCTAssertEqual(line.text, "The budget is approved")
+        XCTAssertEqual(line.translatedText, "预算已经批准", "定稿瞬间要继承预览译文，不能闪回外语")
+        XCTAssertTrue(line.isTranslating, "精翻仍在进行中")
+    }
+
+    func testFinalizedLineKeepsInheritedDraftWhenStageTwoFailsBeforeAnyDelta() async throws {
+        let fake = FakeTranslationClient()
+        // 预览流边吐边挂住：session 侧已经拿到草稿，而协调器侧还没有"已完成预览"可兜底。
+        fake.streamDeltas = ["预算已经批准"]
+        fake.stallForever = true
+        // 精翻一上来就失败（首字超时 / 模型不可用），终态回调给出的终稿是 nil。
+        fake.failImmediatelyFromCall = 2
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        _ = try await start(h)
+
+        try await h.emit(.partialSnapshot(itemID: "draft", revision: 1, text: "The budget is approved"))
+        try await h.settle { $0.session.partialTranslatedText == "预算已经批准" }
+
+        try await h.emit(.completed(itemID: "draft", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 && !$0.session.lines[0].isTranslating }
+
+        let line = try XCTUnwrap(h.session.lines.first)
+        XCTAssertEqual(
+            line.translatedText, "预算已经批准",
+            "Stage 2 在首个字符之前失败时，定稿瞬间继承的草稿必须留在屏上，不能闪回外语"
+        )
+    }
+
+    func testBandContentChineseOnlyWithTranslationNeverTiersSourceOverTranslation() throws {
+        // 「仅中文」档 + 已有预览译文：这一格该显示中文，原文根本不上屏。
+        // 视觉分层描述的是**原文**的切分；曾经把它挂到这一格，渲染层会拿分段里的原文
+        // 直接替换掉译文，于是屏幕上出现英文、中文一个字都看不到。
+        let content = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "The budget is approved",
+            partialTranslatedText: "预算已经批准",
+            partialStablePrefixLength: 12,
+            displayMode: .chineseOnly
+        )
+        let row = try XCTUnwrap(content.rows.first)
+        XCTAssertEqual(row.primaryText, "预算已经批准")
+        XCTAssertNil(row.sourceTiering, "原文不在屏上，就不该挂着描述原文的分层")
+        XCTAssertFalse(row.isTranslating)
+    }
+
+    func testBandContentTreatsEchoedTranslationAsSettledNotStillTranslating() {
+        // 模型原样回显短句：显示层去重（不重复画同一句），但状态不能一直停在「翻译中」。
+        let echoed = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "OK",
+            partialTranslatedText: "OK",
+            displayMode: .bilingual
+        )
+        XCTAssertEqual(echoed.rows.first?.primaryText, "OK")
+        XCTAssertEqual(echoed.rows.first?.isTranslating, false, "回显等于已经拿到结果，不能永远转圈")
+
+        // 对照：真的还没有译文时才显示翻译中。
+        let pending = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "The budget is approved",
+            partialTranslatedText: nil,
+            displayMode: .bilingual
+        )
+        XCTAssertEqual(pending.rows.first?.isTranslating, true)
+    }
+
+    func testInheritableDraftTranslationOnlyAppliesToLinesThatWillBeTranslated() {
+        // 外语定稿、且草稿出自这一句的前身：继承，抹掉「中文 → 外语 → 中文」的断层。
+        XCTAssertEqual(
+            CaptionSession.inheritableDraftTranslation(
+                lastPartialTranslation: "预算已批准",
+                lastPartialSourceText: "The budget is app",
+                sourceText: "The budget is approved",
+                displayMode: .bilingual
+            ),
+            "预算已批准"
+        )
+        // 短促开头（3 个字符）不足以证明"同一句"：门控会因标点边界而放行这种短预览，
+        // 若只按比例判前缀，"So," 这类口播里的常见开头就会把上一句的译文带过来。
+        XCTAssertNil(
+            CaptionSession.inheritableDraftTranslation(
+                lastPartialTranslation: "好",
+                lastPartialSourceText: "OK.",
+                sourceText: "OK. Then we ship it",
+                displayMode: .bilingual
+            )
+        )
+        // 够短的句子里，只要前身几乎就是这一句的开头，仍然继承（门槛是"几乎逐字"）。
+        XCTAssertEqual(
+            CaptionSession.inheritableDraftTranslation(
+                lastPartialTranslation: "预算已批",
+                lastPartialSourceText: "Let's ship tomorrow",
+                sourceText: "Let's ship tomorrow morning",
+                displayMode: .bilingual
+            ),
+            "预算已批"
+        )
+        // 草稿来自**另一句**（预览被拒绝/丢弃之后的残留）：不继承，否则新行会闪出上一句的译文。
+        XCTAssertNil(
+            CaptionSession.inheritableDraftTranslation(
+                lastPartialTranslation: "明天发货",
+                lastPartialSourceText: "Ship it tomorrow",
+                sourceText: "The budget is approved",
+                displayMode: .bilingual
+            )
+        )
+        // 中文定稿（含中英混说）：不继承，这一句根本不进翻译流程。
+        XCTAssertNil(
+            CaptionSession.inheritableDraftTranslation(
+                lastPartialTranslation: "预算已批准",
+                lastPartialSourceText: "那就",
+                sourceText: "那就这样吧",
+                displayMode: .bilingual
+            )
+        )
+        XCTAssertNil(
+            CaptionSession.inheritableDraftTranslation(
+                lastPartialTranslation: "预算已批准",
+                lastPartialSourceText: "OK",
+                sourceText: "OK 那就这样吧",
+                displayMode: .bilingual
+            )
+        )
+        // 仅原文档：整句不进翻译流程，草稿没有落点。
+        XCTAssertNil(
+            CaptionSession.inheritableDraftTranslation(
+                lastPartialTranslation: "预算已批准",
+                lastPartialSourceText: "The budget is app",
+                sourceText: "The budget is approved",
+                displayMode: .originalOnly
+            )
+        )
+        XCTAssertNil(
+            CaptionSession.inheritableDraftTranslation(
+                lastPartialTranslation: nil,
+                lastPartialSourceText: nil,
+                sourceText: "The budget is approved",
+                displayMode: .bilingual
+            )
+        )
+    }
+
     @MainActor
     private final class Harness {
         let directory: URL

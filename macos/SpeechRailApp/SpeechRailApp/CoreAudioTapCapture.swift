@@ -758,6 +758,19 @@ public final class CoreAudioTapCapture: @unchecked Sendable {
         }
     }
 
+    /// 查询当前系统在 CoreAudio 中注册了音频对象的 App bundle identifier（包括 helper 进程归属的负责 bundle）。
+    public static func activeAudioBundleIDs() -> Set<String> {
+        guard let list = try? audioProcesses() else { return [] }
+        var result = Set<String>()
+        for item in list {
+            result.insert(item.bundleID)
+            if let resp = item.responsibleBundleID {
+                result.insert(resp)
+            }
+        }
+        return result
+    }
+
     private func refreshTappedProcesses() {
         guard isRunningCapture, var description = tapDescription else { return }
         do {

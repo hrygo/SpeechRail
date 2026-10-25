@@ -226,6 +226,137 @@ public enum SessionAudioSource: String, Codable, Sendable {
     }
 }
 
+/// 本机应用字幕目标（纯值类型，不含 AppKit NSImage/NSWindow，可安全进入 SPM 单测目标）。
+public struct CaptionTargetApp: Hashable, Codable, Sendable, Identifiable {
+    public var bundleID: String
+    public var appName: String
+    public var processID: Int32?
+    public var windowID: UInt32?
+    public var isPlayingAudio: Bool
+
+    public var pid: Int32? { processID }
+
+    public var id: String { bundleID }
+
+    public init(
+        bundleID: String,
+        appName: String,
+        processID: Int32? = nil,
+        windowID: UInt32? = nil,
+        isPlayingAudio: Bool = false,
+        pid: Int32? = nil
+    ) {
+        self.bundleID = bundleID
+        self.appName = appName
+        self.processID = pid ?? processID
+        self.windowID = windowID
+        self.isPlayingAudio = isPlayingAudio
+    }
+}
+
+/// 实时字幕的采集目标：默认选择本机应用窗口，可选本机麦克风（决策 D1）。
+public enum CaptionAudioTarget: Hashable, Codable, Sendable {
+    case app(CaptionTargetApp)
+    case microphone
+
+    public var resolvedAudioSource: SessionAudioSource {
+        switch self {
+        case .app: .system
+        case .microphone: .microphone
+        }
+    }
+
+    public var lineSource: SessionLineSource {
+        switch self {
+        case .app: .system
+        case .microphone: .microphone
+        }
+    }
+
+    public var displayTitle: String {
+        switch self {
+        case .app(let app): app.appName
+        case .microphone: "麦克风"
+        }
+    }
+
+    public var isApp: Bool {
+        if case .app = self { return true }
+        return false
+    }
+
+    public var targetBundleID: String? {
+        if case .app(let app) = self { return app.bundleID }
+        return nil
+    }
+
+    public var targetAppName: String? {
+        if case .app(let app) = self { return app.appName }
+        return nil
+    }
+}
+
+/// 字幕显示模式（决策 D2）。
+public enum CaptionDisplayMode: String, CaseIterable, Codable, Identifiable, Sendable {
+    /// 中外双语上下对照（若源语言本身为中文，自动只渲染单行中文）
+    case bilingual
+    /// 仅显示中文字幕（外语自动译为中文，译文生成前暂显浅色原文）
+    case chineseOnly = "chinese_only"
+    /// 仅显示原文（不调用 LLM 翻译）
+    case originalOnly = "original_only"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .bilingual: "双语对照"
+        case .chineseOnly: "仅中文"
+        case .originalOnly: "仅原文"
+        }
+    }
+}
+
+/// 实时字幕的源语种预设偏好。
+///
+/// 默认 `.auto` 自动识别；指定语种（如英语、日语）后，可彻底消除 ASR 首字语言漂移并激活专项翻译提示词。
+public enum CaptionSourceLanguage: String, CaseIterable, Codable, Identifiable, Sendable {
+    case auto = "auto"
+    case english = "en"
+    case japanese = "ja"
+    case korean = "ko"
+    case chinese = "zh"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .auto: "自动识别"
+        case .english: "英语"
+        case .japanese: "日语"
+        case .korean: "韩语"
+        case .chinese: "中文"
+        }
+    }
+
+    public var shortLabel: String {
+        switch self {
+        case .auto: "自动"
+        case .english: "英语"
+        case .japanese: "日语"
+        case .korean: "韩语"
+        case .chinese: "中文"
+        }
+    }
+}
+
+/// 字幕浮层与目标窗口的绑定状态（决策 D3）。
+public enum CaptionBandPlacementMode: String, Codable, Sendable, Equatable {
+    /// 智能吸附在目标应用窗口底部内侧，随窗口移动、缩放、全屏自动跟随
+    case dockedToTargetWindow = "docked"
+    /// 自由悬浮钉住（用户手动拖拽了字幕带，或当前音频源为麦克风）
+    case freeFloatingPinned = "free"
+}
+
 public enum SessionDiarizationState: String, Codable, Sendable {
     case off
     case active
@@ -2442,6 +2573,8 @@ public struct SessionRecord: Identifiable, Hashable, Sendable {
     public var voice: VoiceSnapshot?
     /// 空 = `user`（§15.6 R1：既有行为不用改）。
     public var endReason: SessionEndReason?
+    public var targetBundleID: String?
+    public var targetAppName: String?
 
     public init(
         id: String,
@@ -2459,7 +2592,9 @@ public struct SessionRecord: Identifiable, Hashable, Sendable {
         llmModel: String? = nil,
         persona: PersonaSnapshot? = nil,
         voice: VoiceSnapshot? = nil,
-        endReason: SessionEndReason? = nil
+        endReason: SessionEndReason? = nil,
+        targetBundleID: String? = nil,
+        targetAppName: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -2477,6 +2612,8 @@ public struct SessionRecord: Identifiable, Hashable, Sendable {
         self.persona = persona
         self.voice = voice
         self.endReason = endReason
+        self.targetBundleID = targetBundleID
+        self.targetAppName = targetAppName
     }
 
     public var endedReason: SessionEndReason { endReason ?? .user }
@@ -2629,6 +2766,8 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
     public var isStarred: Bool
     public var timingQuality: SessionTimingQuality?
     public var createdAt: Date
+    public var sourceLanguage: String?
+    public var translatedText: String?
 
     public init(
         id: String,
@@ -2647,7 +2786,9 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         timingQuality: SessionTimingQuality? = nil,
         createdAt: Date = Date(),
         attributionUnits: [TranscriptAttributionUnit] = [],
-        speakerLabelIsManual: Bool = false
+        speakerLabelIsManual: Bool = false,
+        sourceLanguage: String? = nil,
+        translatedText: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -2666,6 +2807,8 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         self.isStarred = isStarred
         self.timingQuality = timingQuality
         self.createdAt = createdAt
+        self.sourceLanguage = sourceLanguage
+        self.translatedText = translatedText
     }
 
     /// 每个原字符恰出现一次。未对齐的正文保留为未知，不能借用相邻人的标签。
@@ -3214,6 +3357,8 @@ public struct SessionDraft: Sendable {
     public var voice: VoiceSnapshot?
     public var startedAt: Date
     public var title: String?
+    public var targetBundleID: String?
+    public var targetAppName: String?
 
     public init(
         kind: SessionKind,
@@ -3226,7 +3371,9 @@ public struct SessionDraft: Sendable {
         persona: PersonaSnapshot? = nil,
         voice: VoiceSnapshot? = nil,
         title: String? = nil,
-        startedAt: Date = Date()
+        startedAt: Date = Date(),
+        targetBundleID: String? = nil,
+        targetAppName: String? = nil
     ) {
         self.kind = kind
         self.engineProfile = engineProfile
@@ -3239,6 +3386,8 @@ public struct SessionDraft: Sendable {
         self.voice = voice
         self.title = title
         self.startedAt = startedAt
+        self.targetBundleID = targetBundleID
+        self.targetAppName = targetAppName
     }
 }
 
@@ -3261,6 +3410,8 @@ public struct LineDraft: Sendable {
     /// 助手语音行会显式传**第一个非空证据被本机收到的那一刻**：既不冒充声学开口
     /// 时间，也不会因为"每条都写同一串零"而让回看的时间轴恒等于会话起点。
     public var createdAt: Date?
+    public var sourceLanguage: String?
+    public var translatedText: String?
 
     public init(
         sessionID: String,
@@ -3274,7 +3425,9 @@ public struct LineDraft: Sendable {
         isInterrupted: Bool = false,
         isDeviceSwitch: Bool = false,
         timingQuality: SessionTimingQuality? = nil,
-        createdAt: Date? = nil
+        createdAt: Date? = nil,
+        sourceLanguage: String? = nil,
+        translatedText: String? = nil
     ) {
         self.sessionID = sessionID
         self.role = role
@@ -3288,6 +3441,8 @@ public struct LineDraft: Sendable {
         self.isDeviceSwitch = isDeviceSwitch
         self.timingQuality = timingQuality
         self.createdAt = createdAt
+        self.sourceLanguage = sourceLanguage
+        self.translatedText = translatedText
     }
 }
 

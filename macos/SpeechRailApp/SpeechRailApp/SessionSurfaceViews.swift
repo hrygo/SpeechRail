@@ -387,9 +387,15 @@ public struct SessionLibraryView: View {
                         systemImage: "captions.bubble",
                         helpText: caption.phase.isLive
                             ? "把字幕带重新显示到屏幕上；它一直在听"
-                            : "开始实时字幕：不依赖大模型，只做识别与显示（⌘⇧L）"
+                            : "选择目标应用窗口或麦克风开始实时字幕（⌘⇧L）"
                     ) {
-                        Task { await caption.openBand() }
+                        Task {
+                            if caption.phase.isLive {
+                                await caption.openBand()
+                            } else {
+                                await caption.promptSelectTarget()
+                            }
+                        }
                     }
                 }
                 exportMenu
@@ -594,12 +600,31 @@ public struct SessionLibraryView: View {
             SessionConclusionBand(
                 tone: .healthy,
                 title: "现在就可以开始字幕",
-                message: "只靠语音识别，不用配大模型。开始后字幕带贴在屏幕底部，SpeechRail 不必在前台。",
-                hint: "⌘⇧L 可开始、暂停或继续；点击字幕带的 ✕ 结束并保存。"
-                    + "字幕带不抢焦点，所以 esc 不会关掉它。"
+                message: "精准抓取目标视频窗口声音或麦克风，支持实时中文字幕与双语对照。开始后字幕带智能吸附于窗口底部或自由悬浮。",
+                hint: "⌘⇧L 可随时开启、暂停或继续；点击字幕带的 ✕ 结束并保存。"
             ) {
-                Button("字幕设置") { openSettings() }
-                    .speechRailButton(.secondary)
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Button(caption.audioTarget == nil ? "选择窗口并开启字幕" : "开启字幕") {
+                        Task {
+                            if caption.audioTarget == nil {
+                                await caption.promptSelectTarget()
+                            } else {
+                                await caption.openBand()
+                            }
+                        }
+                    }
+                    .speechRailButton(.primary)
+
+                    if caption.audioTarget != nil {
+                        Button("重新选择目标…") {
+                            Task { await caption.promptSelectTarget() }
+                        }
+                        .speechRailButton(.secondary)
+                    }
+
+                    Button("字幕设置") { openSettings() }
+                        .speechRailButton(.secondary)
+                }
             }
 
             HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
@@ -621,7 +646,7 @@ public struct SessionLibraryView: View {
                     Spacer(minLength: 0)
                     SessionHairline()
                     CardFoot(
-                        note: "字幕带只做识别与显示：不接大模型，也不替你做总结。"
+                        note: "字幕带支持应用窗口音频定向采集与实时双语翻译。"
                             + "记录库空着的时候，这里只有「开始字幕」。"
                     ) { EmptyView() }
                 }
@@ -634,10 +659,12 @@ public struct SessionLibraryView: View {
                         SessionPanelHead(title: "本次字幕", badge: "还没有开始")
                         SessionHairline()
                         VStack(alignment: .leading, spacing: 10) {
+                            SessionKVRow("收音目标", caption.audioTarget?.displayTitle ?? "按窗口选择 / 麦克风")
+                            SessionKVRow("源语言", caption.sourceLanguage.title)
+                            SessionKVRow("翻译模式", caption.displayMode.title)
+                            SessionKVRow("字幕带位置", caption.placementMode == .dockedToTargetWindow ? "吸附目标窗口" : "自由悬停")
                             SessionKVRow("识别精度", profileRowText)
                             SessionKVRow("默认字号", "标准")
-                            SessionKVRow("字幕带位置", "屏幕底部居中 · 每块屏各记一套")
-                            SessionKVRow("采集设备", "系统默认")
                             SessionKVRow("保存位置", "记录库 · 长期保留")
                             SessionKVRow("最近一条记录", lastRecordText)
                         }

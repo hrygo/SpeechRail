@@ -28,7 +28,9 @@ extension SessionStore {
       persona_title    TEXT,
       voice_id         TEXT,
       voice_name       TEXT,
-      end_reason       TEXT
+      end_reason       TEXT,
+      target_bundle_id TEXT,
+      target_app_name  TEXT
     );
     CREATE INDEX session_by_started_at ON session(started_at DESC);
     CREATE INDEX session_by_kind ON session(kind, started_at DESC);
@@ -48,7 +50,9 @@ extension SessionStore {
       device_switch  INTEGER NOT NULL DEFAULT 0,
       starred        INTEGER NOT NULL DEFAULT 0,
       timing_quality TEXT,
-      created_at     REAL NOT NULL
+      created_at     REAL NOT NULL,
+      source_language TEXT,
+      translated_text TEXT
     );
     CREATE UNIQUE INDEX line_by_session ON line(session_id, ordinal);
 
@@ -490,6 +494,25 @@ extension SessionStore {
         }
         if !columns.contains("speaker_label_is_manual") {
             try execute("ALTER TABLE line ADD COLUMN speaker_label_is_manual INTEGER NOT NULL DEFAULT 0;")
+        }
+    }
+
+    /// v14 → v15：实时字幕支持绑定目标本机应用与流式中文译文持久化。
+    /// 纯加法迁移，老记录保持 NULL。
+    func migrateV14ToV15() throws {
+        let sessionCols = try tableColumnNames("session")
+        if !sessionCols.contains("target_bundle_id") {
+            try execute("ALTER TABLE session ADD COLUMN target_bundle_id TEXT;")
+        }
+        if !sessionCols.contains("target_app_name") {
+            try execute("ALTER TABLE session ADD COLUMN target_app_name TEXT;")
+        }
+        let lineCols = try tableColumnNames("line")
+        if !lineCols.contains("source_language") {
+            try execute("ALTER TABLE line ADD COLUMN source_language TEXT;")
+        }
+        if !lineCols.contains("translated_text") {
+            try execute("ALTER TABLE line ADD COLUMN translated_text TEXT;")
         }
     }
 

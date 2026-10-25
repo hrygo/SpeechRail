@@ -622,6 +622,12 @@ public enum SpeechRailDesignTokens {
         /// 浮层不低于这个高度：2 行 + 页脚 + 上下内边距。内容只有一行时也要撑住，
         /// 否则带子会在首句出现前先"跳"一下高度。
         public static let minimumHeight: CGFloat = 96
+        /// 吸附目标窗口时，底部留白与水平安全边距。
+        public static let dockedBottomInset: CGFloat = 36
+        public static let dockedHorizontalMargin: CGFloat = 32
+        /// 窗口拾取框视觉常数。
+        public static let windowPickerBorderWidth: CGFloat = 2.5
+        public static let windowPickerCornerRadius: CGFloat = 12
     }
 
     /// Figma `Voice Chip` 组件的几何（脚本 `componentSet("Voice Chip", …)` 是

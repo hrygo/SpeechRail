@@ -357,3 +357,28 @@ ASR text seal、DB saved frontier、speaker drain、meeting source seal 为四�
 - 本机 `describe()` / `effective_capabilities_v1`：2026-10-16 11:10 左右的只读观察；声明可路由与就绪，不是本轮实测质量结果。
 
 图谱 generation 为 `2026-10-15T06:11:26Z`；已对所依赖路径调用 coverage 检查。图谱过期文件及 `RealtimeASRClient.swift` 的不可解析范围通过当前源码相关段落核对，第三方 checkout 不在索引中，采用直接源码证据；未重建索引。工作区包含既有修复和其他任务改动，本设计没有覆盖它们。本轮未运行质量/性能基准或 UI 自动化，以上验收表是后续门槛。
+
+## 11. 客户端「字随话出」视觉分层与双阶段流式翻译 Context 工程（2026-10-25 增补）
+
+在服务端提供 `partial / window.updated`（可回溯预览）与 `completed / window.sealed`（Prefix-free 复核终稿）的基础上，客户端（`CaptionSession` + `CaptionTranslator` + `CaptionBandView`）承担了从“识别假设”到“双语可读字幕”的最后一公里交付。经对同声传译（SimulMT）与流式字幕工程实践的辩证评估，确立以下客户端工程规范：
+
+### 11.1 「字随话出」的稳定性分层与防抖渲染
+
+1. **为什么服务端 `rollback_tokens=5` 不能直接等同于客户端不可变前缀**：
+   - `BoundQwen3Decoder` 在累计音频超过 4 秒（`initial_unfixed_samples = 64_000`）后复用上一次预览的前缀 Token（仅回退末尾 5 个 Token）。这意味着相邻两次 `partial` 的前缀一致属于**受控解码启发式**，而非两次无约束独立解码的声学共识；正式复核（`full_segment` 或 `window.review`）仍有权改写整段文字。
+2. **客户端 LocalAgreement-2 视觉分层（Visual Stability Tiering）**：
+   - 客户端不因 `partial` 存在回改可能就把整句 8 秒预览全部画成同一种暗灰色。`CaptionSession` 对比连续两次独立到达的 `partialText` 计算字符级最长公共前缀（LCP），并预留末尾约 `4~6` 个字符（或 1~2 个拉丁词）作为活跃声学尾部（Active Acoustic Tail）：
+     - **稳定前缀区（Stabilized Prefix）**：已经历至少两次更新未发生变化的句首前缀，视觉上提升对比度，减少人眼反复重扫整行的疲劳；
+     - **活跃识别尾部（Volatile Tail）**：仍在随声学特征微调的句尾，保持次级浅色与状态提示。
+   - **底边锚定与预排版算高**：`CaptionBandMetrics` 在布局前通过 `NSAttributedString.boundingRect` 结合真实可用宽度计算折行行数；窗口 `NSPanel` 固定 `origin.y`（底边不动、向上生长），杜绝“出字跳窗”。
+
+### 11.2 双阶段流式翻译（SimulMT）的辩证 Context 工程
+
+针对外语视频实时译中场景，客户端采用 **Stage 1（Partial 节流预览翻）+ Stage 2（Completed 双语上下文精翻）** 架构，并严格遵循以下 4 条 Context 工程铁律：
+
+| 工程铁律 | 拒绝的错误做法（反模式） | 采纳的最佳实践方案（及理论依据） |
+| :--- | :--- | :--- |
+| **1. 双语平行滑窗（Parallel Source-Target Window）** | 仅将前 3 句的**源语言原文**（`lines.suffix(3).map(\.text)`）塞入 `【前文背景】` | 传入前 2~3 句的**（源语言原文 $\rightarrow$ 已定稿中文译文）双语平行对**（参考 [Conversational SimulMT, arXiv:2402.10552](https://arxiv.org/abs/2402.10552)）。唯有让模型看见前文已选定的中文译词，才能锁死专有名词、人名译法与人称代词指代一致性。 |
+| **2. 严格排除当前句防自污染（Anti-Self-Contamination）** | 先把定稿行 `apply` 追加进 `lines`，再取 `lines.suffix(3)` 构造上下文 | **必须在插入新行前提取历史窗口**（或显式过滤 `line.id != currentLineID`）。防止当前句自己出现在 `【前文背景】` 末尾，杜绝轻量模型因上下文自重复导致的漏翻或复读。 |
+| **3. 软前缀锚定（Soft Prefix Anchor）替代硬 Token 续写** | 强制把上一轮 Partial 译文作为 Assistant Prefill 硬锁死，或每次 Partial 完全无状态重翻 | 硬锁前缀在英/日/德译中的语序倒装（SVO/SOV）或句末否定词出现时会导致严重语病；完全无状态重翻则导致屏幕译文剧烈闪烁。应提取相邻 Partial 译文的 **LocalAgreement-2 公共前缀**（参考 [Simul-LLM, arXiv:2312.04691](https://arxiv.org/abs/2312.04691)）作为 `stabilizedDraft` 注入 Prompt 软约束：*“若核心语义与极性未反转，优先沿用前半句措辞；若出现倒装或否定则允许重排全句”*。 |
+| **4. 定稿瞬时草稿交接与同文短路（Zero-Blank Handover）** | 句子定稿（`completed`）瞬间清空 `partialTranslatedText`，将新行 `translatedText` 置为 `nil` 等 Stage 2 从头流式输出 | 定稿瞬间新行**立即继承 `partialTranslatedText` 作为初始占位译文**（同时标记 `isTranslating = true`），避免屏幕从中文闪回外语再重出中文；若定稿原文与已完成预览翻译的原文完全一致且无新增上下文修正需求，或 Stage 2 超时失败时，直接复用预览译文兜底。 |
