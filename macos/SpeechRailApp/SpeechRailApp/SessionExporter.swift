@@ -217,7 +217,15 @@ public enum SessionExporter {
         for line in payload.lines {
             let timecode = line.tStart.map { "[\(Self.clock($0))] " } ?? ""
             let flags = lineFlags(line)
-            rows.append("- \(timecode)\(payload.transcriptText(for: line, markdown: true, flags: flags))")
+            let primary = payload.transcriptText(for: line, markdown: true, flags: flags)
+            if let translated = line.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !translated.isEmpty,
+               translated != line.text,
+               payload.captionDisplayMode != .originalOnly {
+                rows.append("- \(timecode)\(primary)\n  > \(translated)")
+            } else {
+                rows.append("- \(timecode)\(primary)")
+            }
         }
         rows.append("")
         return rows.joined(separator: "\n")
@@ -291,7 +299,20 @@ public enum SessionExporter {
         let header = "\(payload.title)\n\(payload.record.kind.title) · \(payload.record.startedAt.speechRailFormatted())\n"
         let body = payload.lines.map { line in
             let timecode = line.tStart.map { "[\(Self.clock($0))] " } ?? ""
-            return "\(timecode)\(payload.transcriptText(for: line))"
+            let rawText = payload.transcriptText(for: line)
+            if let translated = line.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !translated.isEmpty,
+               translated != line.text {
+                switch payload.captionDisplayMode {
+                case .chineseOnly:
+                    return "\(timecode)\(translated)"
+                case .originalOnly:
+                    return "\(timecode)\(rawText)"
+                case .bilingual:
+                    return "\(timecode)\(translated)\n\(timecode)\(rawText)"
+                }
+            }
+            return "\(timecode)\(rawText)"
         }
         return ([header] + body).joined(separator: "\n") + "\n"
     }
@@ -337,11 +358,19 @@ public enum SessionExporter {
                 if let tStart = line.tStart { item["t_start"] = tStart }
                 if let tEnd = line.tEnd { item["t_end"] = tEnd }
                 if let quality = line.timingQuality { item["timing_quality"] = quality.rawValue }
+                if let sourceLanguage = line.sourceLanguage { item["source_language"] = sourceLanguage }
+                if let translatedText = line.translatedText { item["translated_text"] = translatedText }
                 return item
             }
         ]
         if let endedAt = payload.record.endedAt {
             root["ended_at"] = endedAt.timeIntervalSince1970
+        }
+        if let targetBundleID = payload.record.targetBundleID {
+            root["target_bundle_id"] = targetBundleID
+        }
+        if let targetAppName = payload.record.targetAppName {
+            root["target_app_name"] = targetAppName
         }
         if let voice = payload.record.voice {
             root["voice"] = ["id": voice.id, "name": jsonText(voice.name)]

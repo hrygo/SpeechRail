@@ -116,7 +116,8 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         let session = CaptionSession(
             coordinator: coordinator,
             dependencies: dependencies,
-            audioSourceFactory: { audio }
+            audioSourceFactory: { audio },
+            defaults: defaults
         )
         session.serviceReadiness = { .ready(profile: "test") }
         coordinator.starter = { kind in
@@ -1351,6 +1352,119 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         )
     }
 
+    func testPauseAndResumePreservesSelectedAppAudioTargetSource() async throws {
+        let h = try await makeHarness()
+        let targetApp = CaptionTargetApp(
+            bundleID: "com.apple.QuickTimePlayerX",
+            appName: "QuickTime Player",
+            windowID: 42,
+            isPlayingAudio: true,
+            pid: 999
+        )
+        var requestedTargets: [CaptionAudioTarget] = []
+        var fallbackFactoryCallCount = 0
+        let appAudio = ControllableCaptionAudioSource()
+        h.session.audioSourceFactory = {
+            fallbackFactoryCallCount += 1
+            return h.audio
+        }
+        h.session.makeAudioSourceForTarget = { target in
+            requestedTargets.append(target)
+            return appAudio
+        }
+
+        await h.session.selectTarget(.app(targetApp))
+        XCTAssertEqual(h.session.phase, .running)
+        XCTAssertEqual(requestedTargets, [.app(targetApp)])
+        XCTAssertEqual(fallbackFactoryCallCount, 0)
+
+        await h.session.pause()
+        XCTAssertEqual(h.session.phase, .paused)
+
+        await h.session.resume()
+        XCTAssertEqual(h.session.phase, .running)
+        XCTAssertEqual(
+            requestedTargets,
+            [.app(targetApp), .app(targetApp)],
+            "暂停后继续必须沿用已选目标应用音源，不能退回默认麦克风工厂"
+        )
+        XCTAssertEqual(fallbackFactoryCallCount, 0)
+    }
+
+    func testSystemAudioFailureMapsToSystemAudioUnavailableBlockReason() async throws {
+        let h = try await makeHarness()
+        let targetApp = CaptionTargetApp(
+            bundleID: "com.google.Chrome",
+            appName: "Google Chrome",
+            windowID: 100,
+            pid: 200
+        )
+        let failingSource = ControllableCaptionAudioSource()
+        failingSource.startFailure = MeetingAudioBlocked(
+            reason: .systemAudioUnavailable("未获系统录音授权。")
+        )
+        h.session.makeAudioSourceForTarget = { _ in failingSource }
+
+        await h.session.selectTarget(.app(targetApp))
+        XCTAssertEqual(h.session.phase, .idle)
+        XCTAssertEqual(
+            h.session.blocked,
+            .systemAudioUnavailable("未获系统录音授权。"),
+            "系统音频采集受阻应映射为 .systemAudioUnavailable，以便浮层提供切换麦克风出口"
+        )
+    }
+
+    func testChineseAndOriginalOnlyNeverShowTranslatingSpinnerAndPersistSourceLanguage() async throws {
+        // 1. 中文未定稿与仅原文未定稿不应标为 isTranslating
+        let zhPartial = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "今天我们测试实时字幕",
+            partialTranslatedText: nil,
+            displayMode: .bilingual
+        )
+        XCTAssertEqual(zhPartial.rows.first?.isTranslating, false, "中文未定稿不应显示翻译中")
+
+        let originalOnlyPartial = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "The budget is approved",
+            partialTranslatedText: nil,
+            displayMode: .originalOnly
+        )
+        XCTAssertEqual(originalOnlyPartial.rows.first?.isTranslating, false, "仅原文模式不应显示翻译中")
+
+        // 2. 中文定稿行应将 source_language='zh' 持久化入库，且 currentSegmentText 遵循显示模式
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        h.session.displayMode = .bilingual
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "zh-1", transcript: "今天我们测试实时字幕"))
+        let recordID = try XCTUnwrap(h.session.sessionID)
+        try await h.settle {
+            guard let line = $0.session.lines.first else { return false }
+            return !line.isTranslating && line.sourceLanguage == "zh"
+        }
+        try await h.settle { _ in
+            let stored = try? await h.store.lines(sessionID: recordID)
+            return stored?.first?.sourceLanguage == "zh"
+        }
+
+        try await h.emit(.completed(itemID: "en-2", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 2 && !$0.session.lines[1].isTranslating }
+
+        h.session.displayMode = .bilingual
+        XCTAssertEqual(h.session.currentSegmentText, "预算已批准\nThe budget is approved")
+        h.session.displayMode = .chineseOnly
+        XCTAssertEqual(h.session.currentSegmentText, "预算已批准")
+        h.session.displayMode = .originalOnly
+        XCTAssertEqual(h.session.currentSegmentText, "The budget is approved")
+        h.session.displayMode = .bilingual
+    }
+
     @MainActor
     private final class Harness {
         let directory: URL
@@ -1408,17 +1522,22 @@ final class CaptionSessionLifecycleTests: XCTestCase {
 private final class ControllableCaptionAudioSource: AudioChunkSource, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: AudioChunkStream.Continuation?
+    var startFailure: (any Error)?
 
     func start() async throws -> AudioChunkStream {
+        let failure = lock.withLock { startFailure }
+        if let failure {
+            throw failure
+        }
         let pair = AudioChunkStream.makeStream()
         setContinuation(pair.continuation)
         return pair.stream
     }
 
     private func setContinuation(_ value: AudioChunkStream.Continuation) {
-        lock.lock()
-        continuation = value
-        lock.unlock()
+        lock.withLock {
+            continuation = value
+        }
     }
 
     func stop() async {
@@ -1427,9 +1546,7 @@ private final class ControllableCaptionAudioSource: AudioChunkSource, @unchecked
     }
 
     func emit(_ chunk: AudioChunk) {
-        lock.lock()
-        let current = continuation
-        lock.unlock()
+        let current = lock.withLock { continuation }
         current?.offer(chunk)
     }
 }

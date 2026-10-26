@@ -287,6 +287,7 @@ public final class CaptionBandWindowController: NSObject {
 
         let width = bandSize.width
         var x = targetFrame.midX - width / 2
+        var y = targetFrame.minY + SpeechRailDesignTokens.CaptionBand.dockedBottomInset
         let innerMinX = targetFrame.minX + margin
         let innerMaxX = targetFrame.maxX - margin - width
         if innerMaxX >= innerMinX {
@@ -297,10 +298,11 @@ public final class CaptionBandWindowController: NSObject {
         // 而不是硬塞进一个不存在的区间、把带子整体推到窗口右边外。
         if let screen = screens.first(where: { $0.frame.intersects(targetFrame) }) ?? screens.first {
             x = clamp(x, screen.visibleFrame.minX + margin, screen.visibleFrame.maxX - margin - width)
+            y = clamp(y, screen.visibleFrame.minY + 12, screen.visibleFrame.maxY - bandSize.height - 12)
         }
         return NSRect(
             x: x,
-            y: targetFrame.minY + SpeechRailDesignTokens.CaptionBand.dockedBottomInset,
+            y: y,
             width: width,
             height: bandSize.height
         )
@@ -393,7 +395,12 @@ public final class CaptionBandWindowController: NSObject {
         var frame = panel.frame
         guard abs(frame.height - height) > 0.5 else { return }
         frame.size.height = height
+        isApplyingTargetGeometry = true
         panel.setFrame(frame, display: true)
+        isApplyingTargetGeometry = false
+        if session.placementMode == .dockedToTargetWindow, lastDockedOrigin != nil {
+            lastDockedOrigin = panel.frame.origin
+        }
         remember(panel)
     }
 
@@ -402,6 +409,8 @@ public final class CaptionBandWindowController: NSObject {
     private func place(_ panel: NSPanel) {
         let screen = panel.screen ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
+        isApplyingTargetGeometry = true
+        defer { isApplyingTargetGeometry = false }
         if let stored = storedFrame(for: screen), Self.isOnScreen(stored, screen: screen) {
             panel.setFrame(stored, display: false)
             return
@@ -471,9 +480,9 @@ public final class CaptionBandWindowController: NSObject {
 
 extension CaptionBandWindowController: NSWindowDelegate {
     public func windowDidMove(_ notification: Notification) {
-        guard let panel else { return }
-        // 跟踪器的吸附改帧也会发这条通知（`setFrame` 同步发一次）。落点仍等于吸附目标
-        // 位置时那是"我们搬的"，不能算用户拖动：否则 15Hz 跟随会在第一帧停掉自己，
+        guard let panel, panel.isVisible else { return }
+        // 跟踪器的吸附改帧与内部初始排布也会发这条通知（`setFrame` 同步发一次）。
+        // 落点仍等于吸附目标位置时那是"我们搬的"，不能算用户拖动：否则 15Hz 跟随会在第一帧停掉自己，
         // 用户也永远看不到 `吸附回窗口` 生效。
         if isApplyingTargetGeometry { return }
         // 拖左/上边缘改尺寸也会改 origin，那不是「把浮层拖走」，吸附不该因此关掉：

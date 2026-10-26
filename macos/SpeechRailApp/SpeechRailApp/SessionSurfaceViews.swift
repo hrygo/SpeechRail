@@ -578,7 +578,8 @@ public struct SessionLibraryView: View {
             record: summary.record,
             lines: rows,
             speakerNames: names,
-            minutes: minutes
+            minutes: minutes,
+            captionDisplayMode: caption.displayMode
         )
     }
 
@@ -1048,11 +1049,28 @@ public struct SessionLibraryView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 .frame(width: SpeechRailDesignTokens.Layout.sessionTimecodeColumnWidth, alignment: .leading)
 
-            Text(line.text)
-                .font(SpeechRailDesignTokens.Typography.body)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                if let translated = line.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !translated.isEmpty,
+                   translated != line.text {
+                    Text(translated)
+                        .font(SpeechRailDesignTokens.Typography.body)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(line.text)
+                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text(line.text)
+                        .font(SpeechRailDesignTokens.Typography.body)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
     }
@@ -1128,7 +1146,11 @@ public struct SessionLibraryView: View {
         if summary.speakerCount > 0 {
             parts.append("\(summary.speakerCount) 位说话人")
         }
-        parts.append(summary.record.audioSource.title)
+        if let appName = summary.record.targetAppName, !appName.isEmpty {
+            parts.append("\(summary.record.audioSource.title)（\(appName)）")
+        } else {
+            parts.append(summary.record.audioSource.title)
+        }
         if summary.record.state == .archived, let reason = summary.record.endReason, reason != .user {
             parts.append(reason.title)
         }
@@ -1185,7 +1207,15 @@ public struct SessionLibraryView: View {
     private func copyTranscript(of summary: SessionSummary) async {
         do {
             let rows = try await session.lines(sessionID: summary.id)
-            let text = rows.map { "\(speakerText(for: $0))  \($0.text)" }.joined(separator: "\n")
+            let text = rows.map { row -> String in
+                let speaker = speakerText(for: row)
+                if let translated = row.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !translated.isEmpty,
+                   translated != row.text {
+                    return "\(speaker)  \(translated)\n    \(row.text)"
+                }
+                return "\(speaker)  \(row.text)"
+            }.joined(separator: "\n")
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             guard pasteboard.setString(text, forType: .string) else {

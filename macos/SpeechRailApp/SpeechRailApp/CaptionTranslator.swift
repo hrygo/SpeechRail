@@ -51,13 +51,22 @@ public enum CaptionLanguageDetector: Sendable {
             return DetectionResult(languageCode: "und", isChinese: true)
         }
 
-        // 注意：日语假名（0x3040...0x30FF）不计入 cjkCount。
-        // 若存在平假名/片假名，直接识别为日语（需翻译为中文）。
+        // 注意：日语假名（0x3040...0x30FF）与韩文谚文（0xAC00...0xD7AF 等）不计入 cjkCount。
+        // 若存在平假名/片假名，直接识别为日语；若存在谚文，直接识别为韩语（均需翻译为中文）。
         let hasKana = trimmed.unicodeScalars.contains {
             (0x3040...0x309F).contains($0.value) || (0x30A0...0x30FF).contains($0.value)
         }
         if hasKana {
             return DetectionResult(languageCode: "ja", isChinese: false)
+        }
+
+        let hasHangul = trimmed.unicodeScalars.contains {
+            (0xAC00...0xD7AF).contains($0.value)
+                || (0x1100...0x11FF).contains($0.value)
+                || (0x3130...0x318F).contains($0.value)
+        }
+        if hasHangul {
+            return DetectionResult(languageCode: "ko", isChinese: false)
         }
 
         let cjkCharRatio = Double(cjkCount) / Double(meaningfulCount)
@@ -131,10 +140,6 @@ public struct CaptionContextTurn: Equatable, Sendable {
     }
 }
 
-/// 翻译引擎抽象协议：生产环境注入 `LLMProvider`，单测注入确定性 Fake。
-///
-/// `priorDraftTranslation` 是已经上屏的预览译文（LocalAgreement-2 稳定前缀或上一轮草稿），
-/// 只作为提示词软锚定，不是硬性前缀约束。
 /// 翻译引擎抽象协议：生产环境注入 `LLMProvider`，单测注入确定性 Fake。
 ///
 /// `priorDraftTranslation` 是已经上屏的预览译文（LocalAgreement-2 稳定前缀或上一轮草稿），
@@ -217,6 +222,16 @@ public final class CaptionTranslationCoordinator {
             4. 若提供了【当前句已上屏草稿】，在核心语义与肯定/否定极性未反转的前提下，优先沿用草稿前半句措辞以减少屏幕闪烁；若后文出现倒装从句或语义反转，则以准确自然为先重排全句。
             5. 若原文已经是通顺的中文，原样输出即可。
             """
+        case .korean:
+            return """
+            你是一个专业的实时视频中文字幕翻译引擎。源语言为韩语（SOV结构）。请将用户输入的【当前句】直接翻译为自然、简练的简体中文。
+            硬性规则：
+            1. 只输出【当前句】对应的中文译文本身，严禁输出任何引号、前缀标签、解释说明或思考过程。
+            2. 注意韩语句末谓语、否定词尾与敬语语气；未闭合从句以名词短语或悬垂短语直译，切勿提前盲目脑补动作。
+            3. 严格参考【前文背景】中的双语对照关系，保持专业术语、人名译法和代词指代一致，但绝不要重复翻译【前文背景】中的句子。
+            4. 若提供了【当前句已上屏草稿】，在核心语义与肯定/否定极性未反转的前提下，优先沿用草稿前半句措辞以减少屏幕闪烁；若后文出现倒装从句或语义反转，则以准确自然为先重排全句。
+            5. 若原文已经是通顺的中文，原样输出即可。
+            """
         default:
             return Self.systemInstructions
         }
@@ -227,6 +242,9 @@ public final class CaptionTranslationCoordinator {
     private let minimumPartialDeltaChars: Int
 
     private var partialTask: Task<Void, Never>?
+    private var isPartialDebouncing = false
+    private var pendingPartialSourceText: String = ""
+    private var pendingPartialContextLines: [String] = []
     private var lastPartialSourceText: String = ""
     private var lastPartialTranslation: String?
     private var stabilizedDraftPrefix: String?
@@ -242,12 +260,19 @@ public final class CaptionTranslationCoordinator {
         self.makeClient = makeClient
     }
 
-    public func cancelAll() {
+    public func cancelPartial() {
         partialTask?.cancel()
         partialTask = nil
+        isPartialDebouncing = false
+        pendingPartialSourceText = ""
+        pendingPartialContextLines = []
         lastPartialSourceText = ""
         lastPartialTranslation = nil
         stabilizedDraftPrefix = nil
+    }
+
+    public func cancelAll() {
+        cancelPartial()
         for task in finalTasks.values { task.cancel() }
         finalTasks.removeAll()
     }
@@ -275,11 +300,7 @@ public final class CaptionTranslationCoordinator {
     ) {
         let trimmed = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, displayMode != .originalOnly else {
-            partialTask?.cancel()
-            partialTask = nil
-            lastPartialSourceText = ""
-            lastPartialTranslation = nil
-            stabilizedDraftPrefix = nil
+            cancelPartial()
             onUpdate(nil)
             return
         }
@@ -295,14 +316,14 @@ public final class CaptionTranslationCoordinator {
         }
 
         if isChinese {
-            partialTask?.cancel()
-            partialTask = nil
-            lastPartialSourceText = ""
-            lastPartialTranslation = nil
-            stabilizedDraftPrefix = nil
+            cancelPartial()
             onUpdate(nil)
             return
         }
+
+        // 防抖睡眠期间到达的新增文本实时刷新待翻快照，确保防抖结束时发送最新完整前缀而非旧快照。
+        pendingPartialSourceText = trimmed
+        pendingPartialContextLines = Array(contextLines.suffix(2))
 
         let charDelta = abs(trimmed.count - lastPartialSourceText.count)
         let endsWithClauseBoundary = trimmed.last.map { ",.;?!，。；？！、".contains($0) } ?? false
@@ -316,14 +337,20 @@ public final class CaptionTranslationCoordinator {
         let instructions = Self.systemInstructions(for: preferredLanguage)
 
         partialTask?.cancel()
+        isPartialDebouncing = true
         partialTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: debounce)
                 try Task.checkCancellation()
+                guard let self else { return }
+                self.isPartialDebouncing = false
+                let latestSource = self.pendingPartialSourceText.isEmpty ? trimmed : self.pendingPartialSourceText
+                let latestContext = self.pendingPartialContextLines
+                self.lastPartialSourceText = latestSource
                 var accumulated = ""
                 for try await delta in client.translateStream(
-                    sourceText: trimmed,
-                    contextLines: Array(contextLines.suffix(2)),
+                    sourceText: latestSource,
+                    contextLines: latestContext,
                     priorDraftTranslation: priorDraft,
                     systemInstructions: instructions
                 ) {
@@ -334,7 +361,6 @@ public final class CaptionTranslationCoordinator {
                         onUpdate(cleaned)
                     }
                 }
-                guard let self else { return }
                 let finalPartial = Self.cleanSubtitleOutput(accumulated)
                 guard !finalPartial.isEmpty else { return }
                 if let previous = self.lastPartialTranslation {
@@ -342,7 +368,10 @@ public final class CaptionTranslationCoordinator {
                 }
                 self.lastPartialTranslation = finalPartial
             } catch {
-                // Partial 预览取消或失败静默忽略，不影响定稿翻译。
+                self?.isPartialDebouncing = false
+                if !(error is CancellationError) {
+                    self?.lastPartialSourceText = ""
+                }
             }
         }
     }
@@ -359,13 +388,9 @@ public final class CaptionTranslationCoordinator {
         onStreamingUpdate: @escaping @MainActor (String, String) -> Void,
         onFinished: @escaping @MainActor (String, String?, String) async -> Void
     ) {
-        partialTask?.cancel()
-        partialTask = nil
         let fallbackDraft = lastPartialTranslation
         let draftForPrompt = stabilizedDraftPrefix ?? lastPartialTranslation
-        lastPartialSourceText = ""
-        lastPartialTranslation = nil
-        stabilizedDraftPrefix = nil
+        cancelPartial()
 
         let trimmed = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         let isChinese: Bool

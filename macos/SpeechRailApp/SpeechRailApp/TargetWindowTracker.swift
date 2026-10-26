@@ -8,7 +8,7 @@ import Foundation
 /// 当目标窗口移动、缩放、最小化或关闭时，实时将最新几何（AppKit 屏幕坐标系）通知给上层。
 ///
 /// **严格隐私与权限约束**：
-/// 仅通过 `CGWindowListCopyWindowInfo` 查询目标 `CGWindowID` 的边界（`kCGWindowBounds`），
+/// 仅通过 `CGWindowListCopyWindowInfo` 查询目标窗口的边界（`kCGWindowBounds`），
 /// **严禁**读取 `kCGWindowName`，杜绝任何触发 TCC 录屏权限弹窗的隐患。
 @MainActor
 public final class TargetWindowTracker {
@@ -85,36 +85,83 @@ public final class TargetWindowTracker {
         }
     }
 
-    /// 查询窗口几何信息并将 Quartz 坐标转换为 AppKit 屏幕坐标
+    /// 查询窗口几何信息并将 Quartz 坐标转换为 AppKit 屏幕坐标。
+    ///
+    /// 优先匹配选定的 `windowID`；若目标窗口因切换全屏/画中画或从底部快捷栏按应用级选中而无直接 `windowID` 命中，
+    /// 自动回退至同一 `bundleID` 在屏面积最大的可见窗口（layer 0...3）。
     private func queryWindowGeometry(target: CaptionTargetApp) -> TargetWindowGeometry? {
-        guard let windowID = target.windowID else { return nil }
-        let options: CGWindowListOption = [.optionIncludingWindow]
-        guard let list = CGWindowListCopyWindowInfo(options, windowID) as? [[String: Any]],
-              let dict = list.first(where: { ($0[kCGWindowNumber as String] as? CGWindowID) == windowID })
+        let primaryScreenHeight = NSScreen.screens.first?.frame.height ?? 1080
+
+        if let windowID = target.windowID {
+            let options: CGWindowListOption = [.optionIncludingWindow]
+            if let list = CGWindowListCopyWindowInfo(options, windowID) as? [[String: Any]],
+               let dict = list.first(where: { ($0[kCGWindowNumber as String] as? CGWindowID) == windowID }),
+               let geometry = Self.extractGeometry(from: dict, expectedPID: target.pid, primaryScreenHeight: primaryScreenHeight) {
+                return geometry
+            }
+        }
+
+        // 回退：按 bundleID（或 pid）在当前屏幕可见窗口中选取面积最大的主窗口
+        var matchingPIDs = Set(
+            NSRunningApplication.runningApplications(withBundleIdentifier: target.bundleID)
+                .map(\.processIdentifier)
+        )
+        if let pid = target.pid {
+            matchingPIDs.insert(pid)
+        }
+        guard !matchingPIDs.isEmpty,
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         else {
             return nil
         }
 
-        // 校验 PID
-        if let targetPID = target.pid,
-           let ownerPID = dict[kCGWindowOwnerPID as String] as? pid_t,
-           ownerPID != targetPID {
+        var bestGeometry: TargetWindowGeometry?
+        var bestArea: CGFloat = 0
+        for dict in list {
+            guard let layer = dict[kCGWindowLayer as String] as? Int, (0...3).contains(layer),
+                  let alpha = dict[kCGWindowAlpha as String] as? Double, alpha > 0.5,
+                  let ownerPID = dict[kCGWindowOwnerPID as String] as? pid_t, matchingPIDs.contains(ownerPID),
+                  let geometry = Self.extractGeometry(
+                      from: dict,
+                      expectedPID: ownerPID,
+                      minimumWidth: 120,
+                      minimumHeight: 100,
+                      primaryScreenHeight: primaryScreenHeight
+                  )
+            else { continue }
+
+            let area = geometry.frame.width * geometry.frame.height
+            if area > bestArea {
+                bestArea = area
+                bestGeometry = geometry
+            }
+        }
+        return bestGeometry
+    }
+
+    private static func extractGeometry(
+        from dict: [String: Any],
+        expectedPID: pid_t?,
+        minimumWidth: CGFloat = 50,
+        minimumHeight: CGFloat = 50,
+        primaryScreenHeight: CGFloat
+    ) -> TargetWindowGeometry? {
+        guard let windowID = dict[kCGWindowNumber as String] as? CGWindowID,
+              let ownerPID = dict[kCGWindowOwnerPID as String] as? pid_t
+        else { return nil }
+
+        if let expectedPID, ownerPID != expectedPID {
             return nil
         }
 
-        // 校验是否在屏幕上（例如被最小化或隐藏则 isOnScreen 可能为 0 或 bounds 为 0）
         guard let boundsDict = dict[kCGWindowBounds as String] as? [String: Any],
               let quartzRect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
-              quartzRect.width >= 50, quartzRect.height >= 50
-        else {
-            return nil
-        }
+              quartzRect.width >= minimumWidth, quartzRect.height >= minimumHeight
+        else { return nil }
 
         let isOnScreen = (dict[kCGWindowIsOnscreen as String] as? Bool) ?? true
         guard isOnScreen else { return nil }
 
-        // Quartz -> AppKit 屏幕坐标转换
-        let primaryScreenHeight = NSScreen.screens.first?.frame.height ?? 1080
         let appKitY = primaryScreenHeight - (quartzRect.origin.y + quartzRect.height)
         let appKitRect = CGRect(
             x: quartzRect.origin.x,
@@ -125,7 +172,7 @@ public final class TargetWindowTracker {
 
         return TargetWindowGeometry(
             windowID: windowID,
-            pid: target.pid ?? 0,
+            pid: ownerPID,
             frame: appKitRect,
             isVisible: true
         )

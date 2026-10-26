@@ -133,6 +133,31 @@ final class MeetingRecoveryMaterialTests: XCTestCase {
         )
         XCTAssertTrue(originalOnly.contains("The budget is approved"))
         XCTAssertFalse(originalOnly.contains("预算已批准"), "仅原文模式不带译文")
+
+        let markdown = SessionExporter.export(
+            SessionExportPayload(record: record.record, lines: lines, captionDisplayMode: .bilingual),
+            as: .markdown
+        )
+        XCTAssertTrue(markdown.contains("The budget is approved"))
+        XCTAssertTrue(markdown.contains("> 预算已批准"))
+
+        let plainText = SessionExporter.export(
+            SessionExportPayload(record: record.record, lines: lines, captionDisplayMode: .bilingual),
+            as: .plainText
+        )
+        XCTAssertTrue(plainText.contains("预算已批准"))
+        XCTAssertTrue(plainText.contains("The budget is approved"))
+
+        let jsonString = SessionExporter.export(
+            SessionExportPayload(record: record.record, lines: lines, captionDisplayMode: .bilingual),
+            as: .json
+        )
+        let jsonObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(jsonString.utf8)) as? [String: Any]
+        )
+        let jsonLines = try XCTUnwrap(jsonObject["lines"] as? [[String: Any]])
+        XCTAssertEqual(jsonLines.first?["translated_text"] as? String, "预算已批准")
+        XCTAssertEqual(jsonLines.first?["source_language"] as? String, "en")
     }
 
     func testLiveAndStoredPresentationKeepMixedSpeakersUnicodeAndUnknownWords() {

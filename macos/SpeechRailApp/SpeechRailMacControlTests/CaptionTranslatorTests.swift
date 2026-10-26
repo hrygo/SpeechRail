@@ -401,16 +401,59 @@ final class CaptionTranslatorTests: XCTestCase {
 
     // MARK: 源语种偏好与提示词工程
 
-    func testSpecializedSystemInstructionsForEnglishAndJapanese() {
+    func testSpecializedSystemInstructionsForEnglishJapaneseAndKorean() {
         let defaultPrompt = CaptionTranslationCoordinator.systemInstructions(for: .auto)
         let englishPrompt = CaptionTranslationCoordinator.systemInstructions(for: .english)
         let japanesePrompt = CaptionTranslationCoordinator.systemInstructions(for: .japanese)
+        let koreanPrompt = CaptionTranslationCoordinator.systemInstructions(for: .korean)
 
         XCTAssertTrue(englishPrompt.contains("源语言为英语"))
         XCTAssertTrue(englishPrompt.contains("定语从句"))
         XCTAssertTrue(japanesePrompt.contains("SOV结构"))
         XCTAssertTrue(japanesePrompt.contains("句末谓语与否定形态"))
+        XCTAssertTrue(koreanPrompt.contains("源语言为韩语（SOV结构）"))
+        XCTAssertTrue(koreanPrompt.contains("敬语语气"))
         XCTAssertEqual(defaultPrompt, CaptionTranslationCoordinator.systemInstructions)
+    }
+
+    func testKoreanWithHanjaIsDetectedAsKorean() {
+        let detection = CaptionLanguageDetector.detect(for: "오늘 회의에서 豫算안을 승인했습니다")
+        XCTAssertFalse(detection.isChinese)
+        XCTAssertEqual(detection.languageCode, "ko")
+    }
+
+    func testPartialTranslationUsesLatestTextAppendedDuringDebounceWindow() async {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["翻译完成"]
+        let coordinator = CaptionTranslationCoordinator(
+            partialDebounce: .milliseconds(60),
+            minimumPartialDeltaChars: 10,
+            makeClient: { fake }
+        )
+
+        // 首次 12 字符跨过 10 字符门槛，进入 60ms 防抖等待
+        coordinator.schedulePartialTranslation(
+            sourceText: "Hello world!",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { _ in }
+        )
+        // 防抖期内追加 5 个字符（不足 10 字符门槛，但防抖醒来时应发送最新完整句子）
+        try? await Task.sleep(nanoseconds: 15_000_000)
+        coordinator.schedulePartialTranslation(
+            sourceText: "Hello world! Next",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { _ in }
+        )
+
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertEqual(fake.callCount, 1)
+        XCTAssertEqual(
+            fake.lastSourceText,
+            "Hello world! Next",
+            "防抖窗口内新增的短尾词不能被丢弃"
+        )
     }
 
     func testExplicitChinesePreferenceBypassesTranslationClient() async {
