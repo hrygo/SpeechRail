@@ -612,4 +612,57 @@ final class CaptionTranslatorTests: XCTestCase {
             "协调器应使用近期已完成译文缓存自动补全未带译文的上下文行"
         )
     }
+
+    func testCompletedLineRejectsMismatchedPartialDraftAndAcceptsPriorDraftHint() async {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["上一句的残留草稿"]
+        let coordinator = CaptionTranslationCoordinator(
+            partialDebounce: .milliseconds(10),
+            minimumPartialDeltaChars: 5,
+            makeClient: { fake }
+        )
+
+        coordinator.schedulePartialTranslation(
+            sourceText: "Completely unrelated previous sentence",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { _ in }
+        )
+        try? await Task.sleep(nanoseconds: 60_000_000)
+
+        fake.streamDeltas = []
+        fake.failure = TranslationFailure()
+
+        let exp = expectation(description: "Mismatched draft rejected")
+        var fallbackResult: String?
+        coordinator.translateCompletedLine(
+            lineID: "line-mismatch",
+            sourceText: "Brand new short line",
+            contextLines: [],
+            displayMode: .bilingual,
+            priorDraftHint: "会话层已校验同源草稿",
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, translated, _ in
+                fallbackResult = translated
+                exp.fulfill()
+            }
+        )
+        await fulfillment(of: [exp], timeout: 1.0)
+        XCTAssertEqual(
+            fallbackResult,
+            "会话层已校验同源草稿",
+            "不同句的残留 partial 草稿应被拒绝，优先采用会话层校验通过的同源 priorDraftHint"
+        )
+    }
+
+    func testCleanSubtitleOutputStripsSurroundingQuotesAndPromptHeaders() {
+        XCTAssertEqual(
+            CaptionTranslationCoordinator.cleanSubtitleOutput("“真正有价值的应用数量也在快速增长。”"),
+            "真正有价值的应用数量也在快速增长。"
+        )
+        XCTAssertEqual(
+            CaptionTranslationCoordinator.cleanSubtitleOutput("【当前句（请仅将此句译为简练中文字幕）】\n「智能体 AI 的热潮飙升」"),
+            "智能体 AI 的热潮飙升"
+        )
+    }
 }

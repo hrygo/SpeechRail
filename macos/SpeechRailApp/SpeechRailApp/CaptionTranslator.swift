@@ -471,6 +471,16 @@ public final class CaptionTranslationCoordinator {
         }
     }
 
+    /// 校验未定稿草稿的原文是否确实是当前定稿句的前身，防止上一句残留草稿串入新句。
+    private static func draftMatchesSource(partialSource: String, completedSource: String) -> Bool {
+        let p = partialSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        let c = completedSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !p.isEmpty, !c.isEmpty else { return false }
+        if p == c || c.hasPrefix(p) || p.hasPrefix(c) { return true }
+        let shared = p.commonPrefix(with: c).count
+        return shared >= Swift.max(4, Swift.min(p.count, c.count) - 2)
+    }
+
     /// Stage 2：当句子定稿（completed / sealed）时，取消 partial 预览并携带前 3 句双语平行上下文精翻。
     ///
     /// 终态一定回调 `onFinished`：失败时用已到达前缀或 Stage 1 草稿兜底，绝不把行留在「翻译中」。
@@ -480,15 +490,25 @@ public final class CaptionTranslationCoordinator {
         contextLines: [String],
         displayMode: CaptionDisplayMode,
         preferredLanguage: CaptionSourceLanguage = .auto,
+        priorDraftHint: String? = nil,
         onStreamingUpdate: @escaping @MainActor (String, String) -> Void,
         onFinished: @escaping @MainActor (String, String?, String) async -> Void
     ) {
-        // 即使 Stage 1 在流式中途被定稿事件打断，也保留已流式产出的 `inFlightPartialTranslation` 作为保底草稿
-        let fallbackDraft = lastPartialTranslation ?? inFlightPartialTranslation
-        let draftForPrompt = stabilizedDraftPrefix ?? fallbackDraft
-        cancelPartial()
-
         let trimmed = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidateSource = !inFlightPartialSourceText.isEmpty ? inFlightPartialSourceText : lastPartialSourceText
+        let coordinatorDraft: String?
+        let coordinatorStabilized: String?
+        if candidateSource.isEmpty || Self.draftMatchesSource(partialSource: candidateSource, completedSource: trimmed) {
+            coordinatorDraft = lastPartialTranslation ?? inFlightPartialTranslation
+            coordinatorStabilized = stabilizedDraftPrefix
+        } else {
+            coordinatorDraft = nil
+            coordinatorStabilized = nil
+        }
+        // 即使 Stage 1 在流式中途被定稿事件打断，也保留已流式产出的草稿或会话层传入的 `priorDraftHint` 作为保底
+        let fallbackDraft = coordinatorDraft ?? priorDraftHint
+        let draftForPrompt = coordinatorStabilized ?? fallbackDraft
+        cancelPartial()
         let isChinese: Bool
         let detectedLanguageCode: String
         switch preferredLanguage {
@@ -633,9 +653,27 @@ public final class CaptionTranslationCoordinator {
                 break
             }
         }
-        for prefix in ["【当前句】", "【译文】", "译文：", "翻译：", "译文:", "翻译:"] {
+        for prefix in [
+            "【当前句（请仅将此句译为简练中文字幕）】",
+            "【当前句】",
+            "【译文】",
+            "译文：",
+            "翻译：",
+            "译文:",
+            "翻译:"
+        ] {
             if text.hasPrefix(prefix) {
                 text = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        if text.count >= 2 {
+            let pairs: [(Character, Character)] = [("\"", "\""), ("“", "”"), ("「", "」")]
+            for (openQuote, closeQuote) in pairs where text.first == openQuote && text.last == closeQuote {
+                let inner = String(text.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !inner.isEmpty, !inner.contains(openQuote), !inner.contains(closeQuote) {
+                    text = inner
+                    break
+                }
             }
         }
         return text

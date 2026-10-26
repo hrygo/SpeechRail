@@ -1311,6 +1311,8 @@ public actor LLMProvider {
     private var unformattedOutputEndpoints: Set<String> = []
     private var responsesTaskEndpoints: Set<String> = []
     private var completionTokenLimitEndpoints: Set<String> = []
+    /// 字幕翻译在 `/chat/completions` 上自动协商并锁定的关闭思考方言（`Optional.some(nil)` 表示所有关闭思考字段均被拒或无效，需走高预算兜底）。
+    private var chatTranslationThinkingModes: [String: LLMThinkingControl?] = [:]
 
     public init(
         session: URLSession = .shared,
@@ -1450,6 +1452,51 @@ public actor LLMProvider {
         }
     }
 
+    /// 按兼容模式生成 `/chat/completions` 关闭思考的候选参数序列。
+    ///
+    /// 当用户在默认 `openAICompatible` 模式下接入 Qwen3 / vLLM / SGLang / 智谱 / 火山等推理模型时，
+    /// 若首选字段被服务端 `400/422` 拒绝或被静默忽略（响应仍出现 `reasoning_content` / `<think>`），
+    /// 自动依次尝试其他主流关闭思考字段并缓存有效方言；若全部不支持则回退 `nil` 并自动抬高输出预算防止思考截断正文。
+    private func candidateChatThinkingModes(
+        for mode: LLMCompatibilityMode,
+        controlKey: String
+    ) -> [LLMThinkingControl?] {
+        let defaultOrder: [LLMThinkingControl?] = switch mode {
+        case .openAICompatible:
+            [.standard, .localTemplate, .openCodeNative, nil]
+        case .localTemplateCompatible:
+            [.localTemplate, .openCodeNative, .standard, nil]
+        case .openCodeGo:
+            [.openCodeNative, .localTemplate, .standard, nil]
+        }
+        if let locked = chatTranslationThinkingModes[controlKey] {
+            var ordered: [LLMThinkingControl?] = [locked]
+            for item in defaultOrder where item != locked {
+                ordered.append(item)
+            }
+            return ordered
+        }
+        if thinkingControlRejected.contains(controlKey) {
+            return defaultOrder.filter { $0 != mode.chatThinkingControl }
+        }
+        return defaultOrder
+    }
+
+    private static func applyChatThinkingControl(
+        _ mode: LLMThinkingControl?,
+        to body: inout [String: Any]
+    ) {
+        guard let mode else { return }
+        switch mode {
+        case .standard:
+            body["reasoning_effort"] = "none"
+        case .openCodeNative:
+            body["thinking"] = ["type": "disabled"]
+        case .localTemplate:
+            body["chat_template_kwargs"] = ["enable_thinking": false]
+        }
+    }
+
     private func runChatTranslationStream(
         configuration: LLMConfiguration,
         prompt: String,
@@ -1463,12 +1510,19 @@ public actor LLMProvider {
             throw LLMError.badBaseURL
         }
         let controlKey = thinkingKey(configuration, operation: .chat)
-        var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
+        var candidateModes = candidateChatThinkingModes(for: configuration.compatibilityMode, controlKey: controlKey)
+        var modeIndex = 0
         var useCompletionTokenLimit = completionTokenLimitEndpoints.contains(controlKey)
+        var forceExpandedTokenBudget = false
         let sessionID = "caption-\(UUID().uuidString)"
 
-        for _ in 0..<3 {
+        for _ in 0..<5 {
             try Task.checkCancellation()
+            let currentThinkingMode = candidateModes[min(modeIndex, candidateModes.count - 1)]
+            let effectiveMaxTokens = (currentThinkingMode == nil || forceExpandedTokenBudget)
+                ? Swift.max(maxOutputTokens, 1024)
+                : maxOutputTokens
+
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.timeoutInterval = timeout
@@ -1490,17 +1544,8 @@ public actor LLMProvider {
                 "stream": true,
                 "temperature": 0
             ]
-            body[useCompletionTokenLimit ? "max_completion_tokens" : "max_tokens"] = maxOutputTokens
-            if includeThinkingControl {
-                switch configuration.compatibilityMode.chatThinkingControl {
-                case .standard:
-                    body["reasoning_effort"] = "none"
-                case .openCodeNative:
-                    body["thinking"] = ["type": "disabled"]
-                case .localTemplate:
-                    body["chat_template_kwargs"] = ["enable_thinking": false]
-                }
-            }
+            body[useCompletionTokenLimit ? "max_completion_tokens" : "max_tokens"] = effectiveMaxTokens
+            Self.applyChatThinkingControl(currentThinkingMode, to: &body)
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
             let result: (URLSession.AsyncBytes, URLResponse)
@@ -1533,11 +1578,16 @@ public actor LLMProvider {
                     throw LLMError.transport(error.localizedDescription)
                 }
                 let errorBody = String(decoding: bodyBytes, as: UTF8.self)
-                if includeThinkingControl,
+                if currentThinkingMode != nil,
                    Self.rejectsThinkingControl(status: http.statusCode, body: errorBody) {
-                    thinkingControlRejected.insert(controlKey)
-                    includeThinkingControl = false
-                    continue
+                    if currentThinkingMode == configuration.compatibilityMode.chatThinkingControl {
+                        thinkingControlRejected.insert(controlKey)
+                    }
+                    if modeIndex + 1 < candidateModes.count {
+                        modeIndex += 1
+                        chatTranslationThinkingModes[controlKey] = candidateModes[modeIndex]
+                        continue
+                    }
                 }
                 if !useCompletionTokenLimit,
                    Self.requiresCompletionTokenLimit(status: http.statusCode, body: errorBody) {
@@ -1561,6 +1611,8 @@ public actor LLMProvider {
             var rawBytes = Data()
             var sawSSEDataLine = false
             var emittedAnyDelta = false
+            var sawReasoningTokens = false
+            var accumulatedContent = ""
             var sseInlineErrorMessage: String?
 
             func consumeSSELine(_ line: String) throws -> Bool {
@@ -1584,16 +1636,32 @@ public actor LLMProvider {
                       let first = choices.first
                 else { return false }
 
-                if let delta = first["delta"] as? [String: Any],
-                   let content = delta["content"] as? String,
-                   !content.isEmpty {
-                    emittedAnyDelta = true
-                    try onDelta(content)
-                } else if let message = first["message"] as? [String: Any],
-                          let content = message["content"] as? String,
-                          !content.isEmpty {
-                    emittedAnyDelta = true
-                    try onDelta(content)
+                if let delta = first["delta"] as? [String: Any] {
+                    if let reasoning = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String),
+                       !reasoning.isEmpty {
+                        sawReasoningTokens = true
+                    }
+                    if let content = delta["content"] as? String, !content.isEmpty {
+                        if content.range(of: "<think>", options: .caseInsensitive) != nil {
+                            sawReasoningTokens = true
+                        }
+                        accumulatedContent += content
+                        emittedAnyDelta = true
+                        try onDelta(content)
+                    }
+                } else if let message = first["message"] as? [String: Any] {
+                    if let reasoning = (message["reasoning_content"] as? String) ?? (message["reasoning"] as? String),
+                       !reasoning.isEmpty {
+                        sawReasoningTokens = true
+                    }
+                    if let content = message["content"] as? String, !content.isEmpty {
+                        if content.range(of: "<think>", options: .caseInsensitive) != nil {
+                            sawReasoningTokens = true
+                        }
+                        accumulatedContent += content
+                        emittedAnyDelta = true
+                        try onDelta(content)
+                    }
                 }
                 return false
             }
@@ -1621,24 +1689,49 @@ public actor LLMProvider {
                    let object = try? JSONSerialization.jsonObject(with: rawBytes) as? [String: Any],
                    let choices = object["choices"] as? [[String: Any]],
                    let first = choices.first,
-                   let message = first["message"] as? [String: Any],
-                   let content = message["content"] as? String,
-                   !content.isEmpty {
-                    emittedAnyDelta = true
-                    try onDelta(content)
+                   let message = first["message"] as? [String: Any] {
+                    if let reasoning = (message["reasoning_content"] as? String) ?? (message["reasoning"] as? String),
+                       !reasoning.isEmpty {
+                        sawReasoningTokens = true
+                    }
+                    if let content = message["content"] as? String, !content.isEmpty {
+                        if content.range(of: "<think>", options: .caseInsensitive) != nil {
+                            sawReasoningTokens = true
+                        }
+                        accumulatedContent += content
+                        emittedAnyDelta = true
+                        try onDelta(content)
+                    }
                 }
-                if !emittedAnyDelta {
-                    // 网关在 200 SSE 流内报错或空流提前闭合时，自动降级尝试一次非流式 /chat/completions
+
+                // 若服务端接受了当前关闭思考字段（200 OK）但静默忽略（仍输出了 reasoning_content 或 <think>），
+                // 自动切换到下一个关闭思考方言供后续请求直接使用；若本次因思考耗尽预算导致无可见译文，立即重试。
+                let visibleAfterThinkStrip = CaptionTranslationCoordinator.cleanSubtitleOutput(accumulatedContent)
+                if sawReasoningTokens {
+                    if currentThinkingMode != nil, modeIndex + 1 < candidateModes.count {
+                        modeIndex += 1
+                        chatTranslationThinkingModes[controlKey] = candidateModes[modeIndex]
+                    }
+                    if visibleAfterThinkStrip.isEmpty, !forceExpandedTokenBudget {
+                        forceExpandedTokenBudget = true
+                        continue
+                    }
+                } else if !visibleAfterThinkStrip.isEmpty {
+                    chatTranslationThinkingModes[controlKey] = currentThinkingMode
+                }
+
+                if !emittedAnyDelta || visibleAfterThinkStrip.isEmpty {
+                    let activeMode = candidateModes[min(modeIndex, candidateModes.count - 1)]
                     if let fallbackText = try? await completeChatTranslation(
                         url: url,
                         configuration: configuration,
                         prompt: prompt,
                         instructions: instructions,
                         apiKey: apiKey,
-                        maxOutputTokens: maxOutputTokens,
+                        maxOutputTokens: Swift.max(maxOutputTokens, 1024),
                         timeout: timeout,
                         sessionID: sessionID,
-                        includeThinkingControl: includeThinkingControl,
+                        thinkingMode: activeMode,
                         useCompletionTokenLimit: useCompletionTokenLimit
                     ), !fallbackText.isEmpty {
                         try onDelta(fallbackText)
@@ -1653,21 +1746,23 @@ public actor LLMProvider {
                 if error is CancellationError || (error as? URLError)?.code == .cancelled {
                     throw LLMError.cancelled
                 }
-                if !emittedAnyDelta,
-                   let fallbackText = try? await completeChatTranslation(
-                       url: url,
-                       configuration: configuration,
-                       prompt: prompt,
-                       instructions: instructions,
-                       apiKey: apiKey,
-                       maxOutputTokens: maxOutputTokens,
-                       timeout: timeout,
-                       sessionID: sessionID,
-                       includeThinkingControl: includeThinkingControl,
-                       useCompletionTokenLimit: useCompletionTokenLimit
-                   ), !fallbackText.isEmpty {
-                    try onDelta(fallbackText)
-                    return
+                if !emittedAnyDelta {
+                    let activeMode = candidateModes[min(modeIndex, candidateModes.count - 1)]
+                    if let fallbackText = try? await completeChatTranslation(
+                        url: url,
+                        configuration: configuration,
+                        prompt: prompt,
+                        instructions: instructions,
+                        apiKey: apiKey,
+                        maxOutputTokens: Swift.max(maxOutputTokens, 1024),
+                        timeout: timeout,
+                        sessionID: sessionID,
+                        thinkingMode: activeMode,
+                        useCompletionTokenLimit: useCompletionTokenLimit
+                    ), !fallbackText.isEmpty {
+                        try onDelta(fallbackText)
+                        return
+                    }
                 }
                 throw error
             }
@@ -1685,7 +1780,7 @@ public actor LLMProvider {
         maxOutputTokens: Int,
         timeout: TimeInterval,
         sessionID: String,
-        includeThinkingControl: Bool,
+        thinkingMode: LLMThinkingControl?,
         useCompletionTokenLimit: Bool
     ) async throws -> String {
         try Task.checkCancellation()
@@ -1711,16 +1806,7 @@ public actor LLMProvider {
             "temperature": 0
         ]
         body[useCompletionTokenLimit ? "max_completion_tokens" : "max_tokens"] = maxOutputTokens
-        if includeThinkingControl {
-            switch configuration.compatibilityMode.chatThinkingControl {
-            case .standard:
-                body["reasoning_effort"] = "none"
-            case .openCodeNative:
-                body["thinking"] = ["type": "disabled"]
-            case .localTemplate:
-                body["chat_template_kwargs"] = ["enable_thinking": false]
-            }
-        }
+        Self.applyChatThinkingControl(thinkingMode, to: &body)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await perform(request, timeout: timeout)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
@@ -1730,7 +1816,7 @@ public actor LLMProvider {
               let message = first["message"] as? [String: Any],
               let content = message["content"] as? String
         else { return "" }
-        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CaptionTranslationCoordinator.cleanSubtitleOutput(content)
     }
 
     /// 一次性补全（内心 OS 与纪要都用它）。`store=false`：不用服务端会话状态。

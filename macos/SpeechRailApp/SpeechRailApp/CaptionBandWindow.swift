@@ -175,13 +175,16 @@ struct CaptionBandMetrics: Equatable {
             rows += visualRowCount(
                 for: line.primaryText,
                 fontSize: fontSize,
-                availableWidth: textAvailableWidth(contentWidth: width, isPartial: line.isPartial)
+                availableWidth: textAvailableWidth(
+                    contentWidth: width,
+                    isPartial: line.isPartial || line.isTranslating
+                )
             )
             if let secondary = line.secondaryText, !secondary.isEmpty {
                 rows += visualRowCount(
                     for: secondary,
                     style: .callout,
-                    availableWidth: textAvailableWidth(contentWidth: width, isPartial: line.isPartial)
+                    availableWidth: textAvailableWidth(contentWidth: width, isPartial: false)
                 )
             }
         }

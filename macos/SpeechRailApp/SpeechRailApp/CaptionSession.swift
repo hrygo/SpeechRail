@@ -407,7 +407,9 @@ public final class CaptionSession {
                 current: partialText ?? ""
             )
             guard let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
-                translationCoordinator.cancelPartial()
+                // 注意：此处不调用 `translationCoordinator.cancelPartial()`，因为 `.completed` 先将
+                // `partialText` 置 `nil`，随后在 `didSaveTranscript` 中才调用 `translateCompletedLine`
+                // 读取协调器内的 `stabilizedDraftPrefix` 与 `lastPartialTranslation`。
                 partialTranslatedText = nil
                 isTranslatingPartial = false
                 return
@@ -1064,6 +1066,7 @@ public final class CaptionSession {
     /// 唯一要挡的是重入（`:ending` 里还等着最后一句）。其余相位都照做：`idle` 时也把浮层
     /// 收起来——协调器决定"这次会话结束了"，浮层就不该继续挂在屏幕上。
     private var stopCaptureTask: Task<Void, Never>?
+    private var pauseTask: Task<Void, Never>?
     private var isClosingCaptureTransport = false
 
     public func stopCapture() async { await beginCaptureStop(preservingRecord: false).value }
@@ -1164,23 +1167,27 @@ public final class CaptionSession {
         }
         endingUploader?.cancel()
         endingPump?.cancel()
-        if previewIdentity == endingIdentity, sessionID == endingRecordID {
+        if !preservingRecord {
             uploadPump = nil
             pump = nil
             previewIdentity = nil
             client = nil
             diarizationActive = false
             isClosingCaptureTransport = false
-            if preservingRecord {
-                isStoppingIntentionally = false
-                level = 0; phase = .paused
-                blocked = .streamFailed(lastFailure ?? "音频来源已中断，可以重新接上。")
-                if coordinator.occupancy?.kind == .captions {
-                    _ = await coordinator.markInterruption(.sourceLost, atOrdinal: currentOrdinal)
-                }
-            } else {
-                resetToIdleKeepingLines()
-                setBandVisible(false)
+            resetToIdleKeepingLines()
+            setBandVisible(false)
+        } else if previewIdentity == endingIdentity, sessionID == endingRecordID {
+            uploadPump = nil
+            pump = nil
+            previewIdentity = nil
+            client = nil
+            diarizationActive = false
+            isClosingCaptureTransport = false
+            isStoppingIntentionally = false
+            level = 0; phase = .paused
+            blocked = .streamFailed(lastFailure ?? "音频来源已中断，可以重新接上。")
+            if coordinator.occupancy?.kind == .captions {
+                _ = await coordinator.markInterruption(.sourceLost, atOrdinal: currentOrdinal)
             }
         }
     }
@@ -1194,12 +1201,47 @@ public final class CaptionSession {
         translationCoordinator.cancelAll()
         partialTranslatedText = nil
         lastPartialTranslation = nil
+        if let pauseTask {
+            await pauseTask.value
+        }
+        let endingRecordID = sessionID ?? completionRecordID
         if coordinator.occupancy?.kind == .captions {
             await coordinator.stopCapture(endingWith: .user)
+        } else if let endingRecordID {
+            _ = await coordinator.sealSessionReporting(id: endingRecordID, reason: .interrupted)
+        }
+        if let endingRecordID, coordinator.captureCompletionFailure(recordID: endingRecordID) != nil {
+            _ = await coordinator.sealSessionReporting(id: endingRecordID, reason: .interrupted)
         }
         blocked = nil
         resetToIdleKeepingLines()
         setBandVisible(false)
+    }
+
+    /// 当字幕收尾发生异常或遗留未确认状态时，由用户确认按中断保存并封存记录。
+    @discardableResult
+    public func finishIncompleteCapture(recordID: String? = nil) async -> Bool {
+        let targetID = recordID ?? completionRecordID ?? sessionID
+        guard let targetID else { return false }
+        if let pauseTask {
+            await pauseTask.value
+        }
+        if sessionID == targetID, phase.isLive {
+            await stopCapture()
+        }
+        let result = await coordinator.sealSessionReporting(id: targetID, reason: .interrupted)
+        switch result {
+        case .sealed:
+            if completionRecordID == targetID {
+                completionRecordID = nil
+            }
+            if sessionID == targetID || phase != .running {
+                resetToIdleKeepingLines()
+            }
+            return true
+        default:
+            return false
+        }
     }
 
     /// 把"正在跑"的那一套本地状态清掉，**保留已经定稿的字幕**。
@@ -1223,7 +1265,22 @@ public final class CaptionSession {
     /// "真的断了"混成同一种事。
     public func pause() async {
         guard phase == .running else { return }
+        if let pauseTask {
+            await pauseTask.value
+            return
+        }
+        let task = Task { @MainActor in
+            defer { self.pauseTask = nil }
+            await self.performPause()
+        }
+        pauseTask = task
+        await task.value
+    }
+
+    private func performPause() async {
+        guard phase == .running, !isStoppingIntentionally else { return }
         isStoppingIntentionally = true
+        defer { isStoppingIntentionally = false }
         await source?.stop()
         source = nil
         await uploadPump?.value
@@ -1231,9 +1288,9 @@ public final class CaptionSession {
         if let client {
             do {
                 let endingWindow = windowCapture
-                try await client.drainAndClear(timeout:endingWindow == nil ? .seconds(8) : .seconds(30),
+                try await client.drainAndClear(timeout: endingWindow == nil ? .seconds(8) : .seconds(30),
                     beforeAuxiliary: { sample in
-                        if let endingWindow { try await endingWindow.waitSaved(through:sample) }
+                        if let endingWindow { try await endingWindow.waitSaved(through: sample) }
                     })
             } catch {
                 lastFailure = error.localizedDescription
@@ -1257,8 +1314,9 @@ public final class CaptionSession {
         partialText = nil
         partialTranslatedText = nil
         lastPartialTranslation = nil
-        phase = .paused
-        isStoppingIntentionally = false
+        if phase == .running || phase == .preparing {
+            phase = .paused
+        }
     }
 
     public func resume() async {
@@ -1528,6 +1586,7 @@ public final class CaptionSession {
             let boundary = previewLedger.boundary(identity: identity, itemID: itemID)
             _ = previewLedger.resolveFailure(identity: identity, itemID: itemID)
             // 预览没有变成正式行：那份草稿不再属于任何一句，别留给下一句继承。
+            translationCoordinator.cancelPartial()
             lastPartialTranslation = nil
             partialText = recoveryNote?.text ?? previewLedger.visiblePartial
             if let recoveryNote {
@@ -1808,6 +1867,7 @@ public final class CaptionSession {
             contextLines: contextLines,
             displayMode: displayMode,
             preferredLanguage: sourceLanguage,
+            priorDraftHint: initialDraftTranslation,
             onStreamingUpdate: { [weak self] id, partialTranslation in
                 self?.transcriptPresentation.update(id: id) {
                     $0.translatedText = partialTranslation
