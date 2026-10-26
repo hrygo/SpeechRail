@@ -310,6 +310,8 @@ public struct SessionLibraryView: View {
     @State private var autoCollapsedDueToWidth = false
     /// 字幕空态里「遇到问题怎么办」那一行可选项（2026-09-19 低门槛改造）。
     @State private var showsBlockedHelp = false
+    /// 想打开翻译但还没配模型：不把开关拨过去，而是明确告诉用户缺什么、去哪配。
+    @State private var showsTranslationSetupHint = false
 
     public init(kind: SessionKind) {
         self.kind = kind
@@ -452,6 +454,12 @@ public struct SessionLibraryView: View {
             }
         } message: { summary in
             Text(removalMessage(for: summary))
+        }
+        .alert("翻译模型还没配置", isPresented: $showsTranslationSetupHint) {
+            Button("去设置") { openSettings() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("在「设置 → 助手 → 实时字幕翻译」里填好地址和模型，再回来打开这个开关。")
         }
         .operationFeedback([
             recoveryFeedback,
@@ -600,7 +608,7 @@ public struct SessionLibraryView: View {
             lines: rows,
             speakerNames: names,
             minutes: minutes,
-            captionDisplayMode: caption.displayMode
+            captionDisplayMode: caption.effectiveDisplayMode
         )
     }
 
@@ -613,6 +621,44 @@ public struct SessionLibraryView: View {
         }
     }
 
+    /// 实时字幕的翻译开关。**默认关**：没配模型时不允许拨到「开」，否则用户会得到
+    /// 一个打开了却永远没有译文的开关。
+    private var translationBinding: Binding<Bool> {
+        Binding(
+            get: { caption.translationEnabled },
+            set: { enabled in
+                if enabled {
+                    guard caption.isTranslationAvailable else {
+                        showsTranslationSetupHint = true
+                        return
+                    }
+                    if caption.displayMode == .originalOnly {
+                        caption.displayMode = .bilingual
+                    }
+                }
+                caption.translationEnabled = enabled
+            }
+        )
+    }
+
+    private var translationSetupDetail: String {
+        if !caption.isTranslationAvailable {
+            return "还没有配置翻译模型。先在「字幕设置 → 助手 → 实时字幕翻译」里填好地址和模型。"
+        }
+        if caption.translationEnabled {
+            return caption.displayMode == .chineseOnly
+                ? "已开启，只看中文：外语会实时翻成中文，中文内容不调用模型。"
+                : "已开启，双语对照：外语会实时翻成中文，原文留在下一行。"
+        }
+        return "默认关闭，只显示原文字幕。打开后外语会实时翻成中文，中文内容不调用模型。"
+    }
+
+    private var translationInspectorValue: String {
+        guard caption.translationEnabled else { return "关闭（只看原文）" }
+        guard caption.isTranslationAvailable else { return "已开启 · 未配置模型" }
+        return caption.displayMode == .chineseOnly ? "已开启 · 仅中文" : "已开启 · 双语对照"
+    }
+
     /// 实时字幕的空态（稿 ``实时字幕 · 记录库 · 未开始（前置检查）`）。
     ///
     /// 字幕这条闭环的入口不在主窗口里（⌘⇧L 或菜单栏），所以这一屏要把「开始之前要满足
@@ -622,7 +668,7 @@ public struct SessionLibraryView: View {
             SessionConclusionBand(
                 tone: .healthy,
                 title: "现在就可以开始字幕",
-                message: "精准抓取目标视频窗口声音或麦克风，支持实时中文字幕与双语对照。开始后字幕带智能吸附于窗口底部或自由悬浮。",
+                message: "精准抓取目标视频窗口声音或麦克风，实时显示原文字幕；需要时在字幕带或下面打开翻译，就能看双语对照或仅中文。开始后字幕带智能吸附于窗口底部或自由悬浮。",
                 hint: "⌘⇧L 可随时开启、暂停或继续；点击字幕带的 ✕ 结束并保存。"
             ) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -653,12 +699,25 @@ public struct SessionLibraryView: View {
                 SessionPanel {
                     SessionPanelHead(
                         title: "开始之前",
-                        detail: "三件事里只有前两件是必须的；第三件决定字幕里标不标出谁在说话。"
+                        detail: "前两件是必须的；翻译和「谁在说话」都是可选项，开始后也能改。"
                     )
                     SessionHairline()
                     SessionCheckRow(tone: microphoneTone, name: "麦克风", detail: microphoneDetail)
                     SessionHairline()
                     SessionCheckRow(tone: serviceTone, name: "语音服务", detail: serviceDetail)
+                    SessionHairline()
+                    SessionCheckRow(
+                        tone: caption.translationEnabled && caption.isTranslationAvailable ? .ready : .neutral,
+                        name: "翻译成中文 · 可选",
+                        detail: translationSetupDetail
+                    ) {
+                        Toggle("", isOn: translationBinding)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .accessibilityLabel("翻译成中文")
+                            .accessibilityIdentifier("caption-translation-toggle")
+                    }
                     SessionHairline()
                     SessionCheckRow(
                         tone: preferences.captionsDiarizationEnabled ? .ready : .neutral,
@@ -668,7 +727,7 @@ public struct SessionLibraryView: View {
                     Spacer(minLength: 0)
                     SessionHairline()
                     CardFoot(
-                        note: "字幕带支持应用窗口音频定向采集与实时双语翻译。"
+                        note: "字幕带按目标应用定向采集音频；翻译默认关闭，在字幕带或这里都能打开。"
                             + "记录库空着的时候，这里只有「开始字幕」。"
                     ) { EmptyView() }
                 }
@@ -683,7 +742,7 @@ public struct SessionLibraryView: View {
                         VStack(alignment: .leading, spacing: 10) {
                             SessionKVRow("收音目标", caption.audioTarget?.displayTitle ?? "按窗口选择 / 麦克风")
                             SessionKVRow("源语言", caption.sourceLanguage.title)
-                            SessionKVRow("翻译模式", caption.displayMode.title)
+                            SessionKVRow("翻译", translationInspectorValue)
                             SessionKVRow("字幕带位置", caption.placementMode == .dockedToTargetWindow ? "吸附目标窗口" : "自由悬停")
                             SessionKVRow("识别精度", profileRowText)
                             SessionKVRow("默认字号", "标准")

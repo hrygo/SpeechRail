@@ -617,7 +617,7 @@ public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
         switch self {
         case .assistant: "语音助手与会议中的内心 OS，共用这一类对话能力。"
         case .minutes: "会后长任务，适合结构化输出能力更强的模型。"
-        case .captions: "将外语视频或音频实时流式翻译为中文字幕；中文音频自动直通不调用。"
+        case .captions: "将外语视频或音频实时流式翻译为中文字幕；默认关闭，需要时在字幕上打开；中文音频自动直通不调用。"
         case .teleprompter: "主动点击才发送原稿，跟读和直播过程中不会调用。"
         case .audiobook: "主动点击分析全书时才发送正文窗口，阅读或听书过程中不会调用。"
         }

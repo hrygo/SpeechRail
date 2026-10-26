@@ -1191,6 +1191,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         fake.streamDeltas = ["预算已批准"]
         let h = try await makeHarness()
         h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
         _ = try await start(h)
 
         try await h.emit(.completed(itemID: "one", transcript: "The budget is approved"))
@@ -1222,6 +1223,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         fake.streamDeltas = ["预算已经批准"]
         let h = try await makeHarness()
         h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
         _ = try await start(h)
 
         try await h.emit(.partialSnapshot(itemID: "draft", revision: 1, text: "The budget is approved"))
@@ -1248,6 +1250,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         fake.failImmediatelyFromCall = 2
         let h = try await makeHarness()
         h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
         _ = try await start(h)
 
         try await h.emit(.partialSnapshot(itemID: "draft", revision: 1, text: "The budget is approved"))
@@ -1477,6 +1480,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         fake.streamDeltas = ["预算已批准"]
         let h = try await makeHarness()
         h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
         h.session.displayMode = .bilingual
         _ = try await start(h)
 
@@ -1501,6 +1505,111 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         h.session.displayMode = .originalOnly
         XCTAssertEqual(h.session.currentSegmentText, "The budget is approved")
         h.session.displayMode = .bilingual
+    }
+
+    // MARK: 翻译开关（默认关，用户主动打开才调模型）
+
+    func testTranslationIsOffByDefaultAndNeverCallsClient() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+
+        XCTAssertFalse(h.session.translationEnabled, "翻译必须默认关闭")
+        XCTAssertEqual(h.session.effectiveDisplayMode, .originalOnly)
+        // 只改排版偏好不应该把翻译打开。
+        h.session.displayMode = .chineseOnly
+        XCTAssertFalse(h.session.translationEnabled)
+        XCTAssertEqual(h.session.effectiveDisplayMode, .originalOnly)
+        h.session.displayMode = .bilingual
+
+        _ = try await start(h)
+        try await h.emit(.partialSnapshot(itemID: "off", revision: 1, text: "The budget is approved"))
+        try await h.settle { $0.session.partialText == "The budget is approved" }
+        XCTAssertNil(h.session.partialTranslatedText, "翻译关着时不该有预览译文")
+        XCTAssertEqual(h.session.bandContent.rows.first?.primaryText, "The budget is approved")
+
+        try await h.emit(.completed(itemID: "off", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 }
+        let line = try XCTUnwrap(h.session.lines.first)
+        XCTAssertNil(line.translatedText)
+        XCTAssertFalse(line.isTranslating)
+        XCTAssertEqual(fake.callCount, 0, "翻译关着时一个模型请求都不该发")
+        XCTAssertEqual(h.session.bandContent.rows.first?.primaryText, "The budget is approved")
+        XCTAssertNil(h.session.bandContent.rows.first?.secondaryText)
+    }
+
+    func testEnablingTranslationTranslatesRecentLineAndShowsBilingual() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "on", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 }
+        XCTAssertNil(h.session.lines.first?.translatedText)
+
+        h.session.translationEnabled = true
+        try await h.settle {
+            $0.session.lines.count == 1
+                && $0.session.lines[0].translatedText == "预算已批准"
+                && !$0.session.lines[0].isTranslating
+        }
+        XCTAssertEqual(h.session.effectiveDisplayMode, .bilingual)
+        XCTAssertEqual(h.session.bandContent.rows.first?.primaryText, "预算已批准")
+        XCTAssertEqual(h.session.bandContent.rows.first?.secondaryText, "The budget is approved")
+        XCTAssertEqual(fake.callCount, 1, "打开开关后只补翻最近未翻译的行")
+    }
+
+    func testDisablingTranslationImmediatelyFallsBackToOriginal() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "on-then-off", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 && !$0.session.lines[0].isTranslating }
+        XCTAssertEqual(h.session.bandContent.rows.first?.primaryText, "预算已批准")
+
+        try await h.emit(.partialSnapshot(itemID: "next", revision: 1, text: "The team will start next week"))
+        try await h.settle { $0.session.partialTranslatedText != nil }
+
+        h.session.translationEnabled = false
+        XCTAssertEqual(h.session.effectiveDisplayMode, .originalOnly)
+        XCTAssertNil(h.session.partialTranslatedText, "关掉翻译要立即清掉未定稿译文")
+        XCTAssertEqual(h.session.lines.first?.translatedText, "预算已批准", "已存译文不删，重新打开可继续用")
+        XCTAssertEqual(h.session.bandContent.rows.first?.primaryText, "The budget is approved")
+        XCTAssertNil(h.session.bandContent.rows.first?.secondaryText)
+    }
+
+    func testTranslationPreferencePersistsAndLegacyOriginalOnlyStaysOff() async throws {
+        let h = try await makeHarness()
+        XCTAssertFalse(h.session.translationEnabled)
+        h.session.translationEnabled = true
+        XCTAssertTrue(h.defaults.bool(forKey: "speechrail.caption.translationEnabled"))
+
+        let restored = CaptionSession(coordinator: h.coordinator, defaults: h.defaults)
+        XCTAssertTrue(restored.translationEnabled, "开关是持久的，下次开字幕还按用户的选择")
+
+        // 旧版本只存过「仅原文」：它等价于翻译关，且排版偏好要退回能看见译文的那一档。
+        h.defaults.set(CaptionDisplayMode.originalOnly.rawValue, forKey: "speechrail.caption.displayMode")
+        h.defaults.removeObject(forKey: "speechrail.caption.translationEnabled")
+        let legacy = CaptionSession(coordinator: h.coordinator, defaults: h.defaults)
+        XCTAssertFalse(legacy.translationEnabled)
+        XCTAssertEqual(legacy.displayMode, .bilingual)
+        XCTAssertEqual(legacy.effectiveDisplayMode, .originalOnly)
+    }
+
+    func testTranslationAvailabilityFollowsConfiguredClient() async throws {
+        let h = try await makeHarness()
+        XCTAssertFalse(h.session.isTranslationAvailable, "没有配置翻译模型时开关不可用")
+
+        let fake = FakeTranslationClient()
+        h.session.makeTranslationClient = { fake }
+        XCTAssertTrue(h.session.isTranslationAvailable)
     }
 
     @MainActor

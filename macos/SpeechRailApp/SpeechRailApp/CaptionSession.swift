@@ -421,6 +421,7 @@ public final class CaptionSession {
     }
 
     private func scheduleCurrentPartialTranslation(for text: String) {
+        guard translationEnabled else { return }
         let context = lines.suffix(2).map {
             CaptionContextTurn(
                 sourceText: $0.text,
@@ -430,7 +431,7 @@ public final class CaptionSession {
         translationCoordinator.schedulePartialTranslation(
             sourceText: text,
             contextLines: context,
-            displayMode: displayMode,
+            displayMode: effectiveDisplayMode,
             preferredLanguage: sourceLanguage
         ) { [weak self] translated in
             guard let self else { return }
@@ -491,11 +492,35 @@ public final class CaptionSession {
 
     /// 当前选定的字幕音频源（默认 nil，首次开启时引导拾取窗口或使用上次选定的运行中应用）。
     public var audioTarget: CaptionAudioTarget?
-    /// 字幕显示模式（双语对照 / 仅中文 / 仅原文），持久化到 UserDefaults。
+    /// 是否把外语字幕实时翻译成中文。**默认关**：用户没主动打开时，一个翻译请求都不发。
+    ///
+    /// 关掉时 `effectiveDisplayMode` 恒为 `.originalOnly`，屏幕上只出现原文；已经存在
+    /// 记录里的译文不删，重新打开即可继续用。`displayMode` 只决定打开翻译后的排版。
+    public var translationEnabled: Bool {
+        didSet {
+            defaults.set(translationEnabled, forKey: "speechrail.caption.translationEnabled")
+            guard oldValue != translationEnabled else { return }
+            if translationEnabled {
+                // 旧版本只存过「仅原文」：打开翻译时给一个能看见译文的排版。
+                if displayMode == .originalOnly { displayMode = .bilingual }
+                retranslateUntranslatedFinalLinesIfNeeded()
+                if let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                    scheduleCurrentPartialTranslation(for: text)
+                }
+            } else {
+                translationCoordinator.cancelPartial()
+                partialTranslatedText = nil
+                lastPartialTranslation = nil
+            }
+        }
+    }
+    /// 字幕显示模式（双语对照 / 仅中文 / 仅原文）。只在翻译打开时决定排版。
+    ///
+    /// 持久化的是用户的**排版偏好**；是否调用翻译模型由 `translationEnabled` 单独决定。
     public var displayMode: CaptionDisplayMode {
         didSet {
             defaults.set(displayMode.rawValue, forKey: "speechrail.caption.displayMode")
-            guard oldValue != displayMode else { return }
+            guard oldValue != displayMode, translationEnabled else { return }
             if displayMode == .originalOnly {
                 translationCoordinator.cancelPartial()
                 partialTranslatedText = nil
@@ -508,6 +533,14 @@ public final class CaptionSession {
             }
         }
     }
+    /// 实际生效的排版：翻译关着时只显示原文。
+    public var effectiveDisplayMode: CaptionDisplayMode {
+        translationEnabled ? displayMode : .originalOnly
+    }
+    /// 现在是否真的有一个可用的翻译模型（设置里配了 `.captions`，或跟随全局配置）。
+    public var isTranslationAvailable: Bool {
+        makeTranslationClient?() != nil
+    }
     /// 字幕音频源语种（自动识别 / 英语 / 日语 / 韩语 / 中文），持久化到 UserDefaults。
     public var sourceLanguage: CaptionSourceLanguage {
         didSet {
@@ -517,7 +550,7 @@ public final class CaptionSession {
                 translationCoordinator.cancelPartial()
                 partialTranslatedText = nil
                 lastPartialTranslation = nil
-            } else {
+            } else if translationEnabled {
                 retranslateUntranslatedFinalLinesIfNeeded()
                 if let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
                     scheduleCurrentPartialTranslation(for: text)
@@ -602,11 +635,12 @@ public final class CaptionSession {
         let pendingCommands = sessionID.map { recordID in
             inputPersistence.unsettledInputs(sessionID: recordID).map { $0.command }
         } ?? []
+        let mode = effectiveDisplayMode
         let partialCandidate = windowCapture?.visibleUnits.map(\.text).joined() ?? partialText
         let shouldTranslatePartial = isTranslatingPartial && (partialCandidate.map {
             Self.shouldTranslate(
                 text: $0,
-                displayMode: displayMode,
+                displayMode: mode,
                 preferredLanguage: sourceLanguage,
                 hasTranslationClient: makeTranslationClient?() != nil
             )
@@ -619,7 +653,7 @@ public final class CaptionSession {
             partialText: partialText,
             partialTranslatedText: partialTranslatedText,
             partialStablePrefixLength: partialStablePrefixLength,
-            displayMode: displayMode,
+            displayMode: mode,
             shouldTranslatePartial: shouldTranslatePartial
         )
     }
@@ -689,8 +723,13 @@ public final class CaptionSession {
         self.port = port
         self.apiKey = apiKey
         self.defaults = defaults
+        // 翻译默认关：旧版本没有这个键时 `bool` 返回 false，正好是「用户没主动打开」。
+        self.translationEnabled = defaults.bool(forKey: "speechrail.caption.translationEnabled")
         if let raw = defaults.string(forKey: "speechrail.caption.displayMode"),
-           let mode = CaptionDisplayMode(rawValue: raw) {
+           let mode = CaptionDisplayMode(rawValue: raw),
+           mode != .originalOnly {
+            // 旧版本把「仅原文」当成一个排版档存下来；新语义里它等价于「翻译关」，
+            // 排版偏好退回双语，这样用户下次打开翻译时能立刻看到译文。
             self.displayMode = mode
         } else {
             self.displayMode = .bilingual
@@ -1794,6 +1833,7 @@ public final class CaptionSession {
         }
         // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
         if sessionID == command.sessionID, command.formal {
+            let mode = effectiveDisplayMode
             // ① 先取前 3 句双语平行历史，并显式排除当前句：若先 apply 再取 suffix，
             //    当前句自己会混进【前文背景】，轻量模型会漏翻或复读。
             let contextLines = Array(
@@ -1814,7 +1854,7 @@ public final class CaptionSession {
                 lastPartialTranslation: lastPartialTranslation?.translatedText,
                 lastPartialSourceText: lastPartialTranslation?.sourceText,
                 sourceText: command.text,
-                displayMode: displayMode,
+                displayMode: mode,
                 preferredLanguage: sourceLanguage
             )
             lastPartialTranslation = nil
@@ -1823,7 +1863,7 @@ public final class CaptionSession {
             let sourceText = command.text
             let willTranslate = Self.shouldTranslate(
                 text: sourceText,
-                displayMode: displayMode,
+                displayMode: mode,
                 preferredLanguage: sourceLanguage,
                 hasTranslationClient: makeTranslationClient?() != nil
             )
@@ -1869,7 +1909,7 @@ public final class CaptionSession {
             lineID: lineID,
             sourceText: sourceText,
             contextLines: contextLines,
-            displayMode: displayMode,
+            displayMode: effectiveDisplayMode,
             preferredLanguage: sourceLanguage,
             priorDraftHint: initialDraftTranslation,
             onStreamingUpdate: { [weak self] id, partialTranslation in
@@ -1901,16 +1941,19 @@ public final class CaptionSession {
         )
     }
 
-    /// 当用户在会话中从「仅原文」切换到「双语对照 / 仅中文」或切换源语种时，自动补翻近期尚未翻译的定稿外语行。
+    /// 用户打开翻译，或在会话中切换排版档 / 源语种时，自动补翻近期尚未翻译的定稿外语行。
     private func retranslateUntranslatedFinalLinesIfNeeded() {
-        guard displayMode != .originalOnly, sourceLanguage != .chinese, makeTranslationClient?() != nil else { return }
+        guard translationEnabled,
+              displayMode != .originalOnly,
+              sourceLanguage != .chinese,
+              makeTranslationClient?() != nil else { return }
         let snapshot = lines
         let recentIDs = Set(snapshot.suffix(6).map(\.id))
         for (index, line) in snapshot.enumerated() where recentIDs.contains(line.id) {
             guard (line.translatedText ?? "").isEmpty, !line.isTranslating else { continue }
             guard Self.shouldTranslate(
                 text: line.text,
-                displayMode: displayMode,
+                displayMode: effectiveDisplayMode,
                 preferredLanguage: sourceLanguage,
                 hasTranslationClient: true
             ) else { continue }
@@ -2095,7 +2138,7 @@ public final class CaptionSession {
                     record: record,
                     lines: rows,
                     speakerNames: names,
-                    captionDisplayMode: displayMode
+                    captionDisplayMode: effectiveDisplayMode
                 ),
                 as: .srt
             )

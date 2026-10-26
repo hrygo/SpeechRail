@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsAssistantPane: View {
     @Environment(AppModel.self) private var model
     @Environment(SessionPreferences.self) private var preferences
+    @Environment(CaptionSession.self) private var caption
 
     @AppStorage(SpeechRailDesignTokens.CaptionBand.fontSizeDefaultsKey)
     private var captionFontSizeRaw = CaptionBandFontSize.standard.rawValue
@@ -243,6 +244,17 @@ struct SettingsAssistantPane: View {
                 }
                 settingsRowSeparator
                 settingsRow {
+                    Toggle(isOn: translationBinding) {
+                        settingsRowLabel(
+                            "翻译成中文",
+                            caption: translationCaption
+                        )
+                    }
+                        .modifier(settingsRowControl())
+                        .disabled(!caption.translationEnabled && !caption.isTranslationAvailable)
+                }
+                settingsRowSeparator
+                settingsRow {
                     Toggle(isOn: diarizationCaptionsBinding) {
                         settingsRowLabel(
                             "字幕显示说话人",
@@ -418,6 +430,26 @@ struct SettingsAssistantPane: View {
             get: { preferences.meetingDiarizationEnabled },
             set: { preferences.meetingDiarizationEnabled = $0 }
         )
+    }
+
+    /// 字幕翻译的总开关。与字幕带、字幕页共用同一个 `CaptionSession` 状态，避免三处各存一份。
+    private var translationBinding: Binding<Bool> {
+        Binding(
+            get: { caption.translationEnabled },
+            set: { enabled in
+                if enabled, caption.displayMode == .originalOnly {
+                    caption.displayMode = .bilingual
+                }
+                caption.translationEnabled = enabled
+            }
+        )
+    }
+
+    private var translationCaption: String {
+        guard caption.isTranslationAvailable else {
+            return "默认关闭。先在下面「实时字幕翻译」里配好地址和模型，才能打开。"
+        }
+        return "默认关闭。打开后外语字幕会实时翻成中文；字幕带上也能随时开关。"
     }
 
     private var notifyBinding: Binding<Bool> {

@@ -715,7 +715,10 @@ struct CaptionBandView: View {
     // MARK: 悬停工具条
 
     private var toolbar: some View {
-        HStack(spacing: SpeechRailDesignTokens.Layout.captionBandToolbarSpacing) {
+        // 一次求值只问一次能力：`isTranslationAvailable` 会构造一次翻译客户端，
+        // 菜单标签、帮助和禁用状态不该各构造一遍。
+        let translationAvailable = session.isTranslationAvailable
+        return HStack(spacing: SpeechRailDesignTokens.Layout.captionBandToolbarSpacing) {
             iconButton(
                 systemImage: session.phase == .running ? "pause.fill" : "play.fill",
                 label: session.phase == .running ? "暂停" : "继续"
@@ -729,8 +732,10 @@ struct CaptionBandView: View {
                 }
             }
             targetAppButton
-            sourceLanguageMenu
-            displayModeMenu
+            translationMenu(isAvailable: translationAvailable)
+            if session.translationEnabled {
+                sourceLanguageMenu
+            }
             fontMenu
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
             if session.audioTarget?.isApp == true {
@@ -830,25 +835,17 @@ struct CaptionBandView: View {
         .speechRailPointerCursor()
     }
 
-    private var displayModeMenu: some View {
+    private func translationMenu(isAvailable: Bool) -> some View {
         Menu {
-            ForEach(CaptionDisplayMode.allCases, id: \.self) { mode in
-                Button {
-                    session.displayMode = mode
-                } label: {
-                    if session.displayMode == mode {
-                        Label(mode.title, systemImage: "checkmark")
-                    } else {
-                        Text(mode.title)
-                    }
-                }
-            }
+            translationMenuContent
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Image(systemName: "character.book.closed")
+                Image(systemName: "translate")
                     .font(.system(size: 11))
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                Text(session.displayMode.title)
+                    .foregroundStyle(session.translationEnabled
+                        ? SpeechRailDesignTokens.Color.rail
+                        : SpeechRailDesignTokens.Color.inkSecondary)
+                Text(translationMenuTitle(isAvailable: isAvailable))
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 Image(systemName: "chevron.down")
@@ -861,8 +858,95 @@ struct CaptionBandView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .accessibilityLabel("显示模式 \(session.displayMode.title)")
+        .help(translationMenuHelp(isAvailable: isAvailable))
+        .accessibilityLabel("翻译 \(translationMenuTitle(isAvailable: isAvailable))")
         .speechRailPointerCursor()
+    }
+
+    /// 浮层工具条和页脚共用同一份菜单内容，避免两处各写一套开关语义。
+    @ViewBuilder
+    private var translationMenuContent: some View {
+        let isAvailable = session.isTranslationAvailable
+        Button {
+            session.translationEnabled = false
+        } label: {
+            if session.translationEnabled {
+                Text("不翻译，只看原文")
+            } else {
+                Label("不翻译，只看原文", systemImage: "checkmark")
+            }
+        }
+        Divider()
+        Button {
+            enableTranslation(mode: .bilingual)
+        } label: {
+            if session.translationEnabled, session.displayMode == .bilingual {
+                Label("双语对照", systemImage: "checkmark")
+            } else {
+                Text("双语对照")
+            }
+        }
+        .disabled(!isAvailable)
+        Button {
+            enableTranslation(mode: .chineseOnly)
+        } label: {
+            if session.translationEnabled, session.displayMode == .chineseOnly {
+                Label("仅中文", systemImage: "checkmark")
+            } else {
+                Text("仅中文")
+            }
+        }
+        .disabled(!isAvailable)
+        if !isAvailable {
+            Divider()
+            Text("还没有配置翻译模型")
+            Text("设置 → 助手 → 实时字幕翻译")
+        }
+    }
+
+    /// 页脚常驻的小入口：不悬停也能看见翻译开没开、点一下就能切换。
+    private var translationFooterControl: some View {
+        Menu {
+            translationMenuContent
+        } label: {
+            Image(systemName: "translate")
+                .font(.system(size: 11))
+                .foregroundStyle(session.translationEnabled
+                    ? SpeechRailDesignTokens.Color.rail
+                    : SpeechRailDesignTokens.Color.inkTertiary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(footerTranslationHelp)
+        .accessibilityLabel(footerTranslationHelp)
+        .accessibilityIdentifier("caption-band-translation")
+        .speechRailPointerCursor()
+    }
+
+    private var footerTranslationHelp: String {
+        guard session.translationEnabled else { return "翻译已关闭，点此打开（默认关闭）" }
+        return "翻译已开启（\(session.displayMode.title)），点此切换或关闭"
+    }
+
+    private func translationMenuTitle(isAvailable: Bool) -> String {
+        guard session.translationEnabled else { return "翻译 关" }
+        guard isAvailable else { return "翻译 未配置" }
+        return session.displayMode == .chineseOnly ? "翻译 仅中文" : "翻译 双语"
+    }
+
+    private func translationMenuHelp(isAvailable: Bool) -> String {
+        if !isAvailable {
+            return "还没有配置翻译模型：设置 → 助手 → 实时字幕翻译"
+        }
+        return session.translationEnabled ? "翻译已开启，点此切换双语/仅中文或关闭" : "打开后把外语实时翻成中文（默认关闭）"
+    }
+
+    private func enableTranslation(mode: CaptionDisplayMode) {
+        guard session.isTranslationAvailable else { return }
+        // 先定排版、再打开开关：反过来会先用旧排版触发一次补翻。
+        session.displayMode = mode
+        session.translationEnabled = true
     }
 
     private var fontMenu: some View {
@@ -925,6 +1009,7 @@ struct CaptionBandView: View {
                 .truncationMode(.tail)
                 .help(footerHelp)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+            translationFooterControl
             if !session.saveRecoveryRecords.isEmpty {
                 Button("未保存文字") { showsSaveRecovery = true }
                     .font(SpeechRailDesignTokens.Typography.caption)
