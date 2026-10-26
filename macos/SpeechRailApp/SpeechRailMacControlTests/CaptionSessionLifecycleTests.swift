@@ -1675,24 +1675,24 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         let h = try await makeHarness()
         _ = try await start(h)
 
-        // 模拟说话人对齐告警
+        // 1. 模拟说话人对齐告警（带有 diagnosticCode）
         try await h.emit(.alignmentFailed(itemID: "align-1", code: "timestamp_unreliable", message: ""))
         try await h.settle { $0.session.lastFailure != nil }
         XCTAssertNotNil(h.session.lastFailure)
 
-        // 测试显式调用 clearFailure 清理
+        // 显式调用 clearFailure 可立即清空告警（供界面关闭按钮或自动倒计时调用）
         h.session.clearFailure()
-        XCTAssertNil(h.session.lastFailure, "clearFailure 应立即清空失败告警")
+        XCTAssertNil(h.session.lastFailure, "clearFailure 应立即清空告警")
 
-        // 再次触发告警
-        try await h.emit(.alignmentFailed(itemID: "align-2", code: "timestamp_unreliable", message: ""))
+        // 2. 模拟无 diagnosticCode 的普通失败提示
+        try await h.emit(.failed(itemID: "fail-1", code: "asr_failed", message: "普通网络瞬态失败"))
         try await h.settle { $0.session.lastFailure != nil }
         XCTAssertNotNil(h.session.lastFailure)
 
-        // 新定稿行成功落盘时，历史告警应自动清除，不永久驻留屏幕
+        // 下一句定稿行正常落盘时，历史过期告警应自动清除
         try await h.emit(.completed(itemID: "item-next", transcript: "New sentence arrived"))
         try await h.settle { $0.session.lines.count == 1 }
-        XCTAssertNil(h.session.lastFailure, "新的定稿行成功落盘后应自动清除历史告警，避免提示永久驻留")
+        XCTAssertNil(h.session.lastFailure, "无 diagnosticCode 的过期失败在下一句成功定稿落盘后应自动清除")
     }
 
     @MainActor
