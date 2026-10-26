@@ -60,11 +60,11 @@ Sona 当前显式传递的策略如下：
 
 | 调用场景 | threshold | prefix padding | silence duration | endpointing owner |
 |---|---:|---:|---:|---|
-| 标准字幕 | `0.65` | `300ms` | `400ms` | SpeechRail `auto → silero` + `SpeechAdmission` |
+| 标准字幕 | `0.65` | `300ms` | `650ms` | SpeechRail `auto → silero` + `SpeechAdmission` |
 | 会议 | `0.65` | `300ms` | `900ms` | SpeechRail `auto → silero` + `SpeechAdmission` |
 | 语音助手 | 不发送 server VAD | — | Sona 本地 `0.45s` | Sona/Pipecat；SpeechRail `manual` |
 
-当前 managed quality runtime 的健康事实是 `resolved_engine=silero`、`speech_admission_enabled=true`。`SileroVadDetector` 输出每帧概率，`SpeechAdmission` 执行 `IDLE → CANDIDATE → ACTIVE → HANGOVER → IDLE`；两者是同一 endpointing 链的评分器与状态机，不是两个互相竞争的 VAD。16kHz/512-sample 帧为 32ms，因此 Sona 的 `400ms/900ms` 在停止判定上分别量化为约 `416ms/928ms`。
+当前 managed quality runtime 的健康事实是 `resolved_engine=silero`、`speech_admission_enabled=true`。`SileroVadDetector` 输出每帧概率，`SpeechAdmission` 执行 `IDLE → CANDIDATE → ACTIVE → HANGOVER → IDLE`；两者是同一 endpointing 链的评分器与状态机，不是两个互相竞争的 VAD。16kHz/512-sample 帧为 32ms，因此 Sona 的 `650ms/900ms` 在停止判定上分别量化为约 `672ms/928ms`。
 
 连续 diarization activity 不参与 endpointing 竞争：它接收连续 PCM，输出 speaker evidence 和 revision；`completed` 正文仍由 Realtime ASR item 确认，speaker-only patch 不改文本或时间事实。
 

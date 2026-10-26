@@ -10,7 +10,7 @@ struct ASRScenePresetTests {
             (.assistantTurnTaking, .conversation, 1_200, 20_000, "full_segment"),
             (.assistantDuplex, .conversation, 900, 20_000, "full_segment"),
             (.meeting, .transcription, 900, 20_000, "full_segment"),
-            (.caption, .caption, 400, 8_000, "full_segment"),
+            (.caption, .caption, 650, 8_000, "full_segment"),
             (.teleprompter, .transcription, 400, 8_000, "streaming_finalize"),
         ]
 
