@@ -547,6 +547,7 @@ struct CaptionBandView: View {
     @State private var copyFailure: String?
     @State private var copyNotice: String?
     @State private var copyNoticeID = UUID()
+    @State private var failureAutoDismissTask: Task<Void, Never>?
     /// 自己量出来的内容宽度：宽度参与折行，所以高度得跟着它变。
     @State private var contentWidth: CGFloat = 0
 
@@ -602,6 +603,16 @@ struct CaptionBandView: View {
         }
         .onChange(of: session.placementMode) { _, _ in
             onTrackingChange()
+        }
+        .onChange(of: session.lastFailure) { _, newFailure in
+            failureAutoDismissTask?.cancel()
+            if newFailure != nil {
+                failureAutoDismissTask = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(8))
+                    guard !Task.isCancelled else { return }
+                    session.clearFailure()
+                }
+            }
         }
         // 打开时把"钉住"的状态推给窗口：它是跨会话记住的，不能等用户再点一次才生效。
         .onAppear { onPinChange(isPinned) }
@@ -1009,6 +1020,20 @@ struct CaptionBandView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .help(footerHelp)
+            if session.lastFailure != nil && session.transcriptionStatusText == nil {
+                Button {
+                    failureAutoDismissTask?.cancel()
+                    session.clearFailure()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                }
+                .buttonStyle(.borderless)
+                .help("清除提示")
+                .accessibilityLabel("清除提示")
+                .speechRailPointerCursor()
+            }
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
             translationFooterControl
             if !session.saveRecoveryRecords.isEmpty {
@@ -1075,16 +1100,14 @@ struct CaptionBandView: View {
         if !session.saveRecoveryRecords.isEmpty { return "有文字尚未保存" }
         if session.phase == .paused { return "已暂停 · ⌘⇧L 继续" }
         if session.phase == .ending { return "正在保存最后一句…" }
-        // 服务端说过"这句不行"（`failed` / `error`）时要说出来：否则那一句就这么
-        // 从屏幕上消失，用户只会以为是自己没说话。完整原因在悬停提示里。
-        if let failure = session.lastFailure { return "上一句没能转写 · \(failure)" }
+        if let failure = session.lastFailure { return failure }
         return "⌘⇧L 暂停 · ✕ 结束并保存"
     }
 
     /// 悬停提示：贴上去才需要看全文（页脚只放得下一行）。
     private var footerHelp: String {
         guard session.blocked == nil, let failure = session.lastFailure else { return footerHint }
-        return "上一句没能转写：\(failure)"
+        return failure
     }
 
     /// 真实电平，不是自走的动画。形状对着稿的 `levelBars`：**14 根、中间高两端低**，
