@@ -169,6 +169,7 @@ public struct CaptionGlossary: Equatable, Sendable {
     }
 
     public init(text: String, maximumEntries: Int = 24) {
+        let limit = Swift.max(1, Swift.min(maximumEntries, 24))
         let chunks = text.components(
             separatedBy: CharacterSet(charactersIn: ",，;；\n")
         )
@@ -199,7 +200,7 @@ public struct CaptionGlossary: Equatable, Sendable {
             let key = boundedSource.lowercased()
             guard seen.insert(key).inserted else { continue }
             parsed.append(Entry(source: boundedSource, translation: translationPart))
-            if parsed.count >= maximumEntries { break }
+            if parsed.count >= limit { break }
         }
         self.entries = parsed
     }
@@ -476,6 +477,7 @@ public final class CaptionTranslationCoordinator {
         inFlightPartialTranslation = nil
         pendingPartialSourceText = ""
         pendingPartialContextLines = []
+        pendingPartialGlossary = .empty
         latestPartialOnUpdate = nil
         lastPartialSourceText = ""
         lastPartialTranslation = nil
