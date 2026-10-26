@@ -250,6 +250,14 @@ public final class CaptionTranslationCoordinator {
         }
     }
 
+    /// 当前已产出预览译文所对应的真实原文快照（优先返回流式在途译文的原文快照）。
+    public var currentTranslatedSourceText: String? {
+        if !inFlightPartialSourceText.isEmpty {
+            return inFlightPartialSourceText
+        }
+        return lastPartialSourceText.isEmpty ? nil : lastPartialSourceText
+    }
+
     private var partialTask: Task<Void, Never>?
     private var isPartialDebouncing = false
     private var isPartialRequestInFlight = false
@@ -475,10 +483,13 @@ public final class CaptionTranslationCoordinator {
     private static func draftMatchesSource(partialSource: String, completedSource: String) -> Bool {
         let p = partialSource.trimmingCharacters(in: .whitespacesAndNewlines)
         let c = completedSource.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !p.isEmpty, !c.isEmpty else { return false }
+        guard p.count >= 4, c.count >= 4 else { return false }
         if p == c || c.hasPrefix(p) || p.hasPrefix(c) { return true }
+        let shorter = Swift.min(p.count, c.count)
         let shared = p.commonPrefix(with: c).count
-        return shared >= Swift.max(4, Swift.min(p.count, c.count) - 2)
+        if shared >= Swift.max(4, shorter - 2) { return true }
+        if shorter >= 12, shared >= Swift.max(8, Int(Double(shorter) * 0.6)) { return true }
+        return false
     }
 
     /// Stage 2：当句子定稿（completed / sealed）时，取消 partial 预览并携带前 3 句双语平行上下文精翻。
@@ -637,7 +648,7 @@ public final class CaptionTranslationCoordinator {
         return sections.joined(separator: "\n\n")
     }
 
-    public static func cleanSubtitleOutput(_ raw: String) -> String {
+    nonisolated public static func cleanSubtitleOutput(_ raw: String) -> String {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         // 剥离推理模型可能附带的 <think>...</think> 思考块；流式未闭合时暂不输出思考内容
         while let openRange = text.range(of: "<think>", options: .caseInsensitive) {

@@ -342,7 +342,16 @@ public struct SessionLibraryView: View {
                         kind: .standard,
                         tone: .attention,
                         title: "字幕收尾尚未确认",
-                        message: failure.message
+                        message: failure.message.contains("正在收尾")
+                            ? "会话已关闭，已录制的字幕已完整保存在本机记录中。"
+                            : failure.message,
+                        actionTitle: "完成记录",
+                        action: {
+                            Task {
+                                await caption.finishIncompleteCapture()
+                                await reload()
+                            }
+                        }
                     )
                     .help("结束确认阶段：\(failure.stage.rawValue)"
                         + (caption.completionDiagnosticCode.map { "；诊断代码：\($0)" } ?? ""))
@@ -377,6 +386,18 @@ public struct SessionLibraryView: View {
                     if summaries.isEmpty {
                         SessionHeaderKeycap("⌘⇧L")
                     }
+                    if caption.phase == .paused {
+                        PageActionButton(
+                            title: "新开字幕",
+                            systemImage: "plus.circle",
+                            helpText: "结束当前暂停的会话，重新选择窗口或麦克风开始实时字幕"
+                        ) {
+                            Task {
+                                await caption.finish()
+                                await caption.promptSelectTarget()
+                            }
+                        }
+                    }
                     // 页头的主入口（稿 ``primaryButton(row, "打开字幕带", …)`）。它**只放在这里**：
                     // 空态里再放一颗同一动作的按钮，等于同一件事两个入口。
                     // 未开始时它叫「开始字幕」：这是设计稿页头的主按钮名（`开始字幕`），
@@ -385,9 +406,9 @@ public struct SessionLibraryView: View {
                     PageActionButton(
                         title: caption.phase.isLive ? "显示字幕带" : "开始字幕",
                         systemImage: "captions.bubble",
-                        helpText: caption.phase.isLive
+                        helpText: caption.phase == .running
                             ? "把字幕带重新显示到屏幕上；它一直在听"
-                            : "选择目标应用窗口或麦克风开始实时字幕（⌘⇧L）"
+                            : (caption.phase == .paused ? "重新显示字幕带并可继续录制" : "选择目标应用窗口或麦克风开始实时字幕（⌘⇧L）")
                     ) {
                         Task {
                             if caption.phase.isLive {
@@ -978,6 +999,19 @@ public struct SessionLibraryView: View {
                         Task { await copyTranscript(of: summary) }
                     }
                     .buttonStyle(.bordered)
+                    if summary.record.state != .archived {
+                        Button("完成记录") {
+                            Task {
+                                _ = await session.sealSessionReporting(id: summary.record.id, reason: .interrupted)
+                                if caption.sessionID == summary.record.id {
+                                    await caption.finish()
+                                }
+                                await reload()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .help("当前记录未确认正常归档，点击完成封存")
+                    }
                     InPlaceDeleteButton(
                         style: .regularButton,
                         title: "移除记录",

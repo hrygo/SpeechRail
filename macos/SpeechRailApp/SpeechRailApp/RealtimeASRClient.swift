@@ -1115,6 +1115,7 @@ public actor RealtimeASRClient {
     /// Cumulative 24 kHz samples sent on this connection; clear does not reset it.
     private var uploadedSampleCount = 0
     private var expectedDrainCommitEventID: String?
+    private var inFlightDrainTask: Task<Void, any Error>?
     private var drainReceiptReceived = false
     private var drainFailure: Failure?
     private var expectedDrainSamples = 0
@@ -1293,9 +1294,25 @@ public actor RealtimeASRClient {
 
     public func drainAndClear(timeout: Duration,
         beforeAuxiliary: @escaping @Sendable (Int) async throws -> Void) async throws {
-        guard expectedDrainCommitEventID == nil else {
-            throw Failure.transport("音频会话正在收尾。")
+        if let inFlightDrainTask {
+            try await inFlightDrainTask.value
+            return
         }
+        let task = Task {
+            try await self.performDrainAndClear(timeout: timeout, beforeAuxiliary: beforeAuxiliary)
+        }
+        inFlightDrainTask = task
+        do {
+            try await task.value
+            inFlightDrainTask = nil
+        } catch {
+            inFlightDrainTask = nil
+            throw error
+        }
+    }
+
+    private func performDrainAndClear(timeout: Duration,
+        beforeAuxiliary: @escaping @Sendable (Int) async throws -> Void) async throws {
         let eventID = UUID().uuidString
         expectedDrainCommitEventID = eventID
         expectedDrainSamples = uploadedSampleCount

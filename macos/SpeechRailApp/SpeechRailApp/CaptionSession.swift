@@ -436,7 +436,8 @@ public final class CaptionSession {
             guard let self else { return }
             self.partialTranslatedText = translated
             let latestSource = self.partialText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let matchedSource = latestSource.isEmpty ? text : latestSource
+            let fallbackSource = latestSource.isEmpty ? text : latestSource
+            let matchedSource = self.translationCoordinator.currentTranslatedSourceText ?? fallbackSource
             // 中文直通时 `translated` 为 nil：那份草稿不再属于任何一句，一起清掉。
             self.lastPartialTranslation = translated.map {
                 (sourceText: matchedSource, translatedText: $0)
@@ -583,10 +584,11 @@ public final class CaptionSession {
     private var completionRecordID: String?
     public private(set) var completionDiagnosticCode: String?
     public var completionFailure: SessionDrainFailure? {
-        guard let completionRecordID else { return nil }
-        if let failure = coordinator.captureCompletionFailure(recordID: completionRecordID) { return failure }
-        if let pending = coordinator.pendingSeals[completionRecordID],
-           pending.failureReason != nil || coordinator.activeSessionID != completionRecordID {
+        let recordID = completionRecordID ?? sessionID ?? coordinator.activeSessionID
+        guard let recordID else { return nil }
+        if let failure = coordinator.captureCompletionFailure(recordID: recordID) { return failure }
+        if let pending = coordinator.pendingSeals[recordID],
+           pending.failureReason != nil || coordinator.activeSessionID != recordID {
             return SessionDrainFailure(stage: .seal,
                 message: pending.failureReason ?? "记录尚未确认封存，请保留已有文字。")
         }
@@ -1198,21 +1200,16 @@ public final class CaptionSession {
     /// `§16.3` X1 的那一条），`✕` 只把带子收起来——否则"关掉字幕"会把正在录的会议
     /// 推进"整理中"：麦克风的所有权只由守卫（§6.4）交还，不由浮层的关闭键交还。
     public func finish() async {
-        translationCoordinator.cancelAll()
+        translationCoordinator.cancelPartial()
         partialTranslatedText = nil
         lastPartialTranslation = nil
         if let pauseTask {
             await pauseTask.value
         }
-        let endingRecordID = sessionID ?? completionRecordID
         if coordinator.occupancy?.kind == .captions {
             await coordinator.stopCapture(endingWith: .user)
-        } else if let endingRecordID {
-            _ = await coordinator.sealSessionReporting(id: endingRecordID, reason: .interrupted)
         }
-        if let endingRecordID, coordinator.captureCompletionFailure(recordID: endingRecordID) != nil {
-            _ = await coordinator.sealSessionReporting(id: endingRecordID, reason: .interrupted)
-        }
+        translationCoordinator.cancelAll()
         blocked = nil
         resetToIdleKeepingLines()
         setBandVisible(false)
@@ -1839,6 +1836,13 @@ public final class CaptionSession {
                     translatedText: initialDraftTranslation,
                     isTranslating: willTranslate
                 ))
+            if let initialDraftTranslation, !initialDraftTranslation.isEmpty {
+                try? await coordinator.attachLineTranslation(
+                    lineID: lineID,
+                    translatedText: initialDraftTranslation,
+                    sourceLanguage: nil
+                )
+            }
 
             startStageTwoTranslation(
                 lineID: lineID,
@@ -1887,13 +1891,11 @@ public final class CaptionSession {
                     $0.isTranslating = false
                 }
                 if resolvedTranslation != nil || !lang.isEmpty {
-                    Task {
-                        try? await self.coordinator.attachLineTranslation(
-                            lineID: id,
-                            translatedText: resolvedTranslation,
-                            sourceLanguage: lang.isEmpty ? nil : lang
-                        )
-                    }
+                    try? await self.coordinator.attachLineTranslation(
+                        lineID: id,
+                        translatedText: resolvedTranslation,
+                        sourceLanguage: lang.isEmpty ? nil : lang
+                    )
                 }
             }
         )
@@ -1994,8 +1996,13 @@ public final class CaptionSession {
         // 门槛同时要有一个绝对下限：只按比例算的话，`"So,"` 这类两三字符的短预览会退化成
         // "开头一样就继承"——而短促开头在口播里到处都是，上一句的译文就这样被带到下一句。
         // 代价是短于 4 个字符的预览不再交接，那是"一闪而过"量级，不值得用错句风险去换。
+        guard partialSource.count >= 4, sourceText.count >= 4 else { return nil }
+        let shorterCount = Swift.min(partialSource.count, sourceText.count)
         let sharedPrefix = partialSource.commonPrefix(with: sourceText).count
-        guard sharedPrefix >= Swift.max(4, partialSource.count - 2) else { return nil }
+        let matchesStrictPrefix = sharedPrefix >= Swift.max(4, shorterCount - 2)
+        let matchesLongRevisedPrefix = shorterCount >= 12
+            && sharedPrefix >= Swift.max(8, Int(Double(shorterCount) * 0.6))
+        guard matchesStrictPrefix || matchesLongRevisedPrefix else { return nil }
         return draft
     }
 

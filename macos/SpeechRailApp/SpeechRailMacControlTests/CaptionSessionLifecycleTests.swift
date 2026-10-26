@@ -422,6 +422,34 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.session.transcriptionStatusText, "字幕收尾尚未确认")
     }
 
+    func testFinishIncompleteCaptureResolvesCompletionFailure() async throws {
+        let h = try await makeHarness()
+        let id = try await start(h)
+        h.coordinator.recordCaptureCompletionFailure(
+            recordID: id,
+            failure: .init(stage: .protocolDrain, message: "模拟收尾未确认")
+        )
+        XCTAssertNotNil(h.session.completionFailure)
+        let resolved = await h.session.finishIncompleteCapture(recordID: id)
+        XCTAssertTrue(resolved)
+        XCTAssertNil(h.session.completionFailure)
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.state, .archived)
+        XCTAssertEqual(record?.endReason, .interrupted)
+    }
+
+    func testFinishWhilePausedResetsToIdleAndCanStartNewSession() async throws {
+        let h = try await makeHarness()
+        let id = try await start(h)
+        await h.session.pause()
+        XCTAssertEqual(h.session.phase, .paused)
+        await h.session.finish()
+        XCTAssertEqual(h.session.phase, .idle)
+        let nextID = try await start(h)
+        XCTAssertNotEqual(id, nextID)
+        XCTAssertEqual(h.session.phase, .running)
+    }
+
     func testReceiverDeadlineCannotSealCaptionAndLateBufferedFinalIsDiscarded() async throws {
         let receiver = ConnectGate()
         let h = try await makeHarness(
@@ -1349,6 +1377,16 @@ final class CaptionSessionLifecycleTests: XCTestCase {
                 sourceText: "The budget is approved",
                 displayMode: .bilingual
             )
+        )
+        // 长句在定稿瞬间发生后半句 ASR 词汇修订时（共享 >= 60% 且 >= 8 字符前缀），仍平滑继承 Stage 1 草稿不闪白
+        XCTAssertEqual(
+            CaptionSession.inheritableDraftTranslation(
+                lastPartialTranslation: "贴上这个标签让智能体 AI 热潮飙升",
+                lastPartialSourceText: "Sticker and put this on almost every thing in sight",
+                sourceText: "Sticker and put this on almost everything in sight, and that has caused hype",
+                displayMode: .bilingual
+            ),
+            "贴上这个标签让智能体 AI 热潮飙升"
         )
     }
 

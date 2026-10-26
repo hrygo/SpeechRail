@@ -1312,7 +1312,7 @@ public actor LLMProvider {
     private var responsesTaskEndpoints: Set<String> = []
     private var completionTokenLimitEndpoints: Set<String> = []
     /// 字幕翻译在 `/chat/completions` 上自动协商并锁定的关闭思考方言（`Optional.some(nil)` 表示所有关闭思考字段均被拒或无效，需走高预算兜底）。
-    private var chatTranslationThinkingModes: [String: LLMThinkingControl?] = [:]
+    private var chatTranslationThinkingModes: [String: ChatTranslationThinkingStrategy?] = [:]
 
     public init(
         session: URLSession = .shared,
@@ -1452,38 +1452,77 @@ public actor LLMProvider {
         }
     }
 
-    /// 按兼容模式生成 `/chat/completions` 关闭思考的候选参数序列。
-    ///
-    /// 当用户在默认 `openAICompatible` 模式下接入 Qwen3 / vLLM / SGLang / 智谱 / 火山等推理模型时，
-    /// 若首选字段被服务端 `400/422` 拒绝或被静默忽略（响应仍出现 `reasoning_content` / `<think>`），
-    /// 自动依次尝试其他主流关闭思考字段并缓存有效方言；若全部不支持则回退 `nil` 并自动抬高输出预算防止思考截断正文。
+    /// 字幕翻译在 `/chat/completions` 下支持的关闭思考方言（覆盖 OpenAI、vLLM/SGLang、百炼/硅基流动顶层 `enable_thinking`、智谱/火山/OpenCode `thinking.type`）。
+    private enum ChatTranslationThinkingStrategy: String, Sendable, Equatable {
+        case standard
+        case localTemplate
+        case topLevelEnableThinking
+        case openCodeNative
+    }
+
+    /// 监控 `/chat/completions` 流式字节活跃度，防止服务端在返回 `200 OK` 响应头后流中途静默挂死。
+    private final class ChatStreamActivityBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lastByteAt: ContinuousClock.Instant = .now
+        private var timedOut = false
+
+        func recordActivity() {
+            lock.lock()
+            lastByteAt = .now
+            lock.unlock()
+        }
+
+        func markTimedOut() {
+            lock.lock()
+            timedOut = true
+            lock.unlock()
+        }
+
+        var isTimedOut: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return timedOut
+        }
+
+        func idleDuration(now: ContinuousClock.Instant = .now) -> Duration {
+            lock.lock()
+            defer { lock.unlock() }
+            return lastByteAt.duration(to: now)
+        }
+    }
+
     private func candidateChatThinkingModes(
         for mode: LLMCompatibilityMode,
         controlKey: String
-    ) -> [LLMThinkingControl?] {
-        let defaultOrder: [LLMThinkingControl?] = switch mode {
+    ) -> [ChatTranslationThinkingStrategy?] {
+        let initialStrategy: ChatTranslationThinkingStrategy = switch mode {
+        case .openAICompatible: .standard
+        case .localTemplateCompatible: .localTemplate
+        case .openCodeGo: .openCodeNative
+        }
+        let defaultOrder: [ChatTranslationThinkingStrategy?] = switch mode {
         case .openAICompatible:
-            [.standard, .localTemplate, .openCodeNative, nil]
+            [.standard, .localTemplate, .topLevelEnableThinking, .openCodeNative, nil]
         case .localTemplateCompatible:
-            [.localTemplate, .openCodeNative, .standard, nil]
+            [.localTemplate, .topLevelEnableThinking, .openCodeNative, .standard, nil]
         case .openCodeGo:
-            [.openCodeNative, .localTemplate, .standard, nil]
+            [.openCodeNative, .localTemplate, .topLevelEnableThinking, .standard, nil]
         }
         if let locked = chatTranslationThinkingModes[controlKey] {
-            var ordered: [LLMThinkingControl?] = [locked]
+            var ordered: [ChatTranslationThinkingStrategy?] = [locked]
             for item in defaultOrder where item != locked {
                 ordered.append(item)
             }
             return ordered
         }
         if thinkingControlRejected.contains(controlKey) {
-            return defaultOrder.filter { $0 != mode.chatThinkingControl }
+            return defaultOrder.filter { $0 != initialStrategy }
         }
         return defaultOrder
     }
 
     private static func applyChatThinkingControl(
-        _ mode: LLMThinkingControl?,
+        _ mode: ChatTranslationThinkingStrategy?,
         to body: inout [String: Any]
     ) {
         guard let mode else { return }
@@ -1494,6 +1533,8 @@ public actor LLMProvider {
             body["thinking"] = ["type": "disabled"]
         case .localTemplate:
             body["chat_template_kwargs"] = ["enable_thinking": false]
+        case .topLevelEnableThinking:
+            body["enable_thinking"] = false
         }
     }
 
@@ -1516,7 +1557,7 @@ public actor LLMProvider {
         var forceExpandedTokenBudget = false
         let sessionID = "caption-\(UUID().uuidString)"
 
-        for _ in 0..<5 {
+        for _ in 0..<6 {
             try Task.checkCancellation()
             let currentThinkingMode = candidateModes[min(modeIndex, candidateModes.count - 1)]
             let effectiveMaxTokens = (currentThinkingMode == nil || forceExpandedTokenBudget)
@@ -1580,7 +1621,7 @@ public actor LLMProvider {
                 let errorBody = String(decoding: bodyBytes, as: UTF8.self)
                 if currentThinkingMode != nil,
                    Self.rejectsThinkingControl(status: http.statusCode, body: errorBody) {
-                    if currentThinkingMode == configuration.compatibilityMode.chatThinkingControl {
+                    if modeIndex == 0 {
                         thinkingControlRejected.insert(controlKey)
                     }
                     if modeIndex + 1 < candidateModes.count {
@@ -1605,8 +1646,27 @@ public actor LLMProvider {
                 )
             }
 
-            // 2xx：支持标准 SSE 流式增量（`data: {...}`）与网关直接返回的非流式 JSON。
-            defer { result.0.task.cancel() }
+            // 2xx：支持标准 SSE 流式增量（`data: {...}`）与网关直接返回的非流式 JSON，
+            // 并挂载独立流活跃度看门狗（超过 5.5 秒无新字节到达即主动打断挂死连接）。
+            let activityBox = ChatStreamActivityBox()
+            let byteStreamTask = result.0.task
+            let stallLimit: Duration = .milliseconds(5500)
+            let watchdog = Task.detached { [activityBox, byteStreamTask] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    if Task.isCancelled { break }
+                    if activityBox.idleDuration() >= stallLimit {
+                        activityBox.markTimedOut()
+                        byteStreamTask.cancel()
+                        break
+                    }
+                }
+            }
+            defer {
+                watchdog.cancel()
+                result.0.task.cancel()
+            }
+
             var lineBytes: [UInt8] = []
             var rawBytes = Data()
             var sawSSEDataLine = false
@@ -1669,6 +1729,7 @@ public actor LLMProvider {
             do {
                 for try await byte in result.0 {
                     try Task.checkCancellation()
+                    activityBox.recordActivity()
                     if !sawSSEDataLine, rawBytes.count < 256 * 1024 {
                         rawBytes.append(byte)
                     }
@@ -1743,7 +1804,8 @@ public actor LLMProvider {
                 }
                 return
             } catch {
-                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                if !activityBox.isTimedOut,
+                   (error is CancellationError || (error as? URLError)?.code == .cancelled) {
                     throw LLMError.cancelled
                 }
                 if !emittedAnyDelta {
@@ -1764,6 +1826,9 @@ public actor LLMProvider {
                         return
                     }
                 }
+                if activityBox.isTimedOut {
+                    throw LLMError.streamBudgetExceeded
+                }
                 throw error
             }
         }
@@ -1780,7 +1845,7 @@ public actor LLMProvider {
         maxOutputTokens: Int,
         timeout: TimeInterval,
         sessionID: String,
-        thinkingMode: LLMThinkingControl?,
+        thinkingMode: ChatTranslationThinkingStrategy?,
         useCompletionTokenLimit: Bool
     ) async throws -> String {
         try Task.checkCancellation()
@@ -3039,6 +3104,7 @@ public actor LLMProvider {
         guard status == 400 || status == 422 else { return false }
         let lower = body.lowercased()
         return lower.contains("chat_template_kwargs")
+            || lower.contains("enable_thinking")
             || lower.contains("thinking")
             || lower.contains("reasoning_effort")
             || lower.contains("reasoning.effort")
