@@ -1827,7 +1827,7 @@ public actor LLMProvider {
                     }
                 }
                 if activityBox.isTimedOut {
-                    throw LLMError.streamBudgetExceeded
+                    throw LLMError.streamBudgetExceeded("字幕流式输出超时")
                 }
                 throw error
             }
