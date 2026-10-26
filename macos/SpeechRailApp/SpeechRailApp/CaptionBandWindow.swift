@@ -616,6 +616,8 @@ struct CaptionBandView: View {
         }
         // 打开时把"钉住"的状态推给窗口：它是跨会话记住的，不能等用户再点一次才生效。
         .onAppear { onPinChange(isPinned) }
+        // 窗口收起后别再让旧倒计时去清下一场的提示。
+        .onDisappear { failureAutoDismissTask?.cancel() }
         .operationFeedback([
             recoveryFeedback,
             OperationFeedback(session.exportFailure, title: "字幕未导出", onDismiss: { session.clearExportFailure() }),
