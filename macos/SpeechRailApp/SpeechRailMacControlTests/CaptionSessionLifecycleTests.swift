@@ -307,6 +307,23 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.session.labeling.state, .off)
     }
 
+    func testTranscriptionFailureClearsAfterNextLineSavesButLabelingFailureDoesNot() async throws {
+        let h = try await makeHarness()
+        _ = try await start(h)
+
+        try await h.emit(.failed(itemID: "bad-item", code: "asr_failed", message: "合成失败"))
+        try await h.settle { $0.session.lastFailure != nil }
+        XCTAssertEqual(h.session.lastFailure, "asr_failed：合成失败")
+
+        try await h.emit(.completed(itemID: "good-item", transcript: "下一句正常"))
+        try await h.settle { $0.session.lines.count == 1 }
+        XCTAssertNil(
+            h.session.lastFailure,
+            "新一句保存成功后，上一句的转写失败提示不该一直挂在页脚"
+        )
+        XCTAssertNil(h.session.labeling.diagnosticCode)
+    }
+
     /// Gap1（字幕侧）：分人单项不可用不拦整场。
     ///
     /// 与会议侧同构：建两条连接（第一条带分人被拒，第二条不带分人成功），

@@ -470,6 +470,7 @@ public final class CaptionSession {
     public private(set) var exportFailure: String?
 
     public func clearExportFailure() { exportFailure = nil }
+    public func clearFailure() { lastFailure = nil }
 
     #if DEBUG
     /// 离屏渲染工装（`/tmp` 里的 `NSHostingView`）用的**只写展示状态**夹具。
@@ -1849,6 +1850,11 @@ public final class CaptionSession {
         }
         // 行已经在了。对齐/分人结果到达时按 `utterance_id` 找回这一行。
         if sessionID == command.sessionID, command.formal {
+            // 只清理“上一句转写失败”这类过期提示；对齐/分人失败的 note 仍要留在
+            // 页脚，等用户看一眼，不能被下一句正常保存悄悄抹掉（既有回归测试的口径）。
+            if lastFailure != nil, labeling.diagnosticCode == nil {
+                lastFailure = nil
+            }
             let mode = effectiveDisplayMode
             // ① 先取前 3 句双语平行历史，并显式排除当前句：若先 apply 再取 suffix，
             //    当前句自己会混进【前文背景】，轻量模型会漏翻或复读。
