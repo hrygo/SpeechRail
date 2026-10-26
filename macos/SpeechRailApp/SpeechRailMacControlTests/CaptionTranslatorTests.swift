@@ -483,4 +483,50 @@ final class CaptionTranslatorTests: XCTestCase {
         XCTAssertNil(finishedTranslation)
         XCTAssertEqual(finishedLang, "zh")
     }
+
+    func testCleanSubtitleOutputStripsThinkBlocksAndIncompleteThinkTags() {
+        XCTAssertEqual(
+            CaptionTranslationCoordinator.cleanSubtitleOutput("<think>正在推理词汇...</think>智能体 AI 的热潮飙升。"),
+            "智能体 AI 的热潮飙升。"
+        )
+        XCTAssertEqual(
+            CaptionTranslationCoordinator.cleanSubtitleOutput("<think>流式思考尚未闭合"),
+            "",
+            "未闭合的 <think> 标签在流式过程中不应泄漏上屏"
+        )
+    }
+
+    func testPartialTranslatingStateResetsAfterFailureSoRowNeverStaysStuck() async {
+        let fake = FakeTranslationClient()
+        fake.failure = TranslationFailure()
+        let coordinator = CaptionTranslationCoordinator(
+            partialDebounce: .milliseconds(10),
+            minimumPartialDeltaChars: 10,
+            makeClient: { fake }
+        )
+
+        // 短于 10 字符且无子句标点时，Stage 1 尚未触发，不应进入翻译中状态
+        coordinator.schedulePartialTranslation(
+            sourceText: "Grown",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { _ in }
+        )
+        XCTAssertFalse(coordinator.isTranslatingPartial)
+
+        // 跨过阈值触发 Stage 1 时进入 isTranslatingPartial = true，失败后立即复位为 false
+        coordinator.schedulePartialTranslation(
+            sourceText: "Grown very rapidly, even if not quite as rapidly as",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { _ in }
+        )
+        XCTAssertTrue(coordinator.isTranslatingPartial)
+
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertFalse(
+            coordinator.isTranslatingPartial,
+            "Stage 1 请求失败后必须复位 isTranslatingPartial，避免底部预览行永久卡在“翻译中”"
+        )
+    }
 }

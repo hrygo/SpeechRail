@@ -407,7 +407,9 @@ public final class CaptionSession {
                 current: partialText ?? ""
             )
             guard let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+                translationCoordinator.cancelPartial()
                 partialTranslatedText = nil
+                isTranslatingPartial = false
                 return
             }
             if oldValue != partialText {
@@ -518,6 +520,8 @@ public final class CaptionSession {
     public var placementMode: CaptionBandPlacementMode = .dockedToTargetWindow
     /// 外语未定稿句的实时中文预览译文。
     public private(set) var partialTranslatedText: String?
+    /// Stage 1 未定稿预览翻译是否正在请求中（仅在流式请求在途且尚未产出首字时为 true，防抖未达阈值或请求失败后立即置 false，避免卡死显示「翻译中」）。
+    public private(set) var isTranslatingPartial = false
     /// 由 App 层注入：按 CaptionAudioTarget 创建对应的 AudioChunkSource（App -> SystemAudioCapture, Mic -> MicrophoneCapture）。
     public var makeAudioSourceForTarget: (@MainActor (CaptionAudioTarget) -> AudioChunkSource)?
     /// 由 App 层注入：唤起全屏窗口拾取器。
@@ -526,9 +530,15 @@ public final class CaptionSession {
     public var makeTranslationClient: (@MainActor () -> (any CaptionTranslationClient)?)?
 
     /// 翻译协调器
-    @ObservationIgnored private lazy var translationCoordinator = CaptionTranslationCoordinator(makeClient: { [weak self] in
-        self?.makeTranslationClient?()
-    })
+    @ObservationIgnored private lazy var translationCoordinator: CaptionTranslationCoordinator = {
+        let coordinator = CaptionTranslationCoordinator(makeClient: { [weak self] in
+            self?.makeTranslationClient?()
+        })
+        coordinator.onPartialTranslatingStateChange = { [weak self] isTranslating in
+            self?.isTranslatingPartial = isTranslating
+        }
+        return coordinator
+    }()
 
     // MARK: 挂载点（由 App 注入）
 
@@ -583,14 +593,14 @@ public final class CaptionSession {
             inputPersistence.unsettledInputs(sessionID: recordID).map { $0.command }
         } ?? []
         let partialCandidate = windowCapture?.visibleUnits.map(\.text).joined() ?? partialText
-        let shouldTranslatePartial = partialCandidate.map {
+        let shouldTranslatePartial = isTranslatingPartial && (partialCandidate.map {
             Self.shouldTranslate(
                 text: $0,
                 displayMode: displayMode,
                 preferredLanguage: sourceLanguage,
                 hasTranslationClient: makeTranslationClient?() != nil
             )
-        } ?? false
+        } ?? false)
         return CaptionBandContent(
             lines: lines,
             pendingCommands: pendingCommands,

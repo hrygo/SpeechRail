@@ -123,9 +123,9 @@ extension CaptionSession {
             }
         }
 
-        // 3. 翻译客户端工厂
+        // 3. 翻译客户端工厂（仅在实时字幕翻译模块或全局 LLM 已配置时启用）
         self.makeTranslationClient = { [weak preferences] in
-            guard let preferences else { return nil }
+            guard let preferences, preferences.isLLMConfigured(for: .captions) else { return nil }
             return LLMTranslationClient(preferences: preferences)
         }
     }

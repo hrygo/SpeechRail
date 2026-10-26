@@ -1356,56 +1356,272 @@ public actor LLMProvider {
         return delivery.stream
     }
 
-    /// 专供实时字幕的低延迟流式翻译。设置紧凑超时预算（firstTextTimeout=8s, stallTimeout=5s, maxOutputTokens=256），保证字幕翻译绝不挂起。
+    /// 专供实时字幕的低延迟流式翻译。
+    ///
+    /// `LLMModule.captions` 的 `requiredOperation` 为 `.chat`（`/chat/completions`），因此优先走
+    /// `/chat/completions` 流式 SSE（同时兼容直接返回单包 JSON 的网关，并自动协商 thinking 控制字段与
+    /// `max_tokens` / `max_completion_tokens`）；仅当端点明确不支持 Chat 接口时回退 `/responses`。
     public func streamTranslation(
         configuration: LLMConfiguration,
         prompt: String,
         instructions: String,
         apiKey: String?
     ) -> AsyncThrowingStream<String, Error> {
-        let messages = [
-            LLMMessage(role: .developer, text: instructions),
-            LLMMessage(role: .user, text: prompt)
-        ]
         let delivery = LLMStreamDelivery()
         let task = Task {
             do {
-                try await self.runStream(
+                try await self.runTranslationStream(
                     configuration: configuration,
-                    messages: messages,
+                    prompt: prompt,
+                    instructions: instructions,
                     apiKey: apiKey,
                     maxOutputTokens: 256,
-                    instructions: instructions,
-                    firstTextTimeout: .seconds(8),
-                    stallTimeout: .seconds(5),
+                    timeout: 12,
                     onDelta: { try delivery.yield($0) }
                 )
                 delivery.finish()
             } catch {
-                if configuration.compatibilityMode == .openAICompatible {
-                    do {
-                        let text = try await self.complete(
-                            configuration: configuration,
-                            messages: messages,
-                            apiKey: apiKey,
-                            maxOutputTokens: 256,
-                            instructions: instructions,
-                            timeout: 8
-                        )
-                        if !text.isEmpty {
-                            try delivery.yield(text)
-                        }
-                        delivery.finish()
-                    } catch {
-                        delivery.finish(throwing: error)
-                    }
-                } else {
-                    delivery.finish(throwing: error)
-                }
+                delivery.finish(throwing: error)
             }
         }
         delivery.cancelWhenTerminated { task.cancel() }
         return delivery.stream
+    }
+
+    private func runTranslationStream(
+        configuration: LLMConfiguration,
+        prompt: String,
+        instructions: String,
+        apiKey: String?,
+        maxOutputTokens: Int,
+        timeout: TimeInterval,
+        onDelta: @Sendable @escaping (String) throws -> Void
+    ) async throws {
+        guard configuration.isConfigured else { throw LLMError.notConfigured }
+        guard configuration.isBaseURLValid, !configuration.embedsCredential else {
+            throw LLMError.badBaseURL
+        }
+
+        let responsesKey = thinkingKey(configuration, operation: .responses)
+        if !responsesTaskEndpoints.contains(responsesKey) {
+            do {
+                try await runChatTranslationStream(
+                    configuration: configuration,
+                    prompt: prompt,
+                    instructions: instructions,
+                    apiKey: apiKey,
+                    maxOutputTokens: maxOutputTokens,
+                    timeout: timeout,
+                    onDelta: onDelta
+                )
+                return
+            } catch LLMError.notChatAPI {
+                responsesTaskEndpoints.insert(responsesKey)
+            }
+        }
+
+        let messages = [
+            LLMMessage(role: .developer, text: instructions),
+            LLMMessage(role: .user, text: prompt)
+        ]
+        do {
+            try await runStream(
+                configuration: configuration,
+                messages: messages,
+                apiKey: apiKey,
+                maxOutputTokens: maxOutputTokens,
+                instructions: instructions,
+                firstTextTimeout: .seconds(8),
+                stallTimeout: .seconds(5),
+                onDelta: onDelta
+            )
+        } catch {
+            let text = try await complete(
+                configuration: configuration,
+                messages: messages,
+                apiKey: apiKey,
+                maxOutputTokens: maxOutputTokens,
+                instructions: instructions,
+                timeout: timeout
+            )
+            if !text.isEmpty {
+                try onDelta(text)
+            }
+        }
+    }
+
+    private func runChatTranslationStream(
+        configuration: LLMConfiguration,
+        prompt: String,
+        instructions: String,
+        apiKey: String?,
+        maxOutputTokens: Int,
+        timeout: TimeInterval,
+        onDelta: @Sendable @escaping (String) throws -> Void
+    ) async throws {
+        guard let url = URL(string: "\(configuration.normalizedBaseURL)/chat/completions") else {
+            throw LLMError.badBaseURL
+        }
+        let controlKey = thinkingKey(configuration, operation: .chat)
+        var includeThinkingControl = !thinkingControlRejected.contains(controlKey)
+        var useCompletionTokenLimit = completionTokenLimitEndpoints.contains(controlKey)
+        let sessionID = "caption-\(UUID().uuidString)"
+
+        for _ in 0..<3 {
+            try Task.checkCancellation()
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = timeout
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("SpeechRail/caption-translator", forHTTPHeaderField: "User-Agent")
+            if configuration.compatibilityMode.usesOpenCodeSessionHeader {
+                request.setValue(sessionID, forHTTPHeaderField: "x-opencode-session")
+            }
+            if let apiKey, !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+
+            var body: [String: Any] = [
+                "model": configuration.model,
+                "messages": [
+                    ["role": "system", "content": instructions],
+                    ["role": "user", "content": prompt]
+                ],
+                "stream": true,
+                "temperature": 0
+            ]
+            body[useCompletionTokenLimit ? "max_completion_tokens" : "max_tokens"] = maxOutputTokens
+            if includeThinkingControl {
+                switch configuration.compatibilityMode.chatThinkingControl {
+                case .standard:
+                    body["reasoning_effort"] = "none"
+                case .openCodeNative:
+                    body["thinking"] = ["type": "disabled"]
+                case .localTemplate:
+                    body["chat_template_kwargs"] = ["enable_thinking": false]
+                }
+            }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+            let result: (URLSession.AsyncBytes, URLResponse)
+            do {
+                result = try await session.bytes(for: request)
+            } catch {
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    throw LLMError.cancelled
+                }
+                throw LLMError.transport(error.localizedDescription)
+            }
+
+            guard let http = result.1 as? HTTPURLResponse else {
+                result.0.task.cancel()
+                throw LLMError.transport("没有收到 HTTP 响应")
+            }
+
+            if !(200..<300).contains(http.statusCode) {
+                var bodyBytes = Data()
+                do {
+                    defer { result.0.task.cancel() }
+                    for try await byte in result.0 {
+                        guard bodyBytes.count < AssistantLLMStreamBudget.maxErrorBodyBytes else { break }
+                        bodyBytes.append(byte)
+                    }
+                } catch {
+                    if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                        throw LLMError.cancelled
+                    }
+                    throw LLMError.transport(error.localizedDescription)
+                }
+                let errorBody = String(decoding: bodyBytes, as: UTF8.self)
+                if includeThinkingControl,
+                   Self.rejectsThinkingControl(status: http.statusCode, body: errorBody) {
+                    thinkingControlRejected.insert(controlKey)
+                    includeThinkingControl = false
+                    continue
+                }
+                if !useCompletionTokenLimit,
+                   Self.requiresCompletionTokenLimit(status: http.statusCode, body: errorBody) {
+                    completionTokenLimitEndpoints.insert(controlKey)
+                    useCompletionTokenLimit = true
+                    continue
+                }
+                if Self.explicitlyRejectsChat(status: http.statusCode, body: errorBody) {
+                    throw LLMError.notChatAPI
+                }
+                throw Self.httpError(
+                    status: http.statusCode,
+                    body: Self.shortBody(errorBody),
+                    retryAfter: nil
+                )
+            }
+
+            // 2xx：支持标准 SSE 流式增量（`data: {...}`）与网关直接返回的非流式 JSON。
+            defer { result.0.task.cancel() }
+            var lineBytes: [UInt8] = []
+            var rawBytes = Data()
+            var sawSSEDataLine = false
+
+            func consumeSSELine(_ line: String) throws -> Bool {
+                let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmedLine.hasPrefix("data:") else { return false }
+                sawSSEDataLine = true
+                let payload = trimmedLine.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                if payload == "[DONE]" { return true }
+                guard let data = payload.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let choices = object["choices"] as? [[String: Any]],
+                      let first = choices.first
+                else { return false }
+
+                if let delta = first["delta"] as? [String: Any],
+                   let content = delta["content"] as? String,
+                   !content.isEmpty {
+                    try onDelta(content)
+                } else if let message = first["message"] as? [String: Any],
+                          let content = message["content"] as? String,
+                          !content.isEmpty {
+                    try onDelta(content)
+                }
+                return false
+            }
+
+            do {
+                for try await byte in result.0 {
+                    try Task.checkCancellation()
+                    if !sawSSEDataLine, rawBytes.count < 256 * 1024 {
+                        rawBytes.append(byte)
+                    }
+                    if byte == 0x0D { continue }
+                    if byte == 0x0A {
+                        let line = String(decoding: lineBytes, as: UTF8.self)
+                        lineBytes.removeAll(keepingCapacity: true)
+                        if try consumeSSELine(line) { break }
+                    } else if lineBytes.count < AssistantLLMStreamBudget.maxSSELineBytes {
+                        lineBytes.append(byte)
+                    }
+                }
+                if !lineBytes.isEmpty {
+                    let line = String(decoding: lineBytes, as: UTF8.self)
+                    _ = try consumeSSELine(line)
+                }
+                if !sawSSEDataLine, !rawBytes.isEmpty,
+                   let object = try? JSONSerialization.jsonObject(with: rawBytes) as? [String: Any],
+                   let choices = object["choices"] as? [[String: Any]],
+                   let first = choices.first,
+                   let message = first["message"] as? [String: Any],
+                   let content = message["content"] as? String,
+                   !content.isEmpty {
+                    try onDelta(content)
+                }
+                return
+            } catch {
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    throw LLMError.cancelled
+                }
+                throw error
+            }
+        }
+        throw LLMError.transport("字幕翻译请求未完成")
     }
 
     /// 一次性补全（内心 OS 与纪要都用它）。`store=false`：不用服务端会话状态。
@@ -2625,7 +2841,7 @@ public actor LLMProvider {
 
     /// 同上，但直接看原始状态码与正文：`check()` 在把响应包成 `LLMError` 之前就要先判一次。
     private static func rejectsThinkingControl(status: Int, body: String) -> Bool {
-        guard status == 400 else { return false }
+        guard status == 400 || status == 422 else { return false }
         let lower = body.lowercased()
         return lower.contains("chat_template_kwargs")
             || lower.contains("thinking")

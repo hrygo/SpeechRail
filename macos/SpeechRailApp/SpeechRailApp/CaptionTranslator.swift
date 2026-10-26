@@ -241,6 +241,15 @@ public final class CaptionTranslationCoordinator {
     private let partialDebounce: Duration
     private let minimumPartialDeltaChars: Int
 
+    public var onPartialTranslatingStateChange: (@MainActor (Bool) -> Void)?
+    public private(set) var isTranslatingPartial = false {
+        didSet {
+            if oldValue != isTranslatingPartial {
+                onPartialTranslatingStateChange?(isTranslatingPartial)
+            }
+        }
+    }
+
     private var partialTask: Task<Void, Never>?
     private var isPartialDebouncing = false
     private var pendingPartialSourceText: String = ""
@@ -264,6 +273,7 @@ public final class CaptionTranslationCoordinator {
         partialTask?.cancel()
         partialTask = nil
         isPartialDebouncing = false
+        isTranslatingPartial = false
         pendingPartialSourceText = ""
         pendingPartialContextLines = []
         lastPartialSourceText = ""
@@ -329,7 +339,10 @@ public final class CaptionTranslationCoordinator {
         let endsWithClauseBoundary = trimmed.last.map { ",.;?!，。；？！、".contains($0) } ?? false
         guard charDelta >= minimumPartialDeltaChars || endsWithClauseBoundary else { return }
 
-        guard let client = makeClient() else { return }
+        guard let client = makeClient() else {
+            isTranslatingPartial = false
+            return
+        }
         lastPartialSourceText = trimmed
         let debounce = partialDebounce
         // 软锚定：上一轮草稿（或已稳定前缀）随提示词下发，模型可重排但不该无理由换词。
@@ -338,6 +351,7 @@ public final class CaptionTranslationCoordinator {
 
         partialTask?.cancel()
         isPartialDebouncing = true
+        isTranslatingPartial = true
         partialTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: debounce)
@@ -358,9 +372,11 @@ public final class CaptionTranslationCoordinator {
                     accumulated += delta
                     let cleaned = Self.cleanSubtitleOutput(accumulated)
                     if !cleaned.isEmpty {
+                        self.isTranslatingPartial = false
                         onUpdate(cleaned)
                     }
                 }
+                self.isTranslatingPartial = false
                 let finalPartial = Self.cleanSubtitleOutput(accumulated)
                 guard !finalPartial.isEmpty else { return }
                 if let previous = self.lastPartialTranslation {
@@ -369,6 +385,7 @@ public final class CaptionTranslationCoordinator {
                 self.lastPartialTranslation = finalPartial
             } catch {
                 self?.isPartialDebouncing = false
+                self?.isTranslatingPartial = false
                 if !(error is CancellationError) {
                     self?.lastPartialSourceText = ""
                 }
@@ -488,7 +505,21 @@ public final class CaptionTranslationCoordinator {
 
     public static func cleanSubtitleOutput(_ raw: String) -> String {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        for prefix in ["【当前句】", "【译文】", "译文：", "翻译："] {
+        // 剥离推理模型可能附带的 <think>...</think> 思考块；流式未闭合时暂不输出思考内容
+        while let openRange = text.range(of: "<think>", options: .caseInsensitive) {
+            if let closeRange = text.range(
+                of: "</think>",
+                options: .caseInsensitive,
+                range: openRange.upperBound..<text.endIndex
+            ) {
+                text.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
+                text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                text = String(text[..<openRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                break
+            }
+        }
+        for prefix in ["【当前句】", "【译文】", "译文：", "翻译：", "译文:", "翻译:"] {
             if text.hasPrefix(prefix) {
                 text = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
             }
