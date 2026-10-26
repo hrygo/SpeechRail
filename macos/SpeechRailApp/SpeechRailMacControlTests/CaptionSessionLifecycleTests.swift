@@ -1230,6 +1230,26 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(tiering.stablePrefix + tiering.volatileTail, "The budget is approved")
     }
 
+    func testBandContentTiersStableTranslationPrefixOnPrimaryRow() throws {
+        let content = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "The budget is approved",
+            partialTranslatedText: "预算已经批准",
+            partialStablePrefixLength: 6,
+            partialTranslationStablePrefixLength: 4,
+            displayMode: .bilingual
+        )
+        let row = try XCTUnwrap(content.rows.first)
+        XCTAssertEqual(row.primaryText, "预算已经批准")
+        let tiering = try XCTUnwrap(row.primaryTiering)
+        XCTAssertEqual(tiering.stablePrefix, "预算已经")
+        XCTAssertEqual(tiering.volatileTail, "批准")
+        XCTAssertFalse(tiering.isSecondary)
+        XCTAssertEqual(tiering.stablePrefix + tiering.volatileTail, row.primaryText)
+        XCTAssertTrue(try XCTUnwrap(row.sourceTiering).isSecondary)
+    }
+
     func testBandContentLeavesFlatColorWhenNoStablePrefix() throws {
         let content = CaptionBandContent(
             lines: [],

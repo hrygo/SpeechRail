@@ -178,6 +178,54 @@ final class CaptionTranslatorTests: XCTestCase {
         XCTAssertEqual(finishedLang, "ja")
     }
 
+    func testTranslationStabilityCountsAppendAndRewrite() {
+        var stability = CaptionTranslationStability()
+
+        stability.record(previous: nil, current: "你好")
+        XCTAssertEqual(stability.updates, 1)
+        XCTAssertEqual(stability.appendedCharacters, 2)
+        XCTAssertEqual(stability.erasedCharacters, 0)
+
+        stability.record(previous: "你好", current: "你好世界")
+        XCTAssertEqual(stability.updates, 2)
+        XCTAssertEqual(stability.appendedCharacters, 4)
+        XCTAssertEqual(stability.erasedCharacters, 0)
+        XCTAssertEqual(stability.appendRatio, 1)
+
+        stability.record(previous: "你好世界", current: "你好地球")
+        XCTAssertEqual(stability.updates, 3)
+        XCTAssertEqual(stability.erasedCharacters, 2)
+        XCTAssertEqual(stability.appendedCharacters, 6)
+        XCTAssertEqual(stability.resets, 0)
+
+        stability.record(previous: "完全不同的句子", current: "新句")
+        XCTAssertEqual(stability.resets, 1)
+        XCTAssertTrue(stability.appendRatio < 1)
+    }
+
+    func testFinalTranslationRecordsStabilityAgainstDisplayedDraft() async {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["你好地球"]
+        let coordinator = CaptionTranslationCoordinator(makeClient: { fake })
+        let expectation = expectation(description: "Translation finished")
+
+        coordinator.translateCompletedLine(
+            lineID: "line-stability-1",
+            sourceText: "A brand new sentence",
+            contextLines: [],
+            displayMode: .bilingual,
+            priorDraftHint: "你好世界",
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, _, _ in expectation.fulfill() }
+        )
+
+        await fulfillment(of: [expectation], timeout: 2.0)
+        XCTAssertEqual(coordinator.metrics.finalStability.updates, 1)
+        XCTAssertEqual(coordinator.metrics.finalStability.erasedCharacters, 2)
+        XCTAssertEqual(coordinator.metrics.finalStability.appendedCharacters, 2)
+        XCTAssertEqual(coordinator.metrics.finalStability.resets, 0)
+    }
+
     func testGlossaryParsesEntriesAndInjectsIntoPrompt() {
         let glossary = CaptionGlossary(
             text: "SpeechRail=语音轨道, Transformer → 变换器，bad, =空, SpeechRail=重复"

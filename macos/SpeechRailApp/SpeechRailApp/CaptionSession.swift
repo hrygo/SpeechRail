@@ -109,6 +109,8 @@ struct CaptionBandContent: Equatable, Sendable {
         let primaryText: String
         let secondaryText: String?
         let sourceTiering: SourceTiering?
+        /// 主行（通常是译文）的稳定前缀分层；终稿没有尾部，因此为 nil。
+        let primaryTiering: SourceTiering?
         let isPartial: Bool
         let isTranslating: Bool
 
@@ -118,6 +120,7 @@ struct CaptionBandContent: Equatable, Sendable {
             primaryText: String? = nil,
             secondaryText: String? = nil,
             sourceTiering: SourceTiering? = nil,
+            primaryTiering: SourceTiering? = nil,
             isPartial: Bool,
             isTranslating: Bool = false
         ) {
@@ -126,6 +129,7 @@ struct CaptionBandContent: Equatable, Sendable {
             self.primaryText = primaryText ?? text
             self.secondaryText = secondaryText
             self.sourceTiering = sourceTiering
+            self.primaryTiering = primaryTiering
             self.isPartial = isPartial
             self.isTranslating = isTranslating
         }
@@ -140,6 +144,7 @@ struct CaptionBandContent: Equatable, Sendable {
         partialText: String?,
         partialTranslatedText: String? = nil,
         partialStablePrefixLength: Int = 0,
+        partialTranslationStablePrefixLength: Int = 0,
         displayMode: CaptionDisplayMode = .bilingual,
         shouldTranslatePartial: Bool? = nil
     ) {
@@ -228,6 +233,13 @@ struct CaptionBandContent: Equatable, Sendable {
             // 字符串本身。「仅中文」档只要有译文，原文就不上屏，此时若还挂着分层，
             // 渲染层会把原文（例如英文）画进本该显示中文的位置。
             let sourceTextIsOnScreen = displayMode != .chineseOnly || translation == nil
+            let translationTiering = displayMode == .originalOnly ? nil : translation.flatMap {
+                Self.sourceTiering(
+                    for: $0,
+                    stablePrefixLength: partialTranslationStablePrefixLength,
+                    isSecondary: false
+                )
+            }
             rows.append(Row(
                 id: rowID,
                 text: primary,
@@ -240,6 +252,7 @@ struct CaptionBandContent: Equatable, Sendable {
                         isSecondary: sourceIsSecondary
                     )
                     : nil,
+                primaryTiering: translationTiering,
                 isPartial: true,
                 isTranslating: isTranslatingPartial
             ))
@@ -447,6 +460,13 @@ public final class CaptionSession {
         ) { [weak self] translated in
             guard let self else { return }
             self.partialTranslatedText = translated
+            if let translated,
+               let stable = self.translationCoordinator.stabilizedDraftPrefix,
+               translated.hasPrefix(stable) {
+                self.partialTranslationStablePrefixLength = stable.count
+            } else {
+                self.partialTranslationStablePrefixLength = 0
+            }
             let latestSource = self.partialText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let fallbackSource = latestSource.isEmpty ? text : latestSource
             let matchedSource = self.translationCoordinator.currentTranslatedSourceText ?? fallbackSource
@@ -602,7 +622,15 @@ public final class CaptionSession {
     /// 浮层定位模式（智能吸附目标窗口 / 自由悬浮钉住）。
     public var placementMode: CaptionBandPlacementMode = .dockedToTargetWindow
     /// 外语未定稿句的实时中文预览译文。
-    public private(set) var partialTranslatedText: String?
+    public private(set) var partialTranslatedText: String? {
+        didSet {
+            if partialTranslatedText == nil {
+                partialTranslationStablePrefixLength = 0
+            }
+        }
+    }
+    /// 预览译文里已经经两次 LocalAgreement 确认的稳定前缀长度；只影响显示分层。
+    public private(set) var partialTranslationStablePrefixLength = 0
     /// Stage 1 未定稿预览翻译是否正在请求中（仅在流式请求在途且尚未产出首字时为 true，防抖未达阈值或请求失败后立即置 false，避免卡死显示「翻译中」）。
     public private(set) var isTranslatingPartial = false
     /// 由 App 层注入：按 CaptionAudioTarget 创建对应的 AudioChunkSource（App -> SystemAudioCapture, Mic -> MicrophoneCapture）。
@@ -694,6 +722,7 @@ public final class CaptionSession {
             partialText: partialText,
             partialTranslatedText: partialTranslatedText,
             partialStablePrefixLength: partialStablePrefixLength,
+            partialTranslationStablePrefixLength: partialTranslationStablePrefixLength,
             displayMode: mode,
             shouldTranslatePartial: shouldTranslatePartial
         )

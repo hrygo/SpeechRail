@@ -668,9 +668,10 @@ struct CaptionBandView: View {
     private func lineRow(line: CaptionBandContent.Row) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                tieredSourceText(
+                tieredText(
                     line.primaryText,
-                    tiering: line.sourceTiering.flatMap { $0.isSecondary ? nil : $0 },
+                    tiering: line.primaryTiering
+                        ?? line.sourceTiering.flatMap { $0.isSecondary ? nil : $0 },
                     baseColor: line.isPartial
                         ? SpeechRailDesignTokens.Color.inkSecondary
                         : SpeechRailDesignTokens.Color.ink
@@ -693,7 +694,7 @@ struct CaptionBandView: View {
                 }
             }
             if let secondary = line.secondaryText, !secondary.isEmpty {
-                tieredSourceText(
+                tieredText(
                     secondary,
                     tiering: line.sourceTiering.flatMap { $0.isSecondary ? $0 : nil },
                     baseColor: SpeechRailDesignTokens.Color.inkSecondary
@@ -707,11 +708,11 @@ struct CaptionBandView: View {
         .padding(.vertical, SpeechRailDesignTokens.Layout.captionLinePaddingV)
     }
 
-    /// 未定稿原文的视觉分层：稳定前缀用正文色，活跃尾部保持最浅一档（`spec §11.1`）。
+    /// 未定稿文本的视觉分层：稳定前缀用正文色，活跃尾部保持最浅一档（`spec §11.1`）。
     ///
-    /// 服务端的 `stable_prefix_codepoints` 恒为 0，所以这里的分层只是显示优化，
-    /// 不承诺这段文字不可改写——正式复核仍有权改整句。
-    private func tieredSourceText(
+    /// 原文和译文都可能分层：原文来自相邻 partial 的公共前缀，译文来自两次预览的
+    /// LocalAgreement。两者都只是显示优化，不承诺这段文字不可改写。
+    private func tieredText(
         _ text: String,
         tiering: CaptionBandContent.Row.SourceTiering?,
         baseColor: Color

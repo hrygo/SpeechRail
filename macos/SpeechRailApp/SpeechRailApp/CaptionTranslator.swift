@@ -263,6 +263,49 @@ public struct CaptionTranslationLatency: Equatable, Sendable {
     }
 }
 
+/// 译文替换的稳定性汇总：用「字符擦除」衡量已显示内容被改写掉多少。
+///
+/// 定义与 2009.09016《Presenting Simultaneous Translation in Limited Space》一致：
+/// 对相邻两次译文取最长公共前缀，`擦除 = 上次长度 - LCP`，`追加 = 本次长度 - LCP`。
+/// 只记字符数，不记正文；按场累计，用来判断预览/定稿是否越改越碎。
+public struct CaptionTranslationStability: Equatable, Sendable {
+    public private(set) var updates = 0
+    public private(set) var erasedCharacters = 0
+    public private(set) var appendedCharacters = 0
+    /// 与上一次完全没有公共前缀的次数（整句重写）。
+    public private(set) var resets = 0
+
+    public init() {}
+
+    public var averageErasedCharacters: Double {
+        updates == 0 ? 0 : Double(erasedCharacters) / Double(updates)
+    }
+
+    /// 新增字符占「新增 + 擦除」的比例；越接近 1 越像纯追加。
+    public var appendRatio: Double {
+        let total = appendedCharacters + erasedCharacters
+        return total == 0 ? 1 : Double(appendedCharacters) / Double(total)
+    }
+
+    public mutating func record(previous: String?, current: String) {
+        let currentText = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !currentText.isEmpty else { return }
+        updates += 1
+        let previousText = previous?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !previousText.isEmpty else {
+            appendedCharacters += currentText.count
+            return
+        }
+        let common = previousText.commonPrefix(with: currentText)
+        let commonCount = common.count
+        let erased = Swift.max(0, previousText.count - commonCount)
+        let appended = Swift.max(0, currentText.count - commonCount)
+        erasedCharacters += erased
+        appendedCharacters += appended
+        if commonCount == 0 { resets += 1 }
+    }
+}
+
 /// 双阶段翻译的可观测汇总：请求数、成功/失败/取消、队列等待与首字/完成延迟。
 public struct CaptionTranslationMetrics: Equatable, Sendable {
     public internal(set) var finalRequests = 0
@@ -277,6 +320,11 @@ public struct CaptionTranslationMetrics: Equatable, Sendable {
     public internal(set) var previewCompleted = 0
     public internal(set) var previewFailed = 0
     public internal(set) var previewFirstDelta = CaptionTranslationLatency()
+    /// 预览译文跨请求的字符擦除；不含流内的自然追加。
+    public internal(set) var previewStability = CaptionTranslationStability()
+
+    /// 定稿相对已上屏草稿的字符擦除；越高说明定稿改写越多。
+    public internal(set) var finalStability = CaptionTranslationStability()
 
     public init() {}
 }
@@ -431,7 +479,9 @@ public final class CaptionTranslationCoordinator {
     private var latestPartialOnUpdate: (@MainActor (String?) -> Void)?
     private var lastPartialSourceText: String = ""
     private var lastPartialTranslation: String?
-    private var stabilizedDraftPrefix: String?
+    /// 最近两次预览译文的 LocalAgreement 稳定前缀；只用于提示词软锚定和显示分层，
+    /// 不承诺不可改写。
+    public private(set) var stabilizedDraftPrefix: String?
     private var finalTasks: [String: Task<Void, Never>] = [:]
     private var recentCompletedTranslations: [String: String] = [:]
     private var recentCompletedOrder: [String] = []
@@ -669,6 +719,10 @@ public final class CaptionTranslationCoordinator {
                     self.metrics.previewFailed += 1
                 } else {
                     self.metrics.previewCompleted += 1
+                    self.metrics.previewStability.record(
+                        previous: self.lastPartialTranslation,
+                        current: finalPartial
+                    )
                     if let previous = self.lastPartialTranslation {
                         self.stabilizedDraftPrefix = Self.localAgreementPrefix(previous, finalPartial)
                     }
@@ -865,6 +919,10 @@ public final class CaptionTranslationCoordinator {
                 let finalCleaned = Self.cleanSubtitleOutput(accumulated)
                 if !finalCleaned.isEmpty {
                     recordCompletedTranslation(sourceText: request.sourceText, translatedText: finalCleaned)
+                    metrics.finalStability.record(
+                        previous: request.draftForPrompt,
+                        current: finalCleaned
+                    )
                     let total = elapsedMilliseconds(since: request.requestedAt)
                     metrics.finalCompleted += 1
                     metrics.finalCompletion.record(milliseconds: total)
