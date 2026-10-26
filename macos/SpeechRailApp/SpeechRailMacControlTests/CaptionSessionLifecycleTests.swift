@@ -78,6 +78,28 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await super.tearDown()
     }
 
+    func testSourceLanguageMapsOnlyExplicitChoicesToASRCode() {
+        XCTAssertNil(CaptionSourceLanguage.auto.asrLanguageCode)
+        XCTAssertEqual(CaptionSourceLanguage.english.asrLanguageCode, "en")
+        XCTAssertEqual(CaptionSourceLanguage.japanese.asrLanguageCode, "ja")
+        XCTAssertEqual(CaptionSourceLanguage.korean.asrLanguageCode, "ko")
+        XCTAssertEqual(CaptionSourceLanguage.chinese.asrLanguageCode, "zh")
+    }
+
+    func testExplicitSourceLanguageIsForwardedToRealtimeASR() async throws {
+        let h = try await makeHarness()
+        h.session.sourceLanguage = .japanese
+
+        _ = try await start(h)
+
+        XCTAssertEqual(
+            h.clients.madeConfigurations.last?.language, "ja",
+            "用户在字幕上选定的源语言必须进入 ASR 握手，而不是只影响翻译提示词"
+        )
+        XCTAssertEqual(h.clients.madeConfigurations.last?.scenePreset, .caption)
+        XCTAssertEqual(h.session.translationMetrics.finalRequests, 0)
+    }
+
     private func makeHarness(
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)? = nil,

@@ -831,6 +831,7 @@ struct CaptionBandView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .help("识别和翻译用的源语言；「自动」适合中英混说。会话中途切换从下一次接上开始生效")
         .accessibilityLabel("源语言 \(session.sourceLanguage.title)")
         .speechRailPointerCursor()
     }

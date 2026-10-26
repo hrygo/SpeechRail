@@ -1,5 +1,6 @@
 import Foundation
 import NaturalLanguage
+import os
 
 /// 实时字幕源语言检测器（纯本地计算，耗时 < 0.1ms，不改变 /v1/realtime 协议契约）。
 public enum CaptionLanguageDetector: Sendable {
@@ -140,6 +141,70 @@ public struct CaptionContextTurn: Equatable, Sendable {
     }
 }
 
+/// 翻译延迟直方图：只保存毫秒数与分桶计数，不保存原文、译文或任何可识别内容。
+///
+/// 分桶上界用于近似 p50/p95；超过最后一个上界的样本落入溢出桶，`percentile`
+/// 返回真实最大值。指标是**每场会话**的轻量汇总，不落盘、不上报。
+public struct CaptionTranslationLatency: Equatable, Sendable {
+    public private(set) var count = 0
+    public private(set) var totalMilliseconds = 0
+    public private(set) var maximumMilliseconds = 0
+    private var buckets = [Int](repeating: 0, count: Self.bounds.count + 1)
+
+    static let bounds = [
+        50, 100, 200, 300, 500, 750, 1_000, 1_500,
+        2_000, 3_000, 5_000, 8_000, 12_000, 20_000,
+    ]
+
+    public init() {}
+
+    public mutating func record(milliseconds: Int) {
+        let value = max(0, milliseconds)
+        count += 1
+        totalMilliseconds += value
+        maximumMilliseconds = max(maximumMilliseconds, value)
+        let index = Self.bounds.firstIndex { value <= $0 } ?? Self.bounds.count
+        buckets[index] += 1
+    }
+
+    public var averageMilliseconds: Int {
+        count == 0 ? 0 : totalMilliseconds / count
+    }
+
+    /// 近似分位值（毫秒）。空直方图返回 0，溢出桶返回当前最大值。
+    public func percentile(_ percentile: Double) -> Int {
+        guard count > 0 else { return 0 }
+        let ratio = Swift.min(Swift.max(percentile, 0), 1)
+        let target = Swift.max(1, Int((Double(count) * ratio).rounded(.up)))
+        var accumulated = 0
+        for (index, bucket) in buckets.enumerated() {
+            accumulated += bucket
+            if accumulated >= target {
+                return index < Self.bounds.count ? Self.bounds[index] : maximumMilliseconds
+            }
+        }
+        return maximumMilliseconds
+    }
+}
+
+/// 双阶段翻译的可观测汇总：请求数、成功/失败/取消、队列等待与首字/完成延迟。
+public struct CaptionTranslationMetrics: Equatable, Sendable {
+    public internal(set) var finalRequests = 0
+    public internal(set) var finalCompleted = 0
+    public internal(set) var finalFailed = 0
+    public internal(set) var finalCancelled = 0
+    public internal(set) var finalQueueWait = CaptionTranslationLatency()
+    public internal(set) var finalFirstDelta = CaptionTranslationLatency()
+    public internal(set) var finalCompletion = CaptionTranslationLatency()
+
+    public internal(set) var previewRequests = 0
+    public internal(set) var previewCompleted = 0
+    public internal(set) var previewFailed = 0
+    public internal(set) var previewFirstDelta = CaptionTranslationLatency()
+
+    public init() {}
+}
+
 /// 翻译引擎抽象协议：生产环境注入 `LLMProvider`，单测注入确定性 Fake。
 ///
 /// `priorDraftTranslation` 是已经上屏的预览译文（LocalAgreement-2 稳定前缀或上一轮草稿），
@@ -244,6 +309,16 @@ public final class CaptionTranslationCoordinator {
     private let makeClient: @MainActor () -> (any CaptionTranslationClient)?
     private let partialDebounce: Duration
     private let minimumPartialDeltaChars: Int
+    /// 定稿翻译同时最多跑几条。慢模型时这是背压阀：定稿行会排队，而不是把
+    /// 服务端塞满后所有请求一起变慢。按到达顺序完成，避免后句先于前句上屏。
+    private let maximumConcurrentFinalTranslations: Int
+    private let signposter = OSSignposter(
+        subsystem: "com.speechrail.desktop",
+        category: "CaptionTranslation"
+    )
+
+    /// 只汇总延迟与计数，不记录原文/译文；每场会话独立。
+    public private(set) var metrics = CaptionTranslationMetrics()
 
     public var onPartialTranslatingStateChange: (@MainActor (Bool) -> Void)?
     public private(set) var isTranslatingPartial = false {
@@ -279,13 +354,34 @@ public final class CaptionTranslationCoordinator {
     private var recentCompletedTranslations: [String: String] = [:]
     private var recentCompletedOrder: [String] = []
 
+    private struct FinalRequest {
+        let lineID: String
+        let sourceText: String
+        let contextLines: [String]
+        let client: any CaptionTranslationClient
+        let instructions: String
+        let draftForPrompt: String?
+        let fallbackDraft: String?
+        let detectedLanguageCode: String
+        let requestedAt: Date
+        let onStreamingUpdate: @MainActor (String, String) -> Void
+        let onFinished: @MainActor (String, String?, String) async -> Void
+    }
+
+    private var finalQueue: [FinalRequest] = []
+    private var runningFinalCount = 0
+    /// 正在跑的行；同一行被重新请求时，新的排队项必须等旧任务真正退出再开跑。
+    private var runningFinalLineIDs: Set<String> = []
+
     public init(
         partialDebounce: Duration = .milliseconds(450),
         minimumPartialDeltaChars: Int = 10,
+        maximumConcurrentFinalTranslations: Int = 2,
         makeClient: @escaping @MainActor () -> (any CaptionTranslationClient)?
     ) {
         self.partialDebounce = partialDebounce
         self.minimumPartialDeltaChars = minimumPartialDeltaChars
+        self.maximumConcurrentFinalTranslations = Swift.max(1, maximumConcurrentFinalTranslations)
         self.makeClient = makeClient
     }
 
@@ -309,8 +405,22 @@ public final class CaptionTranslationCoordinator {
         cancelPartial()
         for task in finalTasks.values { task.cancel() }
         finalTasks.removeAll()
+        // 尚未开跑的排队请求不会自己走到 onFinished；补一次 nil 终态，
+        // 把行上的「翻译中」清掉，但绝不把预览草稿当成定稿译文落库。
+        let dropped = finalQueue
+        finalQueue.removeAll()
+        for request in dropped {
+            Task { @MainActor in
+                await request.onFinished(request.lineID, nil, request.detectedLanguageCode)
+            }
+        }
         recentCompletedTranslations.removeAll()
         recentCompletedOrder.removeAll()
+    }
+
+    /// 新一场字幕开始时清空上一场的延迟样本；历史记录不参与。
+    public func resetMetrics() {
+        metrics = CaptionTranslationMetrics()
     }
 
     private func recordCompletedTranslation(sourceText: String, translatedText: String) {
@@ -431,6 +541,9 @@ public final class CaptionTranslationCoordinator {
                 guard let self else { return }
                 self.isPartialDebouncing = false
                 self.isPartialRequestInFlight = true
+                self.metrics.previewRequests += 1
+                let previewStartedAt = Date()
+                var previewFirstDeltaRecorded = false
                 let latestSource = self.pendingPartialSourceText.isEmpty
                     ? initialSourceSnapshot
                     : self.pendingPartialSourceText
@@ -448,6 +561,12 @@ public final class CaptionTranslationCoordinator {
                     accumulated += delta
                     let cleaned = Self.cleanSubtitleOutput(accumulated)
                     if !cleaned.isEmpty {
+                        if !previewFirstDeltaRecorded {
+                            previewFirstDeltaRecorded = true
+                            self.metrics.previewFirstDelta.record(
+                                milliseconds: Int(Date().timeIntervalSince(previewStartedAt) * 1_000)
+                            )
+                        }
                         self.isTranslatingPartial = false
                         self.inFlightPartialTranslation = cleaned
                         self.latestPartialOnUpdate?(cleaned)
@@ -455,8 +574,13 @@ public final class CaptionTranslationCoordinator {
                 }
                 self.isPartialRequestInFlight = false
                 self.isTranslatingPartial = false
+                // 被定稿提交或新预览取消时，流可能正常结束而不是抛错；此时不能记成完成/失败。
+                guard !Task.isCancelled else { return }
                 let finalPartial = Self.cleanSubtitleOutput(accumulated)
-                if !finalPartial.isEmpty {
+                if finalPartial.isEmpty {
+                    self.metrics.previewFailed += 1
+                } else {
+                    self.metrics.previewCompleted += 1
                     if let previous = self.lastPartialTranslation {
                         self.stabilizedDraftPrefix = Self.localAgreementPrefix(previous, finalPartial)
                     }
@@ -478,6 +602,7 @@ public final class CaptionTranslationCoordinator {
                 self?.isTranslatingPartial = false
                 if !(error is CancellationError) {
                     self?.lastPartialSourceText = ""
+                    self?.metrics.previewFailed += 1
                 }
             }
         }
@@ -506,6 +631,8 @@ public final class CaptionTranslationCoordinator {
         displayMode: CaptionDisplayMode,
         preferredLanguage: CaptionSourceLanguage = .auto,
         priorDraftHint: String? = nil,
+        /// 定稿文本到达的时间；用于把落库等待和队列等待一起算进首字延迟。
+        requestedAt: Date = Date(),
         onStreamingUpdate: @escaping @MainActor (String, String) -> Void,
         onFinished: @escaping @MainActor (String, String?, String) async -> Void
     ) {
@@ -562,76 +689,169 @@ public final class CaptionTranslationCoordinator {
 
         let instructions = Self.systemInstructions(for: preferredLanguage)
 
-        finalTasks[lineID]?.cancel()
-        finalTasks[lineID] = Task { @MainActor [weak self] in
-            defer { self?.finalTasks[lineID] = nil }
-            var accumulated = ""
-            for attempt in 0..<2 {
-                do {
+        enqueueFinal(
+            FinalRequest(
+                lineID: lineID,
+                sourceText: trimmed,
+                contextLines: contextLines,
+                client: client,
+                instructions: instructions,
+                draftForPrompt: draftForPrompt,
+                fallbackDraft: fallbackDraft,
+                detectedLanguageCode: detectedLanguageCode,
+                requestedAt: requestedAt,
+                onStreamingUpdate: onStreamingUpdate,
+                onFinished: onFinished
+            )
+        )
+    }
+
+    /// 定稿翻译的有界队列：按到达顺序执行，最多 `maximumConcurrentFinalTranslations` 条在途。
+    ///
+    /// 慢模型（本地单 worker 或远端限流）下，无上限并发只会让每条请求都变慢，还会让
+    /// 后句先于前句上屏。这里用有界队列做背压；同一行被重新请求时替换未开跑的旧请求。
+    private func enqueueFinal(_ request: FinalRequest) {
+        finalQueue.removeAll { $0.lineID == request.lineID }
+        finalTasks[request.lineID]?.cancel()
+        finalQueue.append(request)
+        pumpFinalQueue()
+    }
+
+    private func pumpFinalQueue() {
+        while runningFinalCount < maximumConcurrentFinalTranslations {
+            guard let index = finalQueue.firstIndex(where: {
+                !runningFinalLineIDs.contains($0.lineID)
+            }) else { return }
+            let request = finalQueue.remove(at: index)
+            runningFinalCount += 1
+            runningFinalLineIDs.insert(request.lineID)
+            metrics.finalRequests += 1
+            finalTasks[request.lineID] = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.runFinal(request)
+            }
+        }
+    }
+
+    private func runFinal(_ request: FinalRequest) async {
+        defer {
+            runningFinalCount = Swift.max(0, runningFinalCount - 1)
+            runningFinalLineIDs.remove(request.lineID)
+            finalTasks[request.lineID] = nil
+            pumpFinalQueue()
+        }
+        let queueWait = elapsedMilliseconds(since: request.requestedAt)
+        metrics.finalQueueWait.record(milliseconds: queueWait)
+        var firstDelta: Int?
+        var accumulated = ""
+        var attempts = 0
+
+        for attempt in 0..<2 {
+            attempts = attempt + 1
+            do {
+                try Task.checkCancellation()
+                let enrichedContext = enrichContextLines(Array(request.contextLines.suffix(3)))
+                let stream = request.client.translateStream(
+                    sourceText: request.sourceText,
+                    contextLines: enrichedContext,
+                    priorDraftTranslation: request.draftForPrompt,
+                    systemInstructions: request.instructions
+                )
+                for try await delta in stream {
                     try Task.checkCancellation()
-                    let enrichedContext = self?.enrichContextLines(Array(contextLines.suffix(3)))
-                        ?? Array(contextLines.suffix(3))
-                    let stream = client.translateStream(
-                        sourceText: trimmed,
-                        contextLines: enrichedContext,
-                        priorDraftTranslation: draftForPrompt,
-                        systemInstructions: instructions
+                    accumulated += delta
+                    let cleaned = Self.cleanSubtitleOutput(accumulated)
+                    if !cleaned.isEmpty {
+                        if firstDelta == nil {
+                            let value = elapsedMilliseconds(since: request.requestedAt)
+                            firstDelta = value
+                            metrics.finalFirstDelta.record(milliseconds: value)
+                        }
+                        request.onStreamingUpdate(request.lineID, cleaned)
+                    }
+                }
+                let finalCleaned = Self.cleanSubtitleOutput(accumulated)
+                if !finalCleaned.isEmpty {
+                    recordCompletedTranslation(sourceText: request.sourceText, translatedText: finalCleaned)
+                    let total = elapsedMilliseconds(since: request.requestedAt)
+                    metrics.finalCompleted += 1
+                    metrics.finalCompletion.record(milliseconds: total)
+                    emitFinalSignpost(
+                        outcome: "translated", queueWait: queueWait,
+                        firstDelta: firstDelta, total: total, attempts: attempts
                     )
-                    for try await delta in stream {
-                        try Task.checkCancellation()
-                        accumulated += delta
-                        let cleaned = Self.cleanSubtitleOutput(accumulated)
-                        if !cleaned.isEmpty {
-                            onStreamingUpdate(lineID, cleaned)
-                        }
-                    }
-                    let finalCleaned = Self.cleanSubtitleOutput(accumulated)
-                    if !finalCleaned.isEmpty {
-                        self?.recordCompletedTranslation(sourceText: trimmed, translatedText: finalCleaned)
-                        await onFinished(lineID, finalCleaned, detectedLanguageCode)
-                        return
-                    }
-                    if attempt == 0 {
-                        accumulated = ""
-                        try await Task.sleep(for: .milliseconds(120))
-                        continue
-                    }
-                } catch {
-                    if error is CancellationError {
-                        let salvaged = Self.cleanSubtitleOutput(accumulated)
-                        await onFinished(
-                            lineID,
-                            salvaged.isEmpty ? fallbackDraft : salvaged,
-                            detectedLanguageCode
-                        )
-                        return
-                    }
+                    await request.onFinished(request.lineID, finalCleaned, request.detectedLanguageCode)
+                    return
+                }
+                if attempt == 0 {
+                    accumulated = ""
+                    try await Task.sleep(for: .milliseconds(120))
+                    continue
+                }
+            } catch {
+                if error is CancellationError {
+                    metrics.finalCancelled += 1
+                    emitFinalSignpost(
+                        outcome: "cancelled", queueWait: queueWait,
+                        firstDelta: firstDelta,
+                        total: elapsedMilliseconds(since: request.requestedAt),
+                        attempts: attempts
+                    )
                     let salvaged = Self.cleanSubtitleOutput(accumulated)
-                    // 若一个字都还没吐出就遭遇网络瞬态抖动，自动快速重试一次
-                    if salvaged.isEmpty, attempt == 0 {
-                        accumulated = ""
-                        try? await Task.sleep(for: .milliseconds(120))
-                        if !Task.isCancelled {
-                            continue
-                        }
-                    }
-                    let resolved = salvaged.isEmpty ? fallbackDraft : salvaged
-                    if let resolved, !resolved.isEmpty {
-                        self?.recordCompletedTranslation(sourceText: trimmed, translatedText: resolved)
-                    }
-                    await onFinished(
-                        lineID,
-                        resolved,
-                        detectedLanguageCode
+                    await request.onFinished(
+                        request.lineID,
+                        salvaged.isEmpty ? request.fallbackDraft : salvaged,
+                        request.detectedLanguageCode
                     )
                     return
                 }
+                let salvaged = Self.cleanSubtitleOutput(accumulated)
+                // 若一个字都还没吐出就遭遇网络瞬态抖动，自动快速重试一次
+                if salvaged.isEmpty, attempt == 0 {
+                    accumulated = ""
+                    try? await Task.sleep(for: .milliseconds(120))
+                    if !Task.isCancelled { continue }
+                }
+                let resolved = salvaged.isEmpty ? request.fallbackDraft : salvaged
+                if let resolved, !resolved.isEmpty {
+                    recordCompletedTranslation(sourceText: request.sourceText, translatedText: resolved)
+                }
+                let total = elapsedMilliseconds(since: request.requestedAt)
+                metrics.finalFailed += 1
+                metrics.finalCompletion.record(milliseconds: total)
+                emitFinalSignpost(
+                    outcome: "fallback", queueWait: queueWait,
+                    firstDelta: firstDelta, total: total, attempts: attempts
+                )
+                await request.onFinished(request.lineID, resolved, request.detectedLanguageCode)
+                return
             }
-            if let fallbackDraft, !fallbackDraft.isEmpty {
-                self?.recordCompletedTranslation(sourceText: trimmed, translatedText: fallbackDraft)
-            }
-            await onFinished(lineID, fallbackDraft, detectedLanguageCode)
         }
+        if let fallback = request.fallbackDraft, !fallback.isEmpty {
+            recordCompletedTranslation(sourceText: request.sourceText, translatedText: fallback)
+        }
+        let total = elapsedMilliseconds(since: request.requestedAt)
+        metrics.finalFailed += 1
+        metrics.finalCompletion.record(milliseconds: total)
+        emitFinalSignpost(
+            outcome: "empty", queueWait: queueWait,
+            firstDelta: firstDelta, total: total, attempts: attempts
+        )
+        await request.onFinished(request.lineID, request.fallbackDraft, request.detectedLanguageCode)
+    }
+
+    private func elapsedMilliseconds(since date: Date) -> Int {
+        Swift.max(0, Int(Date().timeIntervalSince(date) * 1_000))
+    }
+
+    private func emitFinalSignpost(
+        outcome: String, queueWait: Int, firstDelta: Int?, total: Int, attempts: Int
+    ) {
+        guard signposter.isEnabled else { return }
+        signposter.emitEvent(
+            "FinalTranslation",
+            "outcome=\(outcome) queue_ms=\(queueWait) first_delta_ms=\(firstDelta.map { String($0) } ?? "none") total_ms=\(total) attempts=\(attempts)"
+        )
     }
 
     public static func buildUserPrompt(

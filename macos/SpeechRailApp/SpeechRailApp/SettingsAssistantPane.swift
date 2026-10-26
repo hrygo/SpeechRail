@@ -255,6 +255,21 @@ struct SettingsAssistantPane: View {
                 }
                 settingsRowSeparator
                 settingsRow {
+                    Picker(selection: sourceLanguageBinding) {
+                        ForEach(CaptionSourceLanguage.allCases) { language in
+                            Text(language.title).tag(language.rawValue)
+                        }
+                    } label: {
+                        settingsRowLabel(
+                            "音频源语言",
+                            caption: "影响识别与翻译；「自动」适合中英混说。会话中途修改，暂停后继续生效。"
+                        )
+                    }
+                    .pickerStyle(.menu)
+                    .modifier(settingsRowControl())
+                }
+                settingsRowSeparator
+                settingsRow {
                     Toggle(isOn: diarizationCaptionsBinding) {
                         settingsRowLabel(
                             "字幕显示说话人",
@@ -415,6 +430,14 @@ struct SettingsAssistantPane: View {
         Binding(
             get: { preferences.assistantMode.rawValue },
             set: { preferences.assistantMode = AssistantMode(rawValue: $0) ?? .duplex }
+        )
+    }
+
+    /// 音频源语言不只是翻译设置：非自动档会随下一次建连透传给 ASR。
+    private var sourceLanguageBinding: Binding<String> {
+        Binding(
+            get: { caption.sourceLanguage.rawValue },
+            set: { caption.sourceLanguage = CaptionSourceLanguage(rawValue: $0) ?? .auto }
         )
     }
 

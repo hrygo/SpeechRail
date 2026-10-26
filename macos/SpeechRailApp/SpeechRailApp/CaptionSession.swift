@@ -19,6 +19,8 @@ public struct CaptionRealtimeClientConfiguration: Sendable, Equatable {
     public var apiKey: String?
     public var expectedASRRevision: String?
     public var windowScene: SpeechRailWindowScene?
+    /// 用户选定的源语言；`nil` 表示自动识别。只在建连时生效。
+    public var language: String?
 
     public init(
         port: Int,
@@ -26,7 +28,8 @@ public struct CaptionRealtimeClientConfiguration: Sendable, Equatable {
         diarizationEnabled: Bool,
         apiKey: String?,
         expectedASRRevision: String?,
-        windowScene: SpeechRailWindowScene? = nil
+        windowScene: SpeechRailWindowScene? = nil,
+        language: String? = nil
     ) {
         self.port = port
         self.scenePreset = scenePreset
@@ -34,6 +37,7 @@ public struct CaptionRealtimeClientConfiguration: Sendable, Equatable {
         self.apiKey = apiKey
         self.expectedASRRevision = expectedASRRevision
         self.windowScene = windowScene
+        self.language = language
     }
 }
 
@@ -67,6 +71,7 @@ public struct CaptionSessionDependencies: Sendable {
         Self(makeRealtimeClient: { configuration in
             RealtimeASRClient(
                 port: configuration.port,
+                language: configuration.language,
                 scenePreset: configuration.scenePreset,
                 windowScene: configuration.windowScene,
                 diarizationEnabled: configuration.diarizationEnabled,
@@ -541,7 +546,15 @@ public final class CaptionSession {
     public var isTranslationAvailable: Bool {
         makeTranslationClient?() != nil
     }
+    /// 本场字幕的翻译延迟/队列/成败汇总；只含毫秒与计数，不含正文。
+    public var translationMetrics: CaptionTranslationMetrics {
+        translationCoordinator.metrics
+    }
     /// 字幕音频源语种（自动识别 / 英语 / 日语 / 韩语 / 中文），持久化到 UserDefaults。
+    ///
+    /// 它是**识别**语言，不只是翻译设置：非自动档会随建连透传给 Realtime ASR。
+    /// 会话中途切换时，翻译侧立即按新语种补翻；识别侧从下一次建连（暂停后继续 /
+    /// 重新接上）生效，不在音频流中途切语言。
     public var sourceLanguage: CaptionSourceLanguage {
         didSet {
             defaults.set(sourceLanguage.rawValue, forKey: "speechrail.caption.sourceLanguage")
@@ -954,6 +967,7 @@ public final class CaptionSession {
         lastFailure = nil
         completionRecordID = nil
         completionDiagnosticCode = nil
+        translationCoordinator.resetMetrics()
         do {
             guard admissionLedger.canStartNewRecord else {
                 throw Blocked(.storeUnavailable("未保存的恢复记录已达到上限，请先复制恢复内容。"))
@@ -1025,7 +1039,8 @@ public final class CaptionSession {
                     diarizationEnabled: diarizationEnabled,
                     apiKey: apiKey,
                     expectedASRRevision: binding?.asrModelRevision,
-                    windowScene: windowEnabled ? .caption : nil
+                    windowScene: windowEnabled ? .caption : nil,
+                    language: sourceLanguage.asrLanguageCode
                 )
             )
         }
@@ -1422,7 +1437,8 @@ public final class CaptionSession {
                     diarizationEnabled: diarizationEnabled,
                     apiKey: apiKey,
                     expectedASRRevision: binding?.asrModelRevision,
-                    windowScene: windowEnabled ? .caption : nil
+                    windowScene: windowEnabled ? .caption : nil,
+                    language: sourceLanguage.asrLanguageCode
                 )
             )
         }
@@ -1888,7 +1904,8 @@ public final class CaptionSession {
                 lineID: lineID,
                 sourceText: sourceText,
                 contextLines: contextLines,
-                initialDraftTranslation: initialDraftTranslation
+                initialDraftTranslation: initialDraftTranslation,
+                requestedAt: command.observedAt
             )
         }
         guard let payload = pendingAttributions.take(recordID: command.sessionID, identity: itemIdentity),
@@ -1903,7 +1920,8 @@ public final class CaptionSession {
         lineID: String,
         sourceText: String,
         contextLines: [String],
-        initialDraftTranslation: String?
+        initialDraftTranslation: String?,
+        requestedAt: Date
     ) {
         translationCoordinator.translateCompletedLine(
             lineID: lineID,
@@ -1912,6 +1930,7 @@ public final class CaptionSession {
             displayMode: effectiveDisplayMode,
             preferredLanguage: sourceLanguage,
             priorDraftHint: initialDraftTranslation,
+            requestedAt: requestedAt,
             onStreamingUpdate: { [weak self] id, partialTranslation in
                 self?.transcriptPresentation.update(id: id) {
                     $0.translatedText = partialTranslation
@@ -1974,7 +1993,8 @@ public final class CaptionSession {
                 lineID: line.id,
                 sourceText: line.text,
                 contextLines: contextLines,
-                initialDraftTranslation: nil
+                initialDraftTranslation: nil,
+                requestedAt: Date()
             )
         }
     }

@@ -54,6 +54,46 @@ final class FakeTranslationClient: CaptionTranslationClient, @unchecked Sendable
 }
 
 @MainActor
+private final class GatedTranslationClient: CaptionTranslationClient, @unchecked Sendable {
+    private(set) var started: [String] = []
+    private var continuations: [String: AsyncThrowingStream<String, any Error>.Continuation] = [:]
+
+    func translateStream(
+        sourceText: String,
+        contextLines: [String],
+        priorDraftTranslation: String?,
+        systemInstructions: String?
+    ) -> AsyncThrowingStream<String, any Error> {
+        started.append(sourceText)
+        let (stream, continuation) = AsyncThrowingStream<String, any Error>.makeStream()
+        continuations[sourceText] = continuation
+        return stream
+    }
+
+    func translateStream(
+        sourceText: String,
+        contextLines: [String],
+        priorDraftTranslation: String?
+    ) -> AsyncThrowingStream<String, any Error> {
+        translateStream(
+            sourceText: sourceText,
+            contextLines: contextLines,
+            priorDraftTranslation: priorDraftTranslation,
+            systemInstructions: nil
+        )
+    }
+
+    func yield(_ translated: String, to sourceText: String) {
+        continuations[sourceText]?.yield(translated)
+    }
+
+    func finish(_ sourceText: String) {
+        continuations[sourceText]?.finish()
+        continuations[sourceText] = nil
+    }
+}
+
+@MainActor
 final class CaptionTranslatorTests: XCTestCase {
     func testChineseTextBypassesLLMTranslation() async {
         let fake = FakeTranslationClient()
@@ -663,6 +703,138 @@ final class CaptionTranslatorTests: XCTestCase {
         XCTAssertEqual(
             CaptionTranslationCoordinator.cleanSubtitleOutput("【当前句（请仅将此句译为简练中文字幕）】\n「智能体 AI 的热潮飙升」"),
             "智能体 AI 的热潮飙升"
+        )
+        XCTAssertEqual(
+            CaptionTranslationCoordinator.cleanSubtitleOutput("这是第一行\n这是第二行"),
+            "这是第一行这是第二行",
+            "中文之间的模型换行直接拼接，不插入空格"
+        )
+        XCTAssertEqual(
+            CaptionTranslationCoordinator.cleanSubtitleOutput("the first line\nthe second line"),
+            "the first line the second line",
+            "拉丁词之间的换行补一个空格，避免粘连"
+        )
+    }
+
+    func testFinalTranslationsAreBoundedAndQueuedInArrivalOrder() async throws {
+        let client = GatedTranslationClient()
+        let coordinator = CaptionTranslationCoordinator(
+            maximumConcurrentFinalTranslations: 1,
+            makeClient: { client }
+        )
+        let firstFinished = expectation(description: "first finished")
+        let secondFinished = expectation(description: "second finished")
+        var finished: [String] = []
+
+        coordinator.translateCompletedLine(
+            lineID: "line-1",
+            sourceText: "First English sentence.",
+            contextLines: [],
+            displayMode: .bilingual,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, translated, _ in
+                finished.append(translated ?? "")
+                firstFinished.fulfill()
+            }
+        )
+        coordinator.translateCompletedLine(
+            lineID: "line-2",
+            sourceText: "Second English sentence.",
+            contextLines: [],
+            displayMode: .bilingual,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, translated, _ in
+                finished.append(translated ?? "")
+                secondFinished.fulfill()
+            }
+        )
+
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(
+            client.started, ["First English sentence."],
+            "并发上限为 1 时，第二句必须排队而不是同时打到模型"
+        )
+
+        client.yield("第一句", to: "First English sentence.")
+        client.finish("First English sentence.")
+        await fulfillment(of: [firstFinished], timeout: 1)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(
+            client.started, ["First English sentence.", "Second English sentence."],
+            "第一句收口后队列才推进到第二句"
+        )
+
+        client.yield("第二句", to: "Second English sentence.")
+        client.finish("Second English sentence.")
+        await fulfillment(of: [secondFinished], timeout: 1)
+        XCTAssertEqual(finished, ["第一句", "第二句"])
+    }
+
+    func testFinalTranslationMetricsRecordQueueWaitFirstDeltaAndCompletion() async throws {
+        let fake = FakeTranslationClient()
+        let coordinator = CaptionTranslationCoordinator(makeClient: { fake })
+        let finished = expectation(description: "finished")
+
+        coordinator.translateCompletedLine(
+            lineID: "line-metrics",
+            sourceText: "Hello from the metrics test.",
+            contextLines: [],
+            displayMode: .bilingual,
+            requestedAt: Date().addingTimeInterval(-1),
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, _, _ in finished.fulfill() }
+        )
+        await fulfillment(of: [finished], timeout: 1)
+
+        let metrics = coordinator.metrics
+        XCTAssertEqual(metrics.finalRequests, 1)
+        XCTAssertEqual(metrics.finalCompleted, 1)
+        XCTAssertEqual(metrics.finalFailed, 0)
+        XCTAssertEqual(metrics.finalQueueWait.count, 1)
+        XCTAssertEqual(metrics.finalFirstDelta.count, 1)
+        XCTAssertEqual(metrics.finalCompletion.count, 1)
+        XCTAssertGreaterThanOrEqual(
+            metrics.finalQueueWait.maximumMilliseconds, 1_000,
+            "requestedAt 来自定稿到达时刻，队列等待应包含此前的落库等待"
+        )
+        XCTAssertGreaterThanOrEqual(metrics.finalCompletion.maximumMilliseconds, 1_000)
+    }
+
+    func testCancelAllDropsQueuedFinalAndClearsTranslatingState() async throws {
+        let client = GatedTranslationClient()
+        let coordinator = CaptionTranslationCoordinator(
+            maximumConcurrentFinalTranslations: 1,
+            makeClient: { client }
+        )
+        let queuedFinished = expectation(description: "queued finished")
+
+        coordinator.translateCompletedLine(
+            lineID: "line-running",
+            sourceText: "Running English sentence.",
+            contextLines: [],
+            displayMode: .bilingual,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, _, _ in }
+        )
+        coordinator.translateCompletedLine(
+            lineID: "line-queued",
+            sourceText: "Queued English sentence.",
+            contextLines: [],
+            displayMode: .bilingual,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, translated, _ in
+                XCTAssertNil(translated, "取消的排队行不应把预览草稿当定稿落库")
+                queuedFinished.fulfill()
+            }
+        )
+
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(client.started, ["Running English sentence."])
+        coordinator.cancelAll()
+        await fulfillment(of: [queuedFinished], timeout: 1)
+        XCTAssertEqual(
+            client.started, ["Running English sentence."],
+            "cancelAll 后排队行不得再发起模型请求"
         )
     }
 }

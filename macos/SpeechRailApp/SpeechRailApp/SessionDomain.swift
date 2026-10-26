@@ -347,6 +347,14 @@ public enum CaptionSourceLanguage: String, CaseIterable, Codable, Identifiable, 
         case .chinese: "中文"
         }
     }
+
+    /// 传给 Realtime ASR 握手的 BCP-47 语言码；`自动` 留空，交给服务端检测。
+    ///
+    /// 与 `rawValue` 分开写是为了让契约字段的语义显式：`sourceLanguage` 同时影响
+    /// 识别与翻译，只有非自动档才应该锁死识别语言。中英混说仍应保留自动。
+    public var asrLanguageCode: String? {
+        self == .auto ? nil : rawValue
+    }
 }
 
 /// 字幕浮层与目标窗口的绑定状态（决策 D3）。
