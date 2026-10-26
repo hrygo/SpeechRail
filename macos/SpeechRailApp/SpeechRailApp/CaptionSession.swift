@@ -21,6 +21,8 @@ public struct CaptionRealtimeClientConfiguration: Sendable, Equatable {
     public var windowScene: SpeechRailWindowScene?
     /// 用户选定的源语言；`nil` 表示自动识别。只在建连时生效。
     public var language: String?
+    /// 字幕术语表的原文词条，随建连传给 ASR 作为专名提示。
+    public var keywords: [String]?
 
     public init(
         port: Int,
@@ -29,7 +31,8 @@ public struct CaptionRealtimeClientConfiguration: Sendable, Equatable {
         apiKey: String?,
         expectedASRRevision: String?,
         windowScene: SpeechRailWindowScene? = nil,
-        language: String? = nil
+        language: String? = nil,
+        keywords: [String]? = nil
     ) {
         self.port = port
         self.scenePreset = scenePreset
@@ -38,6 +41,7 @@ public struct CaptionRealtimeClientConfiguration: Sendable, Equatable {
         self.expectedASRRevision = expectedASRRevision
         self.windowScene = windowScene
         self.language = language
+        self.keywords = keywords
     }
 }
 
@@ -72,6 +76,7 @@ public struct CaptionSessionDependencies: Sendable {
             RealtimeASRClient(
                 port: configuration.port,
                 language: configuration.language,
+                keywords: configuration.keywords,
                 scenePreset: configuration.scenePreset,
                 windowScene: configuration.windowScene,
                 diarizationEnabled: configuration.diarizationEnabled,
@@ -437,7 +442,8 @@ public final class CaptionSession {
             sourceText: text,
             contextLines: context,
             displayMode: effectiveDisplayMode,
-            preferredLanguage: sourceLanguage
+            preferredLanguage: sourceLanguage,
+            glossary: glossary
         ) { [weak self] translated in
             guard let self else { return }
             self.partialTranslatedText = translated
@@ -550,6 +556,24 @@ public final class CaptionSession {
     /// 本场字幕的翻译延迟/队列/成败汇总；只含毫秒与计数，不含正文。
     public var translationMetrics: CaptionTranslationMetrics {
         translationCoordinator.metrics
+    }
+    /// 字幕术语表原文（逗号/分号/换行分隔，可写「原文=译法」），持久化到 UserDefaults。
+    ///
+    /// 只影响字幕：原文词条随下一次建连喂给 ASR `keywords`，完整条目注入翻译提示词。
+    /// 输入上限 2000 字符；实际生效最多 24 条，避免撑大握手与提示词。
+    public var glossaryText: String {
+        didSet {
+            let bounded = String(glossaryText.prefix(2_000))
+            if bounded != glossaryText {
+                glossaryText = bounded
+                return
+            }
+            defaults.set(glossaryText, forKey: "speechrail.caption.glossaryText")
+        }
+    }
+    /// 由 `glossaryText` 解析出的当前术语表。
+    public var glossary: CaptionGlossary {
+        CaptionGlossary(text: glossaryText)
     }
     /// 字幕音频源语种（自动识别 / 英语 / 日语 / 韩语 / 中文），持久化到 UserDefaults。
     ///
@@ -739,6 +763,7 @@ public final class CaptionSession {
         self.defaults = defaults
         // 翻译默认关：旧版本没有这个键时 `bool` 返回 false，正好是「用户没主动打开」。
         self.translationEnabled = defaults.bool(forKey: "speechrail.caption.translationEnabled")
+        self.glossaryText = defaults.string(forKey: "speechrail.caption.glossaryText") ?? ""
         if let raw = defaults.string(forKey: "speechrail.caption.displayMode"),
            let mode = CaptionDisplayMode(rawValue: raw),
            mode != .originalOnly {
@@ -1041,7 +1066,8 @@ public final class CaptionSession {
                     apiKey: apiKey,
                     expectedASRRevision: binding?.asrModelRevision,
                     windowScene: windowEnabled ? .caption : nil,
-                    language: sourceLanguage.asrLanguageCode
+                    language: sourceLanguage.asrLanguageCode,
+                    keywords: glossary.asrKeywords.isEmpty ? nil : glossary.asrKeywords
                 )
             )
         }
@@ -1439,7 +1465,8 @@ public final class CaptionSession {
                     apiKey: apiKey,
                     expectedASRRevision: binding?.asrModelRevision,
                     windowScene: windowEnabled ? .caption : nil,
-                    language: sourceLanguage.asrLanguageCode
+                    language: sourceLanguage.asrLanguageCode,
+                    keywords: glossary.asrKeywords.isEmpty ? nil : glossary.asrKeywords
                 )
             )
         }
@@ -1937,6 +1964,7 @@ public final class CaptionSession {
             preferredLanguage: sourceLanguage,
             priorDraftHint: initialDraftTranslation,
             requestedAt: requestedAt,
+            glossary: glossary,
             onStreamingUpdate: { [weak self] id, partialTranslation in
                 self?.transcriptPresentation.update(id: id) {
                     $0.translatedText = partialTranslation

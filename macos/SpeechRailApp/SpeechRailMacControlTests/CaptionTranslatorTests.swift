@@ -9,6 +9,7 @@ final class FakeTranslationClient: CaptionTranslationClient, @unchecked Sendable
     var lastSourceText: String?
     var lastContextLines: [String]?
     var lastPriorDraftTranslation: String?
+    var lastSystemInstructions: String?
     var priorDrafts: [String?] = []
     var streamDeltas: [String] = ["中文", "译文"]
     var failure: (any Error)?
@@ -17,6 +18,20 @@ final class FakeTranslationClient: CaptionTranslationClient, @unchecked Sendable
     /// 从第 N 次调用起：一个字符都不吐就直接失败（模拟首字超时、模型不可用）。
     /// 用来构造"预览还在飞（协调器侧还没有已完成预览）→ 精翻一上来就失败"的时序。
     var failImmediatelyFromCall: Int?
+
+    func translateStream(
+        sourceText: String,
+        contextLines: [String],
+        priorDraftTranslation: String?,
+        systemInstructions: String?
+    ) -> AsyncThrowingStream<String, any Error> {
+        lastSystemInstructions = systemInstructions
+        return translateStream(
+            sourceText: sourceText,
+            contextLines: contextLines,
+            priorDraftTranslation: priorDraftTranslation
+        )
+    }
 
     func translateStream(
         sourceText: String,
@@ -161,6 +176,56 @@ final class CaptionTranslatorTests: XCTestCase {
         XCTAssertEqual(fake.callCount, 1)
         XCTAssertEqual(finishedTranslation, "今天天气真好")
         XCTAssertEqual(finishedLang, "ja")
+    }
+
+    func testGlossaryParsesEntriesAndInjectsIntoPrompt() {
+        let glossary = CaptionGlossary(
+            text: "SpeechRail=语音轨道, Transformer → 变换器，bad, =空, SpeechRail=重复"
+        )
+
+        XCTAssertEqual(glossary.entries.map(\.source), ["SpeechRail", "Transformer", "bad"])
+        XCTAssertEqual(glossary.entries[0].translation, "语音轨道")
+        XCTAssertEqual(glossary.entries[1].translation, "变换器")
+        XCTAssertNil(glossary.entries[2].translation)
+        XCTAssertEqual(glossary.asrKeywords, ["SpeechRail", "Transformer", "bad"])
+
+        let prompt = CaptionTranslationCoordinator.systemInstructions(
+            for: .english,
+            glossary: glossary
+        )
+        XCTAssertTrue(prompt.contains("SpeechRail → 语音轨道"))
+        XCTAssertTrue(prompt.contains("Transformer → 变换器"))
+        XCTAssertTrue(prompt.contains("bad（保持原文）"))
+        XCTAssertTrue(prompt.contains("术语表"))
+    }
+
+    func testGlossaryCapsEntries() {
+        let text = (1...30).map { "term\($0)=译\($0)" }.joined(separator: ",")
+        let glossary = CaptionGlossary(text: text)
+        XCTAssertEqual(glossary.entries.count, 24)
+        XCTAssertEqual(glossary.entries.last?.source, "term24")
+    }
+
+    func testCompletedTranslationPassesGlossaryToModel() async {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["语音轨道"]
+        let coordinator = CaptionTranslationCoordinator(makeClient: { fake })
+        let expectation = expectation(description: "Translation finished")
+
+        coordinator.translateCompletedLine(
+            lineID: "line-glossary-1",
+            sourceText: "SpeechRail keeps audio local",
+            contextLines: [],
+            displayMode: .bilingual,
+            glossary: CaptionGlossary(text: "SpeechRail=语音轨道, Realtime=实时"),
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, _, _ in expectation.fulfill() }
+        )
+
+        await fulfillment(of: [expectation], timeout: 2.0)
+        let instructions = try? XCTUnwrap(fake.lastSystemInstructions)
+        XCTAssertTrue(instructions?.contains("SpeechRail → 语音轨道") == true)
+        XCTAssertTrue(instructions?.contains("Realtime → 实时") == true)
     }
 
     func testPartialTranslationDebouncesAndCancelsStaleInFlight() async {
@@ -713,6 +778,11 @@ final class CaptionTranslatorTests: XCTestCase {
             CaptionTranslationCoordinator.cleanSubtitleOutput("the first line\nthe second line"),
             "the first line the second line",
             "拉丁词之间的换行补一个空格，避免粘连"
+        )
+        XCTAssertEqual(
+            CaptionTranslationCoordinator.cleanSubtitleOutput("你是做什么工作的？\n我帮家庭通过保险和投资\n赚钱和省钱。\n好，不错。你想赢钱吗？\n当然想。好。"),
+            "你是做什么工作的？我帮家庭通过保险和投资赚钱和省钱。好，不错。你想赢钱吗？当然想。好。",
+            "带标点和断句的多行中文换行应平滑连接，避免在界面上断层"
         )
     }
 

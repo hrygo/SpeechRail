@@ -141,6 +141,81 @@ public struct CaptionContextTurn: Equatable, Sendable {
     }
 }
 
+/// 字幕术语表：解析用户输入的「原文=译法」条目，同时供 ASR keywords 与翻译提示词使用。
+///
+/// 输入用逗号/分号/换行分隔；`=`、`→`、`->` 都可作为原文与译法的分隔符。
+/// 只保留前 24 条、每段最多 40 个字符，避免把提示词或握手撑爆。
+public struct CaptionGlossary: Equatable, Sendable {
+    public struct Entry: Equatable, Sendable, Identifiable {
+        public let source: String
+        public let translation: String?
+
+        public var id: String { source.lowercased() }
+
+        public var promptLine: String {
+            if let translation, !translation.isEmpty {
+                return "\(source) → \(translation)"
+            }
+            return "\(source)（保持原文）"
+        }
+    }
+
+    public static let empty = CaptionGlossary(entries: [])
+
+    public let entries: [Entry]
+
+    public init(entries: [Entry]) {
+        self.entries = Array(entries.prefix(24))
+    }
+
+    public init(text: String, maximumEntries: Int = 24) {
+        let chunks = text.components(
+            separatedBy: CharacterSet(charactersIn: ",，;；\n")
+        )
+        var seen = Set<String>()
+        var parsed: [Entry] = []
+        for chunk in chunks {
+            let trimmed = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let normalized = trimmed
+                .replacingOccurrences(of: "->", with: "→")
+                .replacingOccurrences(of: "＝", with: "=")
+            let sourcePart: String
+            let translationPart: String?
+            if let separator = normalized.firstIndex(where: { $0 == "=" || $0 == "→" }) {
+                sourcePart = String(normalized[..<separator])
+                let target = normalized[normalized.index(after: separator)...]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                translationPart = target.isEmpty ? nil : String(target.prefix(40))
+            } else {
+                sourcePart = normalized
+                translationPart = nil
+            }
+            let source = sourcePart
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\n", with: " ")
+            guard !source.isEmpty else { continue }
+            let boundedSource = String(source.prefix(40))
+            let key = boundedSource.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            parsed.append(Entry(source: boundedSource, translation: translationPart))
+            if parsed.count >= maximumEntries { break }
+        }
+        self.entries = parsed
+    }
+
+    /// 只把原文喂给 ASR 的 `keywords`，避免把中文译法当成识别词。
+    public var asrKeywords: [String] {
+        entries.map(\.source)
+    }
+
+    public var promptSuffix: String {
+        guard !entries.isEmpty else { return "" }
+        let lines = entries.map { "- \($0.promptLine)" }.joined(separator: "\n")
+        return "\n\n【术语表（请优先采用下列专名与术语译法）】\n\(lines)"
+    }
+}
+
 /// 翻译延迟直方图：只保存毫秒数与分桶计数，不保存原文、译文或任何可识别内容。
 ///
 /// 分桶上界用于近似 p50/p95；超过最后一个上界的样本落入溢出桶，`percentile`
@@ -266,10 +341,14 @@ public final class CaptionTranslationCoordinator {
     5. 若原文已经是通顺的中文，原样输出即可。
     """
 
-    public static func systemInstructions(for preferredLanguage: CaptionSourceLanguage = .auto) -> String {
+    public static func systemInstructions(
+        for preferredLanguage: CaptionSourceLanguage = .auto,
+        glossary: CaptionGlossary = .empty
+    ) -> String {
+        let base: String
         switch preferredLanguage {
         case .english:
-            return """
+            base = """
             你是一个专业的实时视频中文字幕翻译引擎。源语言为英语。请将用户输入的【当前句】直接翻译为自然、简练、符合中文母语影视字幕习惯的简体中文。
             硬性规则：
             1. 只输出【当前句】对应的中文译文本身，严禁输出任何引号、前缀标签、解释说明、思考过程或多余空行。
@@ -280,7 +359,7 @@ public final class CaptionTranslationCoordinator {
             6. 若原文已经是通顺的中文，原样输出即可。
             """
         case .japanese:
-            return """
+            base = """
             你是一个专业的实时视频中文字幕翻译引擎。源语言为日语（SOV结构）。请将用户输入的【当前句】直接翻译为自然、简练的简体中文。
             硬性规则：
             1. 只输出【当前句】对应的中文译文本身，严禁输出任何引号、前缀标签、解释说明、思考过程或多余空行。
@@ -291,7 +370,7 @@ public final class CaptionTranslationCoordinator {
             6. 若原文已经是通顺的中文，原样输出即可。
             """
         case .korean:
-            return """
+            base = """
             你是一个专业的实时视频中文字幕翻译引擎。源语言为韩语（SOV结构）。请将用户输入的【当前句】直接翻译为自然、简练的简体中文。
             硬性规则：
             1. 只输出【当前句】对应的中文译文本身，严禁输出任何引号、前缀标签、解释说明、思考过程或多余空行。
@@ -302,8 +381,9 @@ public final class CaptionTranslationCoordinator {
             6. 若原文已经是通顺的中文，原样输出即可。
             """
         default:
-            return Self.systemInstructions
+            base = Self.systemInstructions
         }
+        return base + glossary.promptSuffix
     }
 
     private let makeClient: @MainActor () -> (any CaptionTranslationClient)?
@@ -346,6 +426,7 @@ public final class CaptionTranslationCoordinator {
     private var pendingPartialContextLines: [String] = []
     private var pendingPartialDisplayMode: CaptionDisplayMode = .bilingual
     private var pendingPartialPreferredLanguage: CaptionSourceLanguage = .auto
+    private var pendingPartialGlossary: CaptionGlossary = .empty
     private var latestPartialOnUpdate: (@MainActor (String?) -> Void)?
     private var lastPartialSourceText: String = ""
     private var lastPartialTranslation: String?
@@ -468,6 +549,7 @@ public final class CaptionTranslationCoordinator {
         contextLines: [String],
         displayMode: CaptionDisplayMode,
         preferredLanguage: CaptionSourceLanguage = .auto,
+        glossary: CaptionGlossary = .empty,
         onUpdate: @escaping @MainActor (String?) -> Void
     ) {
         let trimmed = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -498,6 +580,7 @@ public final class CaptionTranslationCoordinator {
         pendingPartialContextLines = Array(contextLines.suffix(2))
         pendingPartialDisplayMode = displayMode
         pendingPartialPreferredLanguage = preferredLanguage
+        pendingPartialGlossary = glossary
         latestPartialOnUpdate = onUpdate
 
         // 关键防饿死保护：若上一轮 Stage 1 已经结束防抖、正在接收/等待 LLM 流式增量，
@@ -528,7 +611,10 @@ public final class CaptionTranslationCoordinator {
         let debounce = partialDebounce
         let priorDraft = stabilizedDraftPrefix ?? lastPartialTranslation
         let preferredLanguage = pendingPartialPreferredLanguage
-        let instructions = Self.systemInstructions(for: preferredLanguage)
+        let instructions = Self.systemInstructions(
+            for: preferredLanguage,
+            glossary: pendingPartialGlossary
+        )
 
         partialTask?.cancel()
         isPartialDebouncing = true
@@ -633,6 +719,7 @@ public final class CaptionTranslationCoordinator {
         priorDraftHint: String? = nil,
         /// 定稿文本到达的时间；用于把落库等待和队列等待一起算进首字延迟。
         requestedAt: Date = Date(),
+        glossary: CaptionGlossary = .empty,
         onStreamingUpdate: @escaping @MainActor (String, String) -> Void,
         onFinished: @escaping @MainActor (String, String?, String) async -> Void
     ) {
@@ -687,7 +774,10 @@ public final class CaptionTranslationCoordinator {
             return
         }
 
-        let instructions = Self.systemInstructions(for: preferredLanguage)
+        let instructions = Self.systemInstructions(
+            for: preferredLanguage,
+            glossary: glossary
+        )
 
         enqueueFinal(
             FinalRequest(

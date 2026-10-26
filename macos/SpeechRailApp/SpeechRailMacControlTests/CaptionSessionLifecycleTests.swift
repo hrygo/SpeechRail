@@ -89,6 +89,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
     func testExplicitSourceLanguageIsForwardedToRealtimeASR() async throws {
         let h = try await makeHarness()
         h.session.sourceLanguage = .japanese
+        h.session.glossaryText = "SpeechRail=语音轨道, Realtime=实时"
 
         _ = try await start(h)
 
@@ -96,8 +97,27 @@ final class CaptionSessionLifecycleTests: XCTestCase {
             h.clients.madeConfigurations.last?.language, "ja",
             "用户在字幕上选定的源语言必须进入 ASR 握手，而不是只影响翻译提示词"
         )
+        XCTAssertEqual(
+            h.clients.madeConfigurations.last?.keywords,
+            ["SpeechRail", "Realtime"],
+            "术语表原文要作为 ASR 专名提示，不能把中文译法也塞进去"
+        )
         XCTAssertEqual(h.clients.madeConfigurations.last?.scenePreset, .caption)
         XCTAssertEqual(h.session.translationMetrics.finalRequests, 0)
+    }
+
+    func testGlossaryTextPersistsAndBoundsInput() async throws {
+        let h = try await makeHarness()
+        h.session.glossaryText = "SpeechRail=语音轨道"
+
+        XCTAssertEqual(
+            h.defaults.string(forKey: "speechrail.caption.glossaryText"),
+            "SpeechRail=语音轨道"
+        )
+        XCTAssertEqual(h.session.glossary.entries.first?.translation, "语音轨道")
+
+        h.session.glossaryText = String(repeating: "x", count: 2_100)
+        XCTAssertEqual(h.session.glossaryText.count, 2_000, "术语表输入要限长，避免撑大持久化与提示词")
     }
 
     private func makeHarness(
@@ -1649,6 +1669,30 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         let fake = FakeTranslationClient()
         h.session.makeTranslationClient = { fake }
         XCTAssertTrue(h.session.isTranslationAvailable)
+    }
+
+    func testClearFailureAndFormalLineResetLastFailure() async throws {
+        let h = try await makeHarness()
+        _ = try await start(h)
+
+        // 模拟说话人对齐告警
+        try await h.emit(.alignmentFailed(itemID: "align-1", code: "timestamp_unreliable", message: ""))
+        try await h.settle { $0.session.lastFailure != nil }
+        XCTAssertNotNil(h.session.lastFailure)
+
+        // 测试显式调用 clearFailure 清理
+        h.session.clearFailure()
+        XCTAssertNil(h.session.lastFailure, "clearFailure 应立即清空失败告警")
+
+        // 再次触发告警
+        try await h.emit(.alignmentFailed(itemID: "align-2", code: "timestamp_unreliable", message: ""))
+        try await h.settle { $0.session.lastFailure != nil }
+        XCTAssertNotNil(h.session.lastFailure)
+
+        // 新定稿行成功落盘时，历史告警应自动清除，不永久驻留屏幕
+        try await h.emit(.completed(itemID: "item-next", transcript: "New sentence arrived"))
+        try await h.settle { $0.session.lines.count == 1 }
+        XCTAssertNil(h.session.lastFailure, "新的定稿行成功落盘后应自动清除历史告警，避免提示永久驻留")
     }
 
     @MainActor

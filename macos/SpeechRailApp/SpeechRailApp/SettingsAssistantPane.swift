@@ -270,6 +270,19 @@ struct SettingsAssistantPane: View {
                 }
                 settingsRowSeparator
                 settingsRow {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        settingsRowLabel(
+                            "字幕术语表",
+                            caption: "用逗号分隔；可写「原文=译法」。识别和翻译都会优先使用，最多 24 个。"
+                        )
+                        TextField("例如：SpeechRail=语音轨道, Transformer=变换器", text: glossaryBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                            .accessibilityIdentifier("caption-glossary-field")
+                    }
+                }
+                settingsRowSeparator
+                settingsRow {
                     Toggle(isOn: diarizationCaptionsBinding) {
                         settingsRowLabel(
                             "字幕显示说话人",
@@ -438,6 +451,13 @@ struct SettingsAssistantPane: View {
         Binding(
             get: { caption.sourceLanguage.rawValue },
             set: { caption.sourceLanguage = CaptionSourceLanguage(rawValue: $0) ?? .auto }
+        )
+    }
+
+    private var glossaryBinding: Binding<String> {
+        Binding(
+            get: { caption.glossaryText },
+            set: { caption.glossaryText = $0 }
         )
     }
 
