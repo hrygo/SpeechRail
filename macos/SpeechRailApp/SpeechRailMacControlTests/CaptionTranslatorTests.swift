@@ -498,6 +498,7 @@ final class CaptionTranslatorTests: XCTestCase {
 
     func testPartialTranslatingStateResetsAfterFailureSoRowNeverStaysStuck() async {
         let fake = FakeTranslationClient()
+        fake.streamDeltas = []
         fake.failure = TranslationFailure()
         let coordinator = CaptionTranslationCoordinator(
             partialDebounce: .milliseconds(10),
@@ -527,6 +528,88 @@ final class CaptionTranslatorTests: XCTestCase {
         XCTAssertFalse(
             coordinator.isTranslatingPartial,
             "Stage 1 请求失败后必须复位 isTranslatingPartial，避免底部预览行永久卡在“翻译中”"
+        )
+    }
+
+    func testCompletedLineRetriesOnceWhenFirstAttemptFailsBeforeAnyDelta() async {
+        var attempt = 0
+        @MainActor final class FlakyFirstAttemptClient: CaptionTranslationClient, @unchecked Sendable {
+            let onCall: @MainActor () -> Int
+            init(onCall: @escaping @MainActor () -> Int) { self.onCall = onCall }
+            func translateStream(
+                sourceText: String,
+                contextLines: [String],
+                priorDraftTranslation: String?
+            ) -> AsyncThrowingStream<String, any Error> {
+                let current = onCall()
+                return AsyncThrowingStream { continuation in
+                    if current == 1 {
+                        continuation.finish(throwing: URLError(.networkConnectionLost))
+                    } else {
+                        continuation.yield("重试成功译文")
+                        continuation.finish()
+                    }
+                }
+            }
+        }
+
+        let flaky = FlakyFirstAttemptClient {
+            attempt += 1
+            return attempt
+        }
+        let coordinator = CaptionTranslationCoordinator(makeClient: { flaky })
+        let expectation = expectation(description: "Stage 2 retry succeeded")
+        var finalOutput: String?
+
+        coordinator.translateCompletedLine(
+            lineID: "line-retry-1",
+            sourceText: "The number of truly valuable applications has grown.",
+            contextLines: [],
+            displayMode: .bilingual,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, translated, _ in
+                finalOutput = translated
+                expectation.fulfill()
+            }
+        )
+
+        await fulfillment(of: [expectation], timeout: 2.0)
+        XCTAssertEqual(attempt, 2, "首字到达前瞬态失败应自动快速重试一次")
+        XCTAssertEqual(finalOutput, "重试成功译文")
+    }
+
+    func testCompletedLineEnrichesUnfinishedContextLineFromRecentTranslationCache() async {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["第一句译文"]
+        let coordinator = CaptionTranslationCoordinator(makeClient: { fake })
+
+        let exp1 = expectation(description: "Line 1 finished")
+        coordinator.translateCompletedLine(
+            lineID: "line-1",
+            sourceText: "First sentence here",
+            contextLines: [],
+            displayMode: .bilingual,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, _, _ in exp1.fulfill() }
+        )
+        await fulfillment(of: [exp1], timeout: 1.0)
+
+        fake.streamDeltas = ["第二句译文"]
+        let exp2 = expectation(description: "Line 2 finished")
+        // 模拟调用方在 Line 1 译文落盘前只传了「原文：First sentence here」
+        coordinator.translateCompletedLine(
+            lineID: "line-2",
+            sourceText: "Second sentence here",
+            contextLines: ["原文：First sentence here"],
+            displayMode: .bilingual,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, _, _ in exp2.fulfill() }
+        )
+        await fulfillment(of: [exp2], timeout: 1.0)
+        XCTAssertEqual(
+            fake.lastContextLines,
+            ["原文：First sentence here → 译文：第一句译文"],
+            "协调器应使用近期已完成译文缓存自动补全未带译文的上下文行"
         )
     }
 }

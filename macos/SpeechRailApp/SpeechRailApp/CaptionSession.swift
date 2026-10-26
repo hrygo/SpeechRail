@@ -497,8 +497,11 @@ public final class CaptionSession {
                 translationCoordinator.cancelPartial()
                 partialTranslatedText = nil
                 lastPartialTranslation = nil
-            } else if let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-                scheduleCurrentPartialTranslation(for: text)
+            } else {
+                retranslateUntranslatedFinalLinesIfNeeded()
+                if let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                    scheduleCurrentPartialTranslation(for: text)
+                }
             }
         }
     }
@@ -511,8 +514,11 @@ public final class CaptionSession {
                 translationCoordinator.cancelPartial()
                 partialTranslatedText = nil
                 lastPartialTranslation = nil
-            } else if let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-                scheduleCurrentPartialTranslation(for: text)
+            } else {
+                retranslateUntranslatedFinalLinesIfNeeded()
+                if let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                    scheduleCurrentPartialTranslation(for: text)
+                }
             }
         }
     }
@@ -1665,7 +1671,12 @@ public final class CaptionSession {
     private func commit(_ item: TranscriptPreviewLedger.CommittedItem) async {
         let formal = item.recoveryNote == nil
         let text = (item.recoveryNote?.text ?? item.finalText).trimmingCharacters(in: .whitespacesAndNewlines)
-        partialText = formal ? nil : text
+        if formal {
+            partialTranslatedText = nil
+            partialText = previewLedger.visiblePartial
+        } else {
+            partialText = text
+        }
         if !formal { lastFailure = "有一句话没有拿到定稿正文，正在保留恢复内容。" }
         acceptTranscript(
             text: text, itemID: item.itemID, identity: item.identity,
@@ -1751,6 +1762,7 @@ public final class CaptionSession {
                 preferredLanguage: sourceLanguage
             )
             lastPartialTranslation = nil
+            partialTranslatedText = nil
             let lineID = command.lineID
             let sourceText = command.text
             let willTranslate = Self.shouldTranslate(
@@ -1769,40 +1781,11 @@ public final class CaptionSession {
                     isTranslating: willTranslate
                 ))
 
-            translationCoordinator.translateCompletedLine(
+            startStageTwoTranslation(
                 lineID: lineID,
                 sourceText: sourceText,
                 contextLines: contextLines,
-                displayMode: displayMode,
-                preferredLanguage: sourceLanguage,
-                onStreamingUpdate: { [weak self] id, partialTranslation in
-                    self?.transcriptPresentation.update(id: id) {
-                        $0.translatedText = partialTranslation
-                        $0.isTranslating = true
-                    }
-                },
-                onFinished: { [weak self] id, finalTranslation, lang in
-                    guard let self else { return }
-                    // 终态不许把已经上屏的译文抹掉。Stage 2 在首个字符之前就失败时
-                    // （没有可用客户端、网络错、首字超时），协调器给不出终稿，而这一行在
-                    // 定稿瞬间已经继承了预览草稿；退回 nil 等于「中文闪回外语」，
-                    // 正是铁律 4 与 DoD 要消除的那一片空白。
-                    let resolvedTranslation = finalTranslation ?? initialDraftTranslation
-                    self.transcriptPresentation.update(id: id) {
-                        if let resolvedTranslation { $0.translatedText = resolvedTranslation }
-                        $0.sourceLanguage = lang
-                        $0.isTranslating = false
-                    }
-                    if resolvedTranslation != nil || !lang.isEmpty {
-                        Task {
-                            try? await self.coordinator.attachLineTranslation(
-                                lineID: id,
-                                translatedText: resolvedTranslation,
-                                sourceLanguage: lang.isEmpty ? nil : lang
-                            )
-                        }
-                    }
-                }
+                initialDraftTranslation: initialDraftTranslation
             )
         }
         guard let payload = pendingAttributions.take(recordID: command.sessionID, identity: itemIdentity),
@@ -1811,6 +1794,84 @@ public final class CaptionSession {
             recordID: command.sessionID, identity: identity, lineID: command.lineID, ordinal: ordinal,
             units: payload.units, labelsEnabled: payload.labelsEnabled
         )
+    }
+
+    private func startStageTwoTranslation(
+        lineID: String,
+        sourceText: String,
+        contextLines: [String],
+        initialDraftTranslation: String?
+    ) {
+        translationCoordinator.translateCompletedLine(
+            lineID: lineID,
+            sourceText: sourceText,
+            contextLines: contextLines,
+            displayMode: displayMode,
+            preferredLanguage: sourceLanguage,
+            onStreamingUpdate: { [weak self] id, partialTranslation in
+                self?.transcriptPresentation.update(id: id) {
+                    $0.translatedText = partialTranslation
+                    $0.isTranslating = true
+                }
+            },
+            onFinished: { [weak self] id, finalTranslation, lang in
+                guard let self else { return }
+                // 终态不许把已经上屏的译文抹掉。Stage 2 在首个字符之前就失败时
+                // （没有可用客户端、网络错、首字超时），协调器给不出终稿，而这一行在
+                // 定稿瞬间已经继承了预览草稿；退回 nil 等于「中文闪回外语」，
+                // 正是铁律 4 与 DoD 要消除的那一片空白。
+                let resolvedTranslation = finalTranslation ?? initialDraftTranslation
+                self.transcriptPresentation.update(id: id) {
+                    if let resolvedTranslation { $0.translatedText = resolvedTranslation }
+                    $0.sourceLanguage = lang
+                    $0.isTranslating = false
+                }
+                if resolvedTranslation != nil || !lang.isEmpty {
+                    Task {
+                        try? await self.coordinator.attachLineTranslation(
+                            lineID: id,
+                            translatedText: resolvedTranslation,
+                            sourceLanguage: lang.isEmpty ? nil : lang
+                        )
+                    }
+                }
+            }
+        )
+    }
+
+    /// 当用户在会话中从「仅原文」切换到「双语对照 / 仅中文」或切换源语种时，自动补翻近期尚未翻译的定稿外语行。
+    private func retranslateUntranslatedFinalLinesIfNeeded() {
+        guard displayMode != .originalOnly, sourceLanguage != .chinese, makeTranslationClient?() != nil else { return }
+        let snapshot = lines
+        let recentIDs = Set(snapshot.suffix(6).map(\.id))
+        for (index, line) in snapshot.enumerated() where recentIDs.contains(line.id) {
+            guard (line.translatedText ?? "").isEmpty, !line.isTranslating else { continue }
+            guard Self.shouldTranslate(
+                text: line.text,
+                displayMode: displayMode,
+                preferredLanguage: sourceLanguage,
+                hasTranslationClient: true
+            ) else { continue }
+            let contextLines = Array(
+                snapshot[..<index]
+                    .suffix(3)
+                    .map {
+                        CaptionContextTurn(
+                            sourceText: $0.text,
+                            translatedText: $0.translatedText
+                        ).formattedPromptLine
+                    }
+            )
+            transcriptPresentation.update(id: line.id) {
+                $0.isTranslating = true
+            }
+            startStageTwoTranslation(
+                lineID: line.id,
+                sourceText: line.text,
+                contextLines: contextLines,
+                initialDraftTranslation: nil
+            )
+        }
     }
 
     private func sessionRelativeInputTimes(

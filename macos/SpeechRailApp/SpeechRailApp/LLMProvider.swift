@@ -1560,6 +1560,8 @@ public actor LLMProvider {
             var lineBytes: [UInt8] = []
             var rawBytes = Data()
             var sawSSEDataLine = false
+            var emittedAnyDelta = false
+            var sseInlineErrorMessage: String?
 
             func consumeSSELine(_ line: String) throws -> Bool {
                 let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1568,18 +1570,29 @@ public actor LLMProvider {
                 let payload = trimmedLine.dropFirst(5).trimmingCharacters(in: .whitespaces)
                 if payload == "[DONE]" { return true }
                 guard let data = payload.data(using: .utf8),
-                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let choices = object["choices"] as? [[String: Any]],
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { return false }
+
+                if let errorObj = object["error"] as? [String: Any],
+                   let msg = errorObj["message"] as? String, !msg.isEmpty {
+                    sseInlineErrorMessage = msg
+                } else if let errorStr = object["error"] as? String, !errorStr.isEmpty {
+                    sseInlineErrorMessage = errorStr
+                }
+
+                guard let choices = object["choices"] as? [[String: Any]],
                       let first = choices.first
                 else { return false }
 
                 if let delta = first["delta"] as? [String: Any],
                    let content = delta["content"] as? String,
                    !content.isEmpty {
+                    emittedAnyDelta = true
                     try onDelta(content)
                 } else if let message = first["message"] as? [String: Any],
                           let content = message["content"] as? String,
                           !content.isEmpty {
+                    emittedAnyDelta = true
                     try onDelta(content)
                 }
                 return false
@@ -1611,17 +1624,113 @@ public actor LLMProvider {
                    let message = first["message"] as? [String: Any],
                    let content = message["content"] as? String,
                    !content.isEmpty {
+                    emittedAnyDelta = true
                     try onDelta(content)
+                }
+                if !emittedAnyDelta {
+                    // 网关在 200 SSE 流内报错或空流提前闭合时，自动降级尝试一次非流式 /chat/completions
+                    if let fallbackText = try? await completeChatTranslation(
+                        url: url,
+                        configuration: configuration,
+                        prompt: prompt,
+                        instructions: instructions,
+                        apiKey: apiKey,
+                        maxOutputTokens: maxOutputTokens,
+                        timeout: timeout,
+                        sessionID: sessionID,
+                        includeThinkingControl: includeThinkingControl,
+                        useCompletionTokenLimit: useCompletionTokenLimit
+                    ), !fallbackText.isEmpty {
+                        try onDelta(fallbackText)
+                        return
+                    }
+                    if let sseInlineErrorMessage {
+                        throw LLMError.transport(sseInlineErrorMessage)
+                    }
                 }
                 return
             } catch {
                 if error is CancellationError || (error as? URLError)?.code == .cancelled {
                     throw LLMError.cancelled
                 }
+                if !emittedAnyDelta,
+                   let fallbackText = try? await completeChatTranslation(
+                       url: url,
+                       configuration: configuration,
+                       prompt: prompt,
+                       instructions: instructions,
+                       apiKey: apiKey,
+                       maxOutputTokens: maxOutputTokens,
+                       timeout: timeout,
+                       sessionID: sessionID,
+                       includeThinkingControl: includeThinkingControl,
+                       useCompletionTokenLimit: useCompletionTokenLimit
+                   ), !fallbackText.isEmpty {
+                    try onDelta(fallbackText)
+                    return
+                }
                 throw error
             }
         }
         throw LLMError.transport("字幕翻译请求未完成")
+    }
+
+    /// 当网关不支持 `stream: true` 或 SSE 提前空流断开时的非流式 `/chat/completions` 兜底请求。
+    private func completeChatTranslation(
+        url: URL,
+        configuration: LLMConfiguration,
+        prompt: String,
+        instructions: String,
+        apiKey: String?,
+        maxOutputTokens: Int,
+        timeout: TimeInterval,
+        sessionID: String,
+        includeThinkingControl: Bool,
+        useCompletionTokenLimit: Bool
+    ) async throws -> String {
+        try Task.checkCancellation()
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("SpeechRail/caption-translator", forHTTPHeaderField: "User-Agent")
+        if configuration.compatibilityMode.usesOpenCodeSessionHeader {
+            request.setValue(sessionID, forHTTPHeaderField: "x-opencode-session")
+        }
+        if let apiKey, !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        var body: [String: Any] = [
+            "model": configuration.model,
+            "messages": [
+                ["role": "system", "content": instructions],
+                ["role": "user", "content": prompt]
+            ],
+            "stream": false,
+            "temperature": 0
+        ]
+        body[useCompletionTokenLimit ? "max_completion_tokens" : "max_tokens"] = maxOutputTokens
+        if includeThinkingControl {
+            switch configuration.compatibilityMode.chatThinkingControl {
+            case .standard:
+                body["reasoning_effort"] = "none"
+            case .openCodeNative:
+                body["thinking"] = ["type": "disabled"]
+            case .localTemplate:
+                body["chat_template_kwargs"] = ["enable_thinking": false]
+            }
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await perform(request, timeout: timeout)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = object["choices"] as? [[String: Any]],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any],
+              let content = message["content"] as? String
+        else { return "" }
+        return content.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 一次性补全（内心 OS 与纪要都用它）。`store=false`：不用服务端会话状态。

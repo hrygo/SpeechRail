@@ -252,12 +252,20 @@ public final class CaptionTranslationCoordinator {
 
     private var partialTask: Task<Void, Never>?
     private var isPartialDebouncing = false
+    private var isPartialRequestInFlight = false
+    private var inFlightPartialSourceText: String = ""
+    private var inFlightPartialTranslation: String?
     private var pendingPartialSourceText: String = ""
     private var pendingPartialContextLines: [String] = []
+    private var pendingPartialDisplayMode: CaptionDisplayMode = .bilingual
+    private var pendingPartialPreferredLanguage: CaptionSourceLanguage = .auto
+    private var latestPartialOnUpdate: (@MainActor (String?) -> Void)?
     private var lastPartialSourceText: String = ""
     private var lastPartialTranslation: String?
     private var stabilizedDraftPrefix: String?
     private var finalTasks: [String: Task<Void, Never>] = [:]
+    private var recentCompletedTranslations: [String: String] = [:]
+    private var recentCompletedOrder: [String] = []
 
     public init(
         partialDebounce: Duration = .milliseconds(450),
@@ -273,9 +281,13 @@ public final class CaptionTranslationCoordinator {
         partialTask?.cancel()
         partialTask = nil
         isPartialDebouncing = false
+        isPartialRequestInFlight = false
         isTranslatingPartial = false
+        inFlightPartialSourceText = ""
+        inFlightPartialTranslation = nil
         pendingPartialSourceText = ""
         pendingPartialContextLines = []
+        latestPartialOnUpdate = nil
         lastPartialSourceText = ""
         lastPartialTranslation = nil
         stabilizedDraftPrefix = nil
@@ -285,6 +297,34 @@ public final class CaptionTranslationCoordinator {
         cancelPartial()
         for task in finalTasks.values { task.cancel() }
         finalTasks.removeAll()
+        recentCompletedTranslations.removeAll()
+        recentCompletedOrder.removeAll()
+    }
+
+    private func recordCompletedTranslation(sourceText: String, translatedText: String) {
+        let key = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let val = translatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !val.isEmpty, key != val else { return }
+        if recentCompletedTranslations[key] == nil {
+            recentCompletedOrder.append(key)
+            if recentCompletedOrder.count > 12 {
+                let oldest = recentCompletedOrder.removeFirst()
+                recentCompletedTranslations.removeValue(forKey: oldest)
+            }
+        }
+        recentCompletedTranslations[key] = val
+    }
+
+    /// 若入参 `contextLines` 因前一句并发 Stage 2 尚未收口而只带了 `原文：xxx`，用已完成的译文缓存自动补全双语对照。
+    private func enrichContextLines(_ lines: [String]) -> [String] {
+        lines.map { line in
+            guard line.hasPrefix("原文："), !line.contains(" → 译文：") else { return line }
+            let src = String(line.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if let tgt = recentCompletedTranslations[src], !tgt.isEmpty {
+                return "原文：\(src) → 译文：\(tgt)"
+            }
+            return line
+        }
     }
 
     /// 计算相邻两次译文的 LocalAgreement-2 稳定前缀。
@@ -331,35 +371,59 @@ public final class CaptionTranslationCoordinator {
             return
         }
 
-        // 防抖睡眠期间到达的新增文本实时刷新待翻快照，确保防抖结束时发送最新完整前缀而非旧快照。
+        // 实时刷新待翻快照与最新回调，确保防抖结束或当前在途流收口后直接消费最新完整句子。
         pendingPartialSourceText = trimmed
         pendingPartialContextLines = Array(contextLines.suffix(2))
+        pendingPartialDisplayMode = displayMode
+        pendingPartialPreferredLanguage = preferredLanguage
+        latestPartialOnUpdate = onUpdate
+
+        // 关键防饿死保护：若上一轮 Stage 1 已经结束防抖、正在接收/等待 LLM 流式增量，
+        // 且当前新到达的 partial 仍是同一句话的順延增长（共享公共前缀），绝不中途 cancel 在途请求！
+        // 否则连续语流每 0.5s 新增 10 个字符就会无限打断在途流，导致整句 10 秒内没有任何预览译文产出。
+        if isPartialRequestInFlight, !inFlightPartialSourceText.isEmpty {
+            let sharedPrefixCount = trimmed.commonPrefix(with: inFlightPartialSourceText).count
+            let isContinuation = trimmed.hasPrefix(inFlightPartialSourceText)
+                || sharedPrefixCount >= Swift.min(8, Swift.max(4, inFlightPartialSourceText.count - 3))
+            if isContinuation {
+                return
+            }
+        }
 
         let charDelta = abs(trimmed.count - lastPartialSourceText.count)
         let endsWithClauseBoundary = trimmed.last.map { ",.;?!，。；？！、".contains($0) } ?? false
         guard charDelta >= minimumPartialDeltaChars || endsWithClauseBoundary else { return }
 
+        launchPartialTask(initialSourceSnapshot: trimmed)
+    }
+
+    private func launchPartialTask(initialSourceSnapshot: String) {
         guard let client = makeClient() else {
             isTranslatingPartial = false
             return
         }
-        lastPartialSourceText = trimmed
+        lastPartialSourceText = initialSourceSnapshot
         let debounce = partialDebounce
-        // 软锚定：上一轮草稿（或已稳定前缀）随提示词下发，模型可重排但不该无理由换词。
         let priorDraft = stabilizedDraftPrefix ?? lastPartialTranslation
+        let preferredLanguage = pendingPartialPreferredLanguage
         let instructions = Self.systemInstructions(for: preferredLanguage)
 
         partialTask?.cancel()
         isPartialDebouncing = true
-        isTranslatingPartial = true
+        isPartialRequestInFlight = false
+        isTranslatingPartial = (lastPartialTranslation == nil && inFlightPartialTranslation == nil)
         partialTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: debounce)
                 try Task.checkCancellation()
                 guard let self else { return }
                 self.isPartialDebouncing = false
-                let latestSource = self.pendingPartialSourceText.isEmpty ? trimmed : self.pendingPartialSourceText
-                let latestContext = self.pendingPartialContextLines
+                self.isPartialRequestInFlight = true
+                let latestSource = self.pendingPartialSourceText.isEmpty
+                    ? initialSourceSnapshot
+                    : self.pendingPartialSourceText
+                let latestContext = self.enrichContextLines(self.pendingPartialContextLines)
+                self.inFlightPartialSourceText = latestSource
                 self.lastPartialSourceText = latestSource
                 var accumulated = ""
                 for try await delta in client.translateStream(
@@ -373,18 +437,32 @@ public final class CaptionTranslationCoordinator {
                     let cleaned = Self.cleanSubtitleOutput(accumulated)
                     if !cleaned.isEmpty {
                         self.isTranslatingPartial = false
-                        onUpdate(cleaned)
+                        self.inFlightPartialTranslation = cleaned
+                        self.latestPartialOnUpdate?(cleaned)
                     }
                 }
+                self.isPartialRequestInFlight = false
                 self.isTranslatingPartial = false
                 let finalPartial = Self.cleanSubtitleOutput(accumulated)
-                guard !finalPartial.isEmpty else { return }
-                if let previous = self.lastPartialTranslation {
-                    self.stabilizedDraftPrefix = Self.localAgreementPrefix(previous, finalPartial)
+                if !finalPartial.isEmpty {
+                    if let previous = self.lastPartialTranslation {
+                        self.stabilizedDraftPrefix = Self.localAgreementPrefix(previous, finalPartial)
+                    }
+                    self.lastPartialTranslation = finalPartial
+                    self.inFlightPartialTranslation = finalPartial
                 }
-                self.lastPartialTranslation = finalPartial
+                // 若在流式请求期间，源文本又继续增长跨过了阈值，自动衔接下一轮 Stage 1 预览
+                let newestPending = self.pendingPartialSourceText
+                if !newestPending.isEmpty, newestPending != latestSource {
+                    let followUpDelta = abs(newestPending.count - latestSource.count)
+                    let endsWithClause = newestPending.last.map { ",.;?!，。；？！、".contains($0) } ?? false
+                    if followUpDelta >= self.minimumPartialDeltaChars || endsWithClause {
+                        self.launchPartialTask(initialSourceSnapshot: newestPending)
+                    }
+                }
             } catch {
                 self?.isPartialDebouncing = false
+                self?.isPartialRequestInFlight = false
                 self?.isTranslatingPartial = false
                 if !(error is CancellationError) {
                     self?.lastPartialSourceText = ""
@@ -405,8 +483,9 @@ public final class CaptionTranslationCoordinator {
         onStreamingUpdate: @escaping @MainActor (String, String) -> Void,
         onFinished: @escaping @MainActor (String, String?, String) async -> Void
     ) {
-        let fallbackDraft = lastPartialTranslation
-        let draftForPrompt = stabilizedDraftPrefix ?? lastPartialTranslation
+        // 即使 Stage 1 在流式中途被定稿事件打断，也保留已流式产出的 `inFlightPartialTranslation` 作为保底草稿
+        let fallbackDraft = lastPartialTranslation ?? inFlightPartialTranslation
+        let draftForPrompt = stabilizedDraftPrefix ?? fallbackDraft
         cancelPartial()
 
         let trimmed = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -452,36 +531,71 @@ public final class CaptionTranslationCoordinator {
         finalTasks[lineID] = Task { @MainActor [weak self] in
             defer { self?.finalTasks[lineID] = nil }
             var accumulated = ""
-            do {
-                let stream = client.translateStream(
-                    sourceText: trimmed,
-                    contextLines: Array(contextLines.suffix(3)),
-                    priorDraftTranslation: draftForPrompt,
-                    systemInstructions: instructions
-                )
-                for try await delta in stream {
+            for attempt in 0..<2 {
+                do {
                     try Task.checkCancellation()
-                    accumulated += delta
-                    let cleaned = Self.cleanSubtitleOutput(accumulated)
-                    if !cleaned.isEmpty {
-                        onStreamingUpdate(lineID, cleaned)
+                    let enrichedContext = self?.enrichContextLines(Array(contextLines.suffix(3)))
+                        ?? Array(contextLines.suffix(3))
+                    let stream = client.translateStream(
+                        sourceText: trimmed,
+                        contextLines: enrichedContext,
+                        priorDraftTranslation: draftForPrompt,
+                        systemInstructions: instructions
+                    )
+                    for try await delta in stream {
+                        try Task.checkCancellation()
+                        accumulated += delta
+                        let cleaned = Self.cleanSubtitleOutput(accumulated)
+                        if !cleaned.isEmpty {
+                            onStreamingUpdate(lineID, cleaned)
+                        }
                     }
+                    let finalCleaned = Self.cleanSubtitleOutput(accumulated)
+                    if !finalCleaned.isEmpty {
+                        self?.recordCompletedTranslation(sourceText: trimmed, translatedText: finalCleaned)
+                        await onFinished(lineID, finalCleaned, detectedLanguageCode)
+                        return
+                    }
+                    if attempt == 0 {
+                        accumulated = ""
+                        try await Task.sleep(for: .milliseconds(120))
+                        continue
+                    }
+                } catch {
+                    if error is CancellationError {
+                        let salvaged = Self.cleanSubtitleOutput(accumulated)
+                        await onFinished(
+                            lineID,
+                            salvaged.isEmpty ? fallbackDraft : salvaged,
+                            detectedLanguageCode
+                        )
+                        return
+                    }
+                    let salvaged = Self.cleanSubtitleOutput(accumulated)
+                    // 若一个字都还没吐出就遭遇网络瞬态抖动，自动快速重试一次
+                    if salvaged.isEmpty, attempt == 0 {
+                        accumulated = ""
+                        try? await Task.sleep(for: .milliseconds(120))
+                        if !Task.isCancelled {
+                            continue
+                        }
+                    }
+                    let resolved = salvaged.isEmpty ? fallbackDraft : salvaged
+                    if let resolved, !resolved.isEmpty {
+                        self?.recordCompletedTranslation(sourceText: trimmed, translatedText: resolved)
+                    }
+                    await onFinished(
+                        lineID,
+                        resolved,
+                        detectedLanguageCode
+                    )
+                    return
                 }
-                let finalCleaned = Self.cleanSubtitleOutput(accumulated)
-                await onFinished(
-                    lineID,
-                    finalCleaned.isEmpty ? fallbackDraft : finalCleaned,
-                    detectedLanguageCode
-                )
-            } catch {
-                // 网络抖动或超时时兜底保留已流式到达的前缀或 Stage 1 预览译文，绝不退回空白。
-                let salvaged = Self.cleanSubtitleOutput(accumulated)
-                await onFinished(
-                    lineID,
-                    salvaged.isEmpty ? fallbackDraft : salvaged,
-                    detectedLanguageCode
-                )
             }
+            if let fallbackDraft, !fallbackDraft.isEmpty {
+                self?.recordCompletedTranslation(sourceText: trimmed, translatedText: fallbackDraft)
+            }
+            await onFinished(lineID, fallbackDraft, detectedLanguageCode)
         }
     }
 
