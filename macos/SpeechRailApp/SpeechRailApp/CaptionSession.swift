@@ -96,6 +96,9 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
     let id: String
     var lineIDs: [String]
     var sourceText: String
+    /// 显示用源文：段内 ASR 边界处的句号/逗号是切分伪影，上屏时去掉。
+    /// 正式 `Line` 和翻译输入仍保留原始标点。
+    var displaySourceText: String
     var translatedText: String?
     var isTranslating: Bool
     var start: TimeInterval?
@@ -117,6 +120,7 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
         self.id = line.id
         self.lineIDs = [line.id]
         self.sourceText = line.text
+        self.displaySourceText = line.text
         self.translatedText = line.translatedText
         self.isTranslating = isTranslating
         self.start = line.start
@@ -133,10 +137,38 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
         let head = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         let tail = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceText = [head, tail].filter { !$0.isEmpty }.joined(separator: " ")
+
+        let displayHead = CaptionParagraphAssembler
+            .trimTrailingPunctuation(displaySourceText)
+        let displayTail = tail
+        displaySourceText = Self.joinedSource(displayHead, displayTail)
         if start == nil { start = line.start }
         if let end = line.end { self.end = end }
         if speakerLabel == nil { speakerLabel = line.speakerLabel }
         lastObservedAt = observedAt
+    }
+
+    private static func joinedSource(_ head: String, _ tail: String) -> String {
+        let left = head.trimmingCharacters(in: .whitespacesAndNewlines)
+        let right = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !left.isEmpty else { return right }
+        guard !right.isEmpty else { return left }
+        if isCJK(left.last!), isCJK(right.first!) {
+            return left + right
+        }
+        return left + " " + right
+    }
+
+    private static func isCJK(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF,
+                 0xAC00...0xD7AF, 0xF900...0xFAFF:
+                true
+            default:
+                false
+            }
+        }
     }
 }
 
@@ -355,7 +387,8 @@ struct CaptionBandContent: Equatable, Sendable {
             let paragraphLines = paragraph.lineIDs.compactMap { linesByID[$0] }
             guard !paragraphLines.isEmpty else { continue }
             coveredLineIDs.formUnion(paragraph.lineIDs)
-            let source = paragraph.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let source = paragraph.displaySourceText
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !source.isEmpty else { continue }
             let singleLineTranslation = paragraphLines.count == 1
                 ? paragraphLines[0].translatedText

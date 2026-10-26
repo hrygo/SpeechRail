@@ -1754,7 +1754,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.session.bandContent.rows.count, 1)
         XCTAssertEqual(
             h.session.bandContent.rows.first?.text,
-            "能让我光靠看就能看出一身鸡皮疙瘩，但。 看完幕后资料以后的我，却发现外媒开得更猛。"
+            "能让我光靠看就能看出一身鸡皮疙瘩，但看完幕后资料以后的我，却发现外媒开得更猛。"
         )
     }
 
@@ -1817,7 +1817,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         let second = makeLine("看完幕后资料以后的我，却发现外媒开得更猛。", start: 1.2, end: 3)
         var paragraph = CaptionParagraph(line: first, observedAt: now, isTranslating: true)
         paragraph.append(second, observedAt: now.addingTimeInterval(0.2))
-        paragraph.translatedText = "但看完幕后资料以后的我，却发现外媒开得更猛。"
+        paragraph.translatedText = "但看完幕后资料以后，我发现外媒开得更猛。"
         paragraph.isTranslating = false
 
         let content = CaptionBandContent(
@@ -1830,8 +1830,8 @@ final class CaptionSessionLifecycleTests: XCTestCase {
 
         XCTAssertEqual(content.rows.count, 1, "同一段的两条 ASR 行应只渲染一个块")
         XCTAssertEqual(content.rows.first?.id, .paragraph(paragraph.id))
-        XCTAssertEqual(content.rows.first?.primaryText, paragraph.translatedText)
-        XCTAssertEqual(content.rows.first?.secondaryText, "但。 看完幕后资料以后的我，却发现外媒开得更猛。")
+        XCTAssertEqual(content.rows.first?.primaryText, "但看完幕后资料以后，我发现外媒开得更猛。")
+        XCTAssertEqual(content.rows.first?.secondaryText, "但看完幕后资料以后的我，却发现外媒开得更猛。")
     }
 
     private func makeLine(
