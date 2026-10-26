@@ -388,11 +388,23 @@ public final class CaptionTranslationCoordinator {
     3. 严格参考【前文背景】中的双语对照关系，保持专业术语、人名译法和人称代词（他/她/它）前后一致，但绝不要重复翻译【前文背景】中的句子。
     4. 若提供了【当前句已上屏草稿】，在核心语义与肯定/否定极性未反转的前提下，优先沿用草稿前半句措辞以减少屏幕闪烁；若后文出现倒装从句或语义反转，则以准确自然为先重排全句。
     5. 若原文已经是通顺的中文，原样输出即可。
+    【实时切分】输入是实时字幕切开的片段，末尾可能停在一句话中间，标点也可能是识别补出的。若在连接词、介词、列表引导语处结束，不要补句号，也不要补全尚未出现的内容；只翻译已经出现的内容。
+    """
+
+    /// 所有语言共用的“片段不是完整句”约束。
+    static let segmentRule = """
+    【实时切分】输入是实时字幕切开的片段，末尾可能停在一句话中间，标点也可能是识别补出的。若在连接词、介词、列表引导语处结束，不要补句号，也不要补全尚未出现的内容；只翻译已经出现的内容。
+    """
+
+    /// 段落翻译才需要：多行可能是同一句话被切开。
+    static let paragraphRule = """
+    【同段片段】输入可能是同一段话被实时切成多行；请先合并为语义完整的段落，再翻译为中文。只在真正的句末使用句号，不要逐片段换行，也不要保留片段之间的生硬断句。
     """
 
     public static func systemInstructions(
         for preferredLanguage: CaptionSourceLanguage = .auto,
-        glossary: CaptionGlossary = .empty
+        glossary: CaptionGlossary = .empty,
+        isParagraph: Bool = false
     ) -> String {
         let base: String
         switch preferredLanguage {
@@ -432,7 +444,14 @@ public final class CaptionTranslationCoordinator {
         default:
             base = Self.systemInstructions
         }
-        return base + glossary.promptSuffix
+        var result = base + glossary.promptSuffix
+        if !result.contains("【实时切分】") {
+            result += "\n\n" + Self.segmentRule
+        }
+        if isParagraph {
+            result += "\n\n" + Self.paragraphRule
+        }
+        return result
     }
 
     private let makeClient: @MainActor () -> (any CaptionTranslationClient)?
@@ -776,6 +795,8 @@ public final class CaptionTranslationCoordinator {
         /// 定稿文本到达的时间；用于把落库等待和队列等待一起算进首字延迟。
         requestedAt: Date = Date(),
         glossary: CaptionGlossary = .empty,
+        /// 多行合并后的段落翻译；单行仍为 false。
+        isParagraph: Bool = false,
         onStreamingUpdate: @escaping @MainActor (String, String) -> Void,
         onFinished: @escaping @MainActor (String, String?, String) async -> Void
     ) {
@@ -832,7 +853,8 @@ public final class CaptionTranslationCoordinator {
 
         let instructions = Self.systemInstructions(
             for: preferredLanguage,
-            glossary: glossary
+            glossary: glossary,
+            isParagraph: isParagraph
         )
 
         enqueueFinal(

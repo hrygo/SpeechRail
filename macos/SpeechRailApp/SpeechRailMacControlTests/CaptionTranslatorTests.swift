@@ -569,6 +569,19 @@ final class CaptionTranslatorTests: XCTestCase {
         XCTAssertEqual(defaultPrompt, CaptionTranslationCoordinator.systemInstructions)
     }
 
+    func testParagraphPromptAddsMergeRuleAndKeepsSegmentRule() {
+        let single = CaptionTranslationCoordinator.systemInstructions(for: .english)
+        let paragraph = CaptionTranslationCoordinator.systemInstructions(
+            for: .english,
+            isParagraph: true
+        )
+
+        XCTAssertTrue(single.contains("【实时切分】"))
+        XCTAssertFalse(single.contains("【同段片段】"))
+        XCTAssertTrue(paragraph.contains("【同段片段】"))
+        XCTAssertTrue(paragraph.contains("先合并为语义完整的段落"))
+    }
+
     func testKoreanWithHanjaIsDetectedAsKorean() {
         let detection = CaptionLanguageDetector.detect(for: "오늘 회의에서 豫算안을 승인했습니다")
         XCTAssertFalse(detection.isChinese)

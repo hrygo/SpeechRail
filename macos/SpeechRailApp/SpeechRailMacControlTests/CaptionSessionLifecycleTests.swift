@@ -1641,6 +1641,26 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(fake.callCount, 1, "打开开关后只补翻最近未翻译的行")
     }
 
+    func testEnablingTranslationAfterParagraphSettlesStillTranslates() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "late-on", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 }
+        // 等段落宽限窗口结束，确认它已经从“待定”收口。
+        try await Task.sleep(for: .milliseconds(700))
+        h.session.translationEnabled = true
+
+        try await h.settle {
+            $0.session.lines.first?.translatedText == "预算已批准"
+                && $0.session.lines.first?.isTranslating == false
+        }
+        XCTAssertEqual(fake.callCount, 1)
+    }
+
     func testDisablingTranslationImmediatelyFallsBackToOriginal() async throws {
         let fake = FakeTranslationClient()
         fake.streamDeltas = ["预算已批准"]
@@ -1713,6 +1733,114 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "item-next", transcript: "New sentence arrived"))
         try await h.settle { $0.session.lines.count == 1 }
         XCTAssertNil(h.session.lastFailure, "无 diagnosticCode 的过期失败在下一句成功定稿落盘后应自动清除")
+    }
+
+    // MARK: - 段落合并
+
+    func testFinalDanglingButAndContinuationAreDisplayedAsOneParagraph() async throws {
+        let h = try await makeHarness()
+        _ = try await start(h)
+
+        try await h.emit(.completed(
+            itemID: "but-1",
+            transcript: "能让我光靠看就能看出一身鸡皮疙瘩，但。"
+        ))
+        try await h.emit(.completed(
+            itemID: "but-2",
+            transcript: "看完幕后资料以后的我，却发现外媒开得更猛。"
+        ))
+        try await h.settle { $0.session.lines.count == 2 }
+
+        XCTAssertEqual(h.session.bandContent.rows.count, 1)
+        XCTAssertEqual(
+            h.session.bandContent.rows.first?.text,
+            "能让我光靠看就能看出一身鸡皮疙瘩，但。 看完幕后资料以后的我，却发现外媒开得更猛。"
+        )
+    }
+
+    func testParagraphAssemblerMergesDanglingButListLeadInAndPS5Appositive() {
+        let now = Date()
+        let cases: [(String, String)] = [
+            ("能让我看出一身鸡皮疙瘩，但。", "看完幕后资料以后的我，却发现外媒开得更猛。"),
+            ("有的说《影灵》是明年最期待的游戏，有的说。", "《影灵》是自己心目中的年度最佳游戏。"),
+            ("有的说影灵是下一款真正意义上的PS5。", "必备游戏，有的说也是明年最期待的动作游戏"),
+        ]
+
+        for (firstText, secondText) in cases {
+            let first = makeLine(firstText, start: 0, end: 1)
+            let paragraph = CaptionParagraph(line: first, observedAt: now, isTranslating: true)
+            let second = makeLine(secondText, start: 1.2, end: 3)
+            XCTAssertTrue(
+                CaptionParagraphAssembler.shouldMerge(
+                    paragraph,
+                    second,
+                    observedAt: now.addingTimeInterval(0.2)
+                ),
+                "应合并：\(firstText) / \(secondText)"
+            )
+        }
+    }
+
+    func testParagraphAssemblerDoesNotMergeTwoCompleteSentencesJustBecauseTheyAreClose() {
+        let now = Date()
+        let first = makeLine("第一条完整字幕。", start: 0, end: 1)
+        let paragraph = CaptionParagraph(line: first, observedAt: now, isTranslating: true)
+        let second = makeLine("第二条完整字幕。", start: 1.05, end: 2)
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(
+                paragraph,
+                second,
+                observedAt: now.addingTimeInterval(0.05)
+            )
+        )
+    }
+
+    func testParagraphAssemblerDoesNotMergeAcrossSpeakers() {
+        let now = Date()
+        var first = makeLine("但。", start: 0, end: 1)
+        first.speakerLabel = "A"
+        let paragraph = CaptionParagraph(line: first, observedAt: now, isTranslating: true)
+        var second = makeLine("下一句。", start: 1.1, end: 2)
+        second.speakerLabel = "B"
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(
+                paragraph,
+                second,
+                observedAt: now.addingTimeInterval(0.1)
+            )
+        )
+    }
+
+    func testBandContentRendersOneRowPerParagraphWithoutBlankGap() {
+        let now = Date()
+        let first = makeLine("但。", start: 0, end: 1)
+        let second = makeLine("看完幕后资料以后的我，却发现外媒开得更猛。", start: 1.2, end: 3)
+        var paragraph = CaptionParagraph(line: first, observedAt: now, isTranslating: true)
+        paragraph.append(second, observedAt: now.addingTimeInterval(0.2))
+        paragraph.translatedText = "但看完幕后资料以后的我，却发现外媒开得更猛。"
+        paragraph.isTranslating = false
+
+        let content = CaptionBandContent(
+            lines: [first, second],
+            paragraphs: [paragraph],
+            windowUnits: nil,
+            partialText: nil,
+            displayMode: .bilingual
+        )
+
+        XCTAssertEqual(content.rows.count, 1, "同一段的两条 ASR 行应只渲染一个块")
+        XCTAssertEqual(content.rows.first?.id, .paragraph(paragraph.id))
+        XCTAssertEqual(content.rows.first?.primaryText, paragraph.translatedText)
+        XCTAssertEqual(content.rows.first?.secondaryText, "但。 看完幕后资料以后的我，却发现外媒开得更猛。")
+    }
+
+    private func makeLine(
+        _ text: String,
+        id: String = UUID().uuidString,
+        start: TimeInterval? = nil,
+        end: TimeInterval? = nil
+    ) -> CaptionSession.Line {
+        CaptionSession.Line(id: id, ordinal: 1, text: text, start: start, end: end)
     }
 
     @MainActor
