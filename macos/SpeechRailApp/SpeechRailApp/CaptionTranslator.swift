@@ -460,6 +460,8 @@ public final class CaptionTranslationCoordinator {
     /// 定稿翻译同时最多跑几条。慢模型时这是背压阀：定稿行会排队，而不是把
     /// 服务端塞满后所有请求一起变慢。按到达顺序完成，避免后句先于前句上屏。
     private let maximumConcurrentFinalTranslations: Int
+    /// 定稿翻译等待队列的最大容量；超出时淘汰最旧的排队项，确保实时新段落不会被历史积压阻塞。
+    private let maximumPendingFinalTranslations: Int
     private let signposter = OSSignposter(
         subsystem: "com.speechrail.desktop",
         category: "CaptionTranslation"
@@ -520,6 +522,7 @@ public final class CaptionTranslationCoordinator {
     }
 
     private var finalQueue: [FinalRequest] = []
+    public var pendingFinalTranslationCount: Int { finalQueue.count }
     private var runningFinalCount = 0
     /// 正在跑的行；同一行被重新请求时，新的排队项必须等旧任务真正退出再开跑。
     private var runningFinalLineIDs: Set<String> = []
@@ -528,11 +531,13 @@ public final class CaptionTranslationCoordinator {
         partialDebounce: Duration = .milliseconds(450),
         minimumPartialDeltaChars: Int = 10,
         maximumConcurrentFinalTranslations: Int = 2,
+        maximumPendingFinalTranslations: Int = 8,
         makeClient: @escaping @MainActor () -> (any CaptionTranslationClient)?
     ) {
         self.partialDebounce = partialDebounce
         self.minimumPartialDeltaChars = minimumPartialDeltaChars
         self.maximumConcurrentFinalTranslations = Swift.max(1, maximumConcurrentFinalTranslations)
+        self.maximumPendingFinalTranslations = Swift.max(1, maximumPendingFinalTranslations)
         self.makeClient = makeClient
     }
 
@@ -568,6 +573,17 @@ public final class CaptionTranslationCoordinator {
         }
         recentCompletedTranslations.removeAll()
         recentCompletedOrder.removeAll()
+    }
+
+    /// 收尾时先给在途定稿一次完成机会，再取消；否则最后一段会在
+    /// `flushOpenParagraph` 刚启动后被 `cancelAll` 立刻打断。
+    public func drainFinalTranslations(timeout: Duration = .seconds(2)) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !finalQueue.isEmpty || !finalTasks.isEmpty {
+            if clock.now >= deadline { return }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
     }
 
     /// 新一场字幕开始时清空上一场的延迟样本；历史记录不参与。
@@ -883,6 +899,13 @@ public final class CaptionTranslationCoordinator {
         finalTasks[request.lineID]?.cancel()
         finalQueue.append(request)
         pumpFinalQueue()
+        while finalQueue.count > maximumPendingFinalTranslations {
+            let evicted = finalQueue.removeFirst()
+            metrics.finalCancelled += 1
+            Task { @MainActor in
+                await evicted.onFinished(evicted.lineID, evicted.fallbackDraft, evicted.detectedLanguageCode)
+            }
+        }
     }
 
     private func pumpFinalQueue() {

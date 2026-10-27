@@ -1313,6 +1313,20 @@ public actor LLMProvider {
     private var completionTokenLimitEndpoints: Set<String> = []
     /// 字幕翻译在 `/chat/completions` 上自动协商并锁定的关闭思考方言（`Optional.some(nil)` 表示所有关闭思考字段均被拒或无效，需走高预算兜底）。
     private var chatTranslationThinkingModes: [String: ChatTranslationThinkingStrategy?] = [:]
+    /// 助手本轮实际使用的传输。Responses 优先；端点只在 Chat 上关得掉思考时改走 Chat。
+    private var assistantTransportRoutes: [String: AssistantTransportRoute] = [:]
+
+    /// 助手传输选择。`chat` 带上真正关掉了思考的方言，供流式通路复用。
+    private enum AssistantTransportRoute: Sendable, Equatable {
+        case responses
+        case chat(ChatTranslationThinkingStrategy)
+    }
+
+    /// 关思考方言的试探顺序：先试阿里云/百炼的顶层字段，再试智谱/火山的 `thinking.type`、
+    /// 本地模板字段与标准 `reasoning_effort`。
+    private static let assistantChatThinkingDialects: [ChatTranslationThinkingStrategy] = [
+        .topLevelEnableThinking, .openCodeNative, .localTemplate, .standard
+    ]
 
     public init(
         session: URLSession = .shared,
@@ -1339,16 +1353,30 @@ public actor LLMProvider {
         let delivery = LLMStreamDelivery()
         let task = Task {
             do {
-                try await self.runStream(
-                    configuration: configuration,
-                    messages: messages,
-                    apiKey: apiKey,
-                    maxOutputTokens: maxOutputTokens,
-                    instructions: instructions,
-                    firstTextTimeout: AssistantLLMStreamBudget.firstTextTimeout,
-                    stallTimeout: AssistantLLMStreamBudget.textStallTimeout,
-                    onDelta: { try delivery.yield($0) }
-                )
+                // 端点在 Responses 上关不掉思考时，助手改走 Chat；两条通路共享同一份
+                // 首字/停滞预算与取消语义，调用方只看见一条正文流。
+                if case .chat(let dialect) = self.assistantTransportRoutes[self.assistantTransportKey(configuration)] {
+                    try await self.runChatAssistantStream(
+                        configuration: configuration,
+                        messages: messages,
+                        apiKey: apiKey,
+                        maxOutputTokens: maxOutputTokens,
+                        instructions: instructions,
+                        dialect: dialect,
+                        onDelta: { try delivery.yield($0) }
+                    )
+                } else {
+                    try await self.runStream(
+                        configuration: configuration,
+                        messages: messages,
+                        apiKey: apiKey,
+                        maxOutputTokens: maxOutputTokens,
+                        instructions: instructions,
+                        firstTextTimeout: AssistantLLMStreamBudget.firstTextTimeout,
+                        stallTimeout: AssistantLLMStreamBudget.textStallTimeout,
+                        onDelta: { try delivery.yield($0) }
+                    )
+                }
                 delivery.finish()
             } catch {
                 delivery.finish(throwing: error)
@@ -1356,6 +1384,261 @@ public actor LLMProvider {
         }
         delivery.cancelWhenTerminated { task.cancel() }
         return delivery.stream
+    }
+
+    /// 助手在「Responses 关不掉思考、Chat 能关」的端点上使用的流式通路。
+    ///
+    /// 和 Responses 通路共享同一份首字/停滞预算、取消语义与正文上限；区别只在于
+    /// 请求形状是 chat 的 messages，且 reasoning 增量一律丢弃，不进入正文。
+    private func runChatAssistantStream(
+        configuration: LLMConfiguration,
+        messages: [LLMMessage],
+        apiKey: String?,
+        maxOutputTokens: Int?,
+        instructions: String?,
+        dialect: ChatTranslationThinkingStrategy,
+        onDelta: @Sendable @escaping (String) throws -> Void
+    ) async throws {
+        guard configuration.isConfigured else { throw LLMError.notConfigured }
+        guard configuration.isBaseURLValid, !configuration.embedsCredential,
+              let url = URL(string: "\(configuration.normalizedBaseURL)/chat/completions")
+        else { throw LLMError.badBaseURL }
+
+        let controlKey = thinkingKey(configuration, operation: .chat)
+        var includeThinkingControl = true
+        var useCompletionTokenLimit = completionTokenLimitEndpoints.contains(controlKey)
+
+        var chatMessages: [[String: Any]] = []
+        if let instructions, !instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            chatMessages.append(["role": "system", "content": instructions])
+        }
+        for message in messages {
+            let role: String = switch message.role {
+            case .assistant: "assistant"
+            case .developer: "system"
+            case .user: "user"
+            }
+            guard !message.text.isEmpty else { continue }
+            chatMessages.append(["role": role, "content": message.text])
+        }
+
+        for attempt in 0...1 {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 60
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if let apiKey, !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+            var body: [String: Any] = [
+                "model": configuration.model,
+                "messages": chatMessages,
+                "stream": true
+            ]
+            body[useCompletionTokenLimit ? "max_completion_tokens" : "max_tokens"] =
+                maxOutputTokens ?? 1_024
+            if includeThinkingControl {
+                Self.applyChatThinkingControl(dialect, to: &body)
+            }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+            let startedAt = Date()
+            let context = LLMRequestContext()
+            emitProviderObservation(
+                kind: .providerRequestStarted,
+                context: context,
+                configuration: configuration,
+                startedAt: startedAt,
+                snapshot: nil,
+                transportAttempt: attempt,
+                includeThinkingControl: includeThinkingControl,
+                outcome: "started",
+                errorCode: nil,
+                operation: .chat
+            )
+
+            let result: (URLSession.AsyncBytes, URLResponse)
+            do {
+                result = try await session.bytes(for: request)
+            } catch {
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    throw LLMError.cancelled
+                }
+                let failure = LLMError.transport(error.localizedDescription)
+                emitProviderObservation(
+                    kind: .providerFailed, context: context, configuration: configuration,
+                    startedAt: startedAt, snapshot: nil, transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl, outcome: "failed",
+                    errorCode: LLMObservability.errorCode(for: failure), operation: .chat
+                )
+                throw failure
+            }
+            guard let http = result.1 as? HTTPURLResponse else {
+                throw LLMError.transport("没有收到 HTTP 响应")
+            }
+
+            if !(200..<300).contains(http.statusCode) {
+                var errorBytes = Data()
+                for try await byte in result.0 {
+                    guard errorBytes.count < AssistantLLMStreamBudget.maxErrorBodyBytes else { break }
+                    errorBytes.append(byte)
+                }
+                let errorBody = String(decoding: errorBytes, as: UTF8.self)
+                if includeThinkingControl,
+                   Self.rejectsThinkingControl(status: http.statusCode, body: errorBody) {
+                    includeThinkingControl = false
+                    thinkingControlRejected.insert(controlKey)
+                    continue
+                }
+                if !useCompletionTokenLimit,
+                   Self.requiresCompletionTokenLimit(status: http.statusCode, body: errorBody) {
+                    useCompletionTokenLimit = true
+                    completionTokenLimitEndpoints.insert(controlKey)
+                    continue
+                }
+                let failure = Self.httpError(
+                    status: http.statusCode, body: Self.shortBody(errorBody), retryAfter: nil
+                )
+                emitProviderObservation(
+                    kind: .providerFailed, context: context, configuration: configuration,
+                    startedAt: startedAt, snapshot: nil, transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl, outcome: "failed",
+                    errorCode: LLMObservability.errorCode(for: failure), operation: .chat
+                )
+                throw failure
+            }
+
+            // 网关把 SSE 直接换成整包 JSON 时也接受。
+            let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+            if !contentType.contains("text/event-stream") {
+                var raw = Data()
+                for try await byte in result.0 {
+                    guard raw.count < AssistantLLMStreamBudget.maxSSEEventBytes else { break }
+                    raw.append(byte)
+                }
+                let text = Self.chatAssistantText(fromJSON: raw)
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw LLMError.streamEndedEarly
+                }
+                try onDelta(text)
+                emitProviderObservation(
+                    kind: .providerResponse, context: context, configuration: configuration,
+                    startedAt: startedAt, snapshot: nil, transportAttempt: attempt,
+                    includeThinkingControl: includeThinkingControl, outcome: "received",
+                    errorCode: nil, operation: .chat
+                )
+                return
+            }
+
+            let progress = ChatAssistantStreamProgress()
+            let transportTask = result.0.task
+            let watchdog = Task.detached { [progress, transportTask] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    if Task.isCancelled { break }
+                    if progress.isExpired() {
+                        progress.markExpired()
+                        transportTask.cancel()
+                        break
+                    }
+                }
+            }
+            defer { watchdog.cancel() }
+
+            var lineBytes: [UInt8] = []
+            var emitted = false
+            var totalScalars = 0
+            do {
+                for try await byte in result.0 {
+                    try Task.checkCancellation()
+                    guard byte == 0x0A else {
+                        if lineBytes.count < AssistantLLMStreamBudget.maxSSELineBytes {
+                            lineBytes.append(byte)
+                        }
+                        continue
+                    }
+                    let line = String(decoding: lineBytes, as: UTF8.self)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    lineBytes.removeAll(keepingCapacity: true)
+                    guard !line.isEmpty else { continue }
+                    guard let event = try Self.chatAssistantEvent(fromSSELine: line) else { continue }
+                    if event.terminal { break }
+                    guard let delta = event.delta else { continue }
+                    totalScalars += delta.unicodeScalars.count
+                    guard totalScalars <= AssistantLLMStreamBudget.maxTotalTextScalars else {
+                        throw LLMError.streamBudgetExceeded("助手的回答超过单轮正文上限")
+                    }
+                    progress.recordText()
+                    emitted = true
+                    try onDelta(delta)
+                }
+            } catch {
+                if progress.didExpire {
+                    let failure = LLMError.transport("服务迟迟没有开始回答，或回答中途停住了（已超时）。")
+                    emitProviderObservation(
+                        kind: .providerFailed, context: context, configuration: configuration,
+                        startedAt: startedAt, snapshot: nil, transportAttempt: attempt,
+                        includeThinkingControl: includeThinkingControl, outcome: "failed",
+                        errorCode: LLMObservability.errorCode(for: failure), operation: .chat
+                    )
+                    throw failure
+                }
+                if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    throw LLMError.cancelled
+                }
+                throw error
+            }
+            if progress.didExpire {
+                throw LLMError.transport("服务迟迟没有开始回答，或回答中途停住了（已超时）。")
+            }
+            guard emitted else { throw LLMError.streamEndedEarly }
+            emitProviderObservation(
+                kind: .providerResponse, context: context, configuration: configuration,
+                startedAt: startedAt, snapshot: nil, transportAttempt: attempt,
+                includeThinkingControl: includeThinkingControl, outcome: "received",
+                errorCode: nil, operation: .chat
+            )
+            return
+        }
+        throw LLMError.thinkingControlUnavailable
+    }
+
+    private struct ChatAssistantEvent: Sendable {
+        let delta: String?
+        let terminal: Bool
+    }
+
+    private static func chatAssistantEvent(fromSSELine line: String) throws -> ChatAssistantEvent? {
+        guard line.hasPrefix("data:") else { return nil }
+        let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        if payload == "[DONE]" { return ChatAssistantEvent(delta: nil, terminal: true) }
+        guard let data = payload.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let errorObject = object["error"] as? [String: Any],
+           let message = errorObject["message"] as? String, !message.isEmpty {
+            throw LLMError.transport(message)
+        }
+        if let errorText = object["error"] as? String, !errorText.isEmpty {
+            throw LLMError.transport(errorText)
+        }
+        guard let choices = object["choices"] as? [[String: Any]],
+              let first = choices.first else { return nil }
+        let delta = first["delta"] as? [String: Any]
+        let content = delta?["content"] as? String
+        return ChatAssistantEvent(
+            delta: (content?.isEmpty == false) ? content : nil,
+            terminal: false
+        )
+    }
+
+    private static func chatAssistantText(fromJSON data: Data) -> String {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = object["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String else { return "" }
+        return content
     }
 
     /// 专供实时字幕的低延迟流式翻译。
@@ -1488,6 +1771,41 @@ public actor LLMProvider {
             lock.lock()
             defer { lock.unlock() }
             return lastByteAt.duration(to: now)
+        }
+    }
+
+    /// 助手 Chat 通路的进展计时：首字前看首字预算，出字后看停滞预算。
+    private final class ChatAssistantStreamProgress: @unchecked Sendable {
+        private let lock = NSLock()
+        private let startedAt: ContinuousClock.Instant = .now
+        private var firstTextAt: ContinuousClock.Instant?
+        private var expired = false
+
+        func recordText() {
+            lock.lock()
+            if firstTextAt == nil { firstTextAt = .now }
+            lock.unlock()
+        }
+
+        func markExpired() {
+            lock.lock()
+            expired = true
+            lock.unlock()
+        }
+
+        var didExpire: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return expired
+        }
+
+        func isExpired(now: ContinuousClock.Instant = .now) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if let firstTextAt {
+                return firstTextAt.duration(to: now) >= AssistantLLMStreamBudget.textStallTimeout
+            }
+            return startedAt.duration(to: now) >= AssistantLLMStreamBudget.firstTextTimeout
         }
     }
 
@@ -3128,6 +3446,11 @@ public actor LLMProvider {
 
     // MARK: - 检查连接
 
+    /// 探测预算。思考型模型先产出一个 reasoning 项，正文随后才出现；预算过小时响应会被
+    /// `max_output_tokens` 截断成没有正文的 `incomplete`，换端点或模型都过不了检查。
+    /// 这里只保证一次最短回答能完成，不代表长任务质量已通过。
+    private static let probeOutputTokens = 256
+
     /// 检查用的最小请求。`/models` 不是 OpenAI-compatible 的硬性要求，实际能力探测才是结论。
     private static func probeRequest(
         url: URL,
@@ -3159,7 +3482,7 @@ public actor LLMProvider {
                 "messages": [["role": "user", "content": "ping"]],
                 "stream": false
             ]
-            body[useCompletionTokenLimit ? "max_completion_tokens" : "max_tokens"] = 16
+            body[useCompletionTokenLimit ? "max_completion_tokens" : "max_tokens"] = Self.probeOutputTokens
             if !compatibleTask { body["temperature"] = 0 }
             if includeThinkingControl {
                 switch configuration.compatibilityMode.chatThinkingControl {
@@ -3176,7 +3499,7 @@ public actor LLMProvider {
                 "model": configuration.model,
                 "input": [["role": "user", "content": [["type": "input_text", "text": "ping"]]]],
                 "store": false,
-                "max_output_tokens": 16
+                "max_output_tokens": Self.probeOutputTokens
             ]
             if includeThinkingControl {
                 switch configuration.compatibilityMode.responsesThinkingControl {
@@ -3324,8 +3647,117 @@ public actor LLMProvider {
         } catch {
             return .responseUnconfirmed(.invalidShape)
         }
+        // 助手启动前的这次探测同时决定传输：Responses 正文里还带着 reasoning，
+        // 就说明关思考没生效，接着用 Chat 方言找一条真能关掉的路。
+        if operation == .responses, !allowThinkingControlFallback {
+            await resolveAssistantTransport(configuration: configuration, apiKey: apiKey, probeBody: data)
+        }
         let milliseconds = Int(Date().timeIntervalSince(started) * 1000)
         return .connected(milliseconds: milliseconds, model: configuration.model)
+    }
+
+    /// Responses 正文里出现带内容的 reasoning 项，说明端点没有真正关掉思考。
+    /// 空 summary/content 不算：有的网关无论是否思考都会挂一个空壳脑袋。
+    static func responsesReportedReasoning(_ data: Data) -> Bool {
+        guard let object = try? LLMStrictJSON.object(from: data),
+              let output = object["output"] as? [[String: Any]] else { return false }
+        func hasText(_ parts: [[String: Any]]?) -> Bool {
+            (parts ?? []).contains { part in
+                guard let text = part["text"] as? String else { return false }
+                return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        }
+        for item in output where (item["type"] as? String) == "reasoning" {
+            if hasText(item["summary"] as? [[String: Any]]) { return true }
+            if hasText(item["content"] as? [[String: Any]]) { return true }
+        }
+        return false
+    }
+
+    private func assistantTransportKey(_ configuration: LLMConfiguration) -> String {
+        "\(configuration.normalizedBaseURL)|\(configuration.model)"
+    }
+
+    /// 助手启动前的传输判定：先用 Chat 方言逐个试探能否真的关掉思考，成功就记住方言并改走 Chat。
+    /// 只要 Chat 这条路根本不通（连接失败、404、鉴权失败），就直接保留 Responses，不逐方言空试。
+    private func resolveAssistantTransport(
+        configuration: LLMConfiguration,
+        apiKey: String?,
+        probeBody: Data
+    ) async {
+        let key = assistantTransportKey(configuration)
+        guard assistantTransportRoutes[key] == nil else { return }
+        guard Self.responsesReportedReasoning(probeBody) else {
+            assistantTransportRoutes[key] = .responses
+            return
+        }
+        for dialect in Self.assistantChatThinkingDialects {
+            switch await chatProbeOutcome(configuration: configuration, apiKey: apiKey, dialect: dialect) {
+            case .thinkingOff:
+                assistantTransportRoutes[key] = .chat(dialect)
+                chatTranslationThinkingModes[thinkingKey(configuration, operation: .chat)] = dialect
+                return
+            case .unavailable:
+                assistantTransportRoutes[key] = .responses
+                return
+            case .retryNextDialect:
+                continue
+            }
+        }
+        assistantTransportRoutes[key] = .responses
+    }
+
+    private enum ChatProbeOutcome: Sendable {
+        /// 该方言拿到了正文且没有 reasoning。
+        case thinkingOff
+        /// 端点认识请求但仍在思考，或明确拒绝这个关思考字段：换下一个方言。
+        case retryNextDialect
+        /// Chat 这条路本身不可用：不必再试。
+        case unavailable
+    }
+
+    private func chatProbeOutcome(
+        configuration: LLMConfiguration,
+        apiKey: String?,
+        dialect: ChatTranslationThinkingStrategy
+    ) async -> ChatProbeOutcome {
+        guard let url = URL(string: "\(configuration.normalizedBaseURL)/chat/completions") else {
+            return .unavailable
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("SpeechRail/llm-check", forHTTPHeaderField: "User-Agent")
+        if let apiKey, !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        var body: [String: Any] = [
+            "model": configuration.model,
+            "messages": [["role": "user", "content": "ping"]],
+            "stream": false,
+            "max_tokens": Self.probeOutputTokens,
+            "temperature": 0
+        ]
+        Self.applyChatThinkingControl(dialect, to: &body)
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse else { return .unavailable }
+        if http.statusCode == 400 || http.statusCode == 422 {
+            let text = String(decoding: data, as: UTF8.self)
+            return Self.rejectsThinkingControl(status: http.statusCode, body: text)
+                ? .retryNextDialect : .unavailable
+        }
+        guard (200..<300).contains(http.statusCode),
+              let object = try? LLMStrictJSON.object(from: data),
+              let choices = object["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return .unavailable }
+        let reasoning = ((message["reasoning_content"] as? String) ?? (message["reasoning"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return reasoning.isEmpty ? .thinkingOff : .retryNextDialect
     }
 
     private static func operationUnavailable(

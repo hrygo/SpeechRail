@@ -884,6 +884,11 @@ public final class SessionCoordinator {
         )
     }
 
+    /// 实时字幕语义段落建立/追加后，把段落 ID 补写到正式行。
+    public func attachLineParagraphID(lineID: String, paragraphID: String) async throws {
+        try await store.attachLineParagraphID(lineID: lineID, paragraphID: paragraphID)
+    }
+
     /// 改显示名：写 `speaker_name`，`line.text` 与证据引用都不动（§6.2.1）。
     public func renameSpeaker(sessionID: String, label: String, name: String) async throws {
         try await store.renameSpeaker(sessionID: sessionID, label: label, name: name)

@@ -52,7 +52,8 @@ extension SessionStore {
       timing_quality TEXT,
       created_at     REAL NOT NULL,
       source_language TEXT,
-      translated_text TEXT
+      translated_text TEXT,
+      paragraph_id TEXT
     );
     CREATE UNIQUE INDEX line_by_session ON line(session_id, ordinal);
 
@@ -513,6 +514,15 @@ extension SessionStore {
         }
         if !lineCols.contains("translated_text") {
             try execute("ALTER TABLE line ADD COLUMN translated_text TEXT;")
+        }
+    }
+
+    /// v15 → v16：实时字幕语义段落。首行保存整段译文，同段后续行只存段落 ID。
+    /// 纯加法；老记录保持 NULL，导出仍按逐行处理。
+    func migrateV15ToV16() throws {
+        let lineCols = try tableColumnNames("line")
+        if !lineCols.contains("paragraph_id") {
+            try execute("ALTER TABLE line ADD COLUMN paragraph_id TEXT;")
         }
     }
 

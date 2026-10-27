@@ -291,8 +291,10 @@ public struct SessionLibraryView: View {
     @State private var detail: LibraryDetail?
     @State private var detailLoad = SpeechRailSelectionLoad<LibraryDetail>()
     private var lines: [TranscriptLine] { detail?.review.lines ?? [] }
+    private var displayLines: [TranscriptLine] { SessionExporter.paragraphLines(lines) }
     private var recoveryLines: [TranscriptLine] { detail?.recoveryLines ?? [] }
     private var speakerNames: [String: String] { detail?.review.speakerNames ?? [:] }
+    @State private var libraryDisplayMode: CaptionDisplayMode = .bilingual
     @State private var searchText = ""
     /// 全文检索命中（MC-49/MC-52/MC-54）：转录终稿与已完成纪要正文。
     /// 为空表示未检索或无命中；与标题过滤互斥，检索优先。
@@ -381,36 +383,17 @@ public struct SessionLibraryView: View {
         } trailing: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 if kind == .captions {
-                    // 稿 `screenClosureCaptionsIdle` 的页头第一件是 `kbdInRow(row, "⌘⇧L", 34)`：
-                    // 字幕这条闭环的入口**不在这个窗口里**，所以把键画在页头是最省事的一次说明。
-                    // 键是真装着的（`SpeechRailApp.wireGlobalShortcuts()`），不是装饰。
-                    // 只在空态画：稿的「回看中 / 刚结束」两块画板页头都没有这个键。
-                    if summaries.isEmpty {
-                        SessionHeaderKeycap("⌘⇧L")
-                    }
-                    if caption.phase == .paused {
-                        PageActionButton(
-                            title: "新开字幕",
-                            systemImage: "plus.circle",
-                            helpText: "结束当前暂停的会话，重新选择窗口或麦克风开始实时字幕"
-                        ) {
-                            Task {
-                                await caption.finish()
-                                await caption.promptSelectTarget()
-                            }
-                        }
-                    }
-                    // 页头的主入口（稿 ``primaryButton(row, "打开字幕带", …)`）。它**只放在这里**：
-                    // 空态里再放一颗同一动作的按钮，等于同一件事两个入口。
-                    // 未开始时它叫「开始字幕」：这是设计稿页头的主按钮名（`开始字幕`），
-                    // 也是「开始之前」那张卡页脚那句「这里只有「开始字幕」」指的对象——
-                    // 两处名字不一样时，页脚就成了一句指不到的承诺（2026-09-19 离屏走查）。
+                    // 页头主动作放在最左侧，采用 prominent 强调色与按压回弹触感，一眼可定位。
+                    // 未开始时叫「开始字幕」（与下方「开始之前」卡片文案保持一致），进行或暂停时叫「显示字幕带」。
                     PageActionButton(
                         title: caption.phase.isLive ? "显示字幕带" : "开始字幕",
-                        systemImage: "captions.bubble",
+                        systemImage: caption.phase.isLive ? "captions.bubble.fill" : "captions.bubble",
+                        variant: .prominent,
                         helpText: caption.phase == .running
-                            ? "把字幕带重新显示到屏幕上；它一直在听"
-                            : (caption.phase == .paused ? "重新显示字幕带并可继续录制" : "选择目标应用窗口或麦克风开始实时字幕（⌘⇧L）")
+                            ? "把字幕带重新显示到屏幕上；它一直在后台实时收音识别（快捷键 ⌘⇧L）"
+                            : (caption.phase == .paused
+                                ? "重新显示字幕带并可继续录制（快捷键 ⌘⇧L）"
+                                : "选择目标应用窗口或麦克风开始实时字幕（快捷键 ⌘⇧L）")
                     ) {
                         Task {
                             if caption.phase.isLive {
@@ -419,6 +402,22 @@ public struct SessionLibraryView: View {
                                 await caption.promptSelectTarget()
                             }
                         }
+                    }
+                    if caption.phase == .paused {
+                        PageActionButton(
+                            title: "新开字幕",
+                            systemImage: "plus.circle",
+                            helpText: "结束当前暂停的会话，重新选择窗口或麦克风开始新的实时字幕"
+                        ) {
+                            Task {
+                                await caption.finish()
+                                await caption.promptSelectTarget()
+                            }
+                        }
+                    }
+                    // 稿 `screenClosureCaptionsIdle` 的页头快捷键提示：只在空态展示。
+                    if summaries.isEmpty {
+                        SessionHeaderKeycap("⌘⇧L")
                     }
                 }
                 exportMenu
@@ -518,7 +517,7 @@ public struct SessionLibraryView: View {
         return switch caption.phase {
         case .idle:
             SessionPageStatusPresentation(
-                title: caption.blocked?.title ?? "还没有开始字幕",
+                title: caption.blocked?.title ?? (summaries.isEmpty ? "还没有开始字幕" : "字幕服务就绪 · 可按 ⌘⇧L 随时开启"),
                 tone: caption.blocked == nil ? .neutral : .attention,
                 facts: statusFacts
             )
@@ -641,6 +640,20 @@ public struct SessionLibraryView: View {
         )
     }
 
+    private var captionSilenceBinding: Binding<Int> {
+        Binding(
+            get: { caption.captionSilenceDurationMilliseconds },
+            set: { caption.captionSilenceDurationMilliseconds = $0 }
+        )
+    }
+
+    private var paragraphAssemblyBinding: Binding<Bool> {
+        Binding(
+            get: { caption.paragraphAssemblyEnabled },
+            set: { caption.paragraphAssemblyEnabled = $0 }
+        )
+    }
+
     private var translationSetupDetail: String {
         if !caption.isTranslationAvailable {
             return "还没有配置翻译模型。先在「字幕设置 → 助手 → 实时字幕翻译」里填好地址和模型。"
@@ -717,6 +730,36 @@ public struct SessionLibraryView: View {
                             .controlSize(.small)
                             .accessibilityLabel("翻译成中文")
                             .accessibilityIdentifier("caption-translation-toggle")
+                    }
+                    SessionHairline()
+                    SessionCheckRow(
+                        tone: .neutral,
+                        name: "断句灵敏度 · 可选",
+                        detail: "650ms 平衡完整与速度；400ms 更快但更碎；900ms 更接近会议整句。"
+                    ) {
+                        Picker("", selection: captionSilenceBinding) {
+                            Text("更快 400ms").tag(400)
+                            Text("平衡 650ms").tag(650)
+                            Text("更完整 900ms").tag(900)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        .accessibilityLabel("字幕断句灵敏度")
+                        .accessibilityIdentifier("caption-silence-picker")
+                    }
+                    SessionHairline()
+                    SessionCheckRow(
+                        tone: caption.paragraphAssemblyEnabled ? .ready : .neutral,
+                        name: "段落合并 · 可选",
+                        detail: "把同一句被 ASR 切开的几行合成一段显示和翻译；关掉后逐句显示，便于对照。"
+                    ) {
+                        Toggle("", isOn: paragraphAssemblyBinding)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .accessibilityLabel("段落合并")
+                            .accessibilityIdentifier("caption-paragraph-toggle")
                     }
                     SessionHairline()
                     SessionCheckRow(
@@ -966,7 +1009,16 @@ public struct SessionLibraryView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
                         .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
-
+                } else if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        Image(systemName: "return")
+                            .font(.system(size: 10))
+                        Text("按回车检索正文全文")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                    }
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
+                    .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
                 }
 
                 Divider()
@@ -1042,22 +1094,25 @@ public struct SessionLibraryView: View {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                     SectionHeading(title: displayTitle(for: summary), detail: recordSubtitle(summary))
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                    Menu {
-                        ForEach(orderedFormats) { format in
-                            Button(format.title) {
-                                export(summary, as: format)
-                            }
+                    if kind == .captions {
+                        Picker("显示模式", selection: $libraryDisplayMode) {
+                            Text("双语对照").tag(CaptionDisplayMode.bilingual)
+                            Text("仅译文").tag(CaptionDisplayMode.chineseOnly)
+                            Text("仅原文").tag(CaptionDisplayMode.originalOnly)
                         }
-                    } label: {
-                        Label("导出", systemImage: "square.and.arrow.down")
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 210)
+                        .controlSize(.small)
+                        .speechRailPointerCursor()
                     }
-                    .menuStyle(.button)
-                    .buttonStyle(.bordered)
-                    .fixedSize()
-                    Button("复制全文") {
+                    Button {
                         Task { await copyTranscript(of: summary) }
+                    } label: {
+                        Label("复制全文", systemImage: "doc.on.doc")
                     }
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
                     if summary.record.state != .archived {
                         Button("完成记录") {
                             Task {
@@ -1106,7 +1161,7 @@ public struct SessionLibraryView: View {
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            ForEach(lines) { line in
+                            ForEach(displayLines) { line in
                                 lineRow(line)
                             }
                             if !recoveryLines.isEmpty {
@@ -1142,30 +1197,128 @@ public struct SessionLibraryView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 .frame(width: SpeechRailDesignTokens.Layout.sessionTimecodeColumnWidth, alignment: .leading)
 
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                if let translated = line.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !translated.isEmpty,
-                   translated != line.text {
-                    Text(translated)
+            lineContent(line)
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
+        .contextMenu {
+            Button(kind == .captions ? "复制此段" : "复制此句") {
+                copySingleLine(line)
+            }
+            let source = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let translation = line.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let translation, hasDistinctMeaningfulTranslation(source: source, translation: translation) {
+                Button("复制双语对照") {
+                    copyBilingualLine(source: source, translation: translation)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func lineContent(_ line: TranscriptLine) -> some View {
+        let source = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let translation = line.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasTranslation = hasDistinctMeaningfulTranslation(source: source, translation: translation)
+
+        switch (kind == .captions ? libraryDisplayMode : .bilingual) {
+        case .originalOnly:
+            Text(source)
+                .font(SpeechRailDesignTokens.Typography.body)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+        case .chineseOnly:
+            let textToShow = (hasTranslation ? translation : nil) ?? source
+            Text(textToShow)
+                .font(SpeechRailDesignTokens.Typography.body)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+        case .bilingual:
+            if hasTranslation, let translation {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Text(translation)
                         .font(SpeechRailDesignTokens.Typography.body)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(line.text)
+                    Text(source)
                         .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Text(line.text)
-                        .font(SpeechRailDesignTokens.Typography.body)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            } else {
+                Text(source)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
+    }
+
+    private func hasDistinctMeaningfulTranslation(source: String, translation: String?) -> Bool {
+        guard let translation, !translation.isEmpty, translation != source else {
+            return false
+        }
+        if isPredominantlyChinese(source) && isPredominantlyChinese(translation) {
+            let sNormalized = normalizedText(source)
+            let tNormalized = normalizedText(translation)
+            if sNormalized == tNormalized { return false }
+            let sSet = Set(sNormalized)
+            let tSet = Set(tNormalized)
+            let overlap = sSet.intersection(tSet).count
+            let union = sSet.union(tSet).count
+            if union > 0 && Double(overlap) / Double(union) > 0.85 {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func isPredominantlyChinese(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        let cjkCount = text.unicodeScalars.filter {
+            (0x4E00...0x9FFF).contains($0.value) || (0x3400...0x4DBF).contains($0.value)
+        }.count
+        return Double(cjkCount) / Double(text.count) >= 0.3
+    }
+
+    private func normalizedText(_ text: String) -> String {
+        text.filter { $0.isLetter || $0.isNumber }
+    }
+
+    private func copySingleLine(_ line: TranscriptLine) {
+        let source = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let translation = line.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasTranslation = hasDistinctMeaningfulTranslation(source: source, translation: translation)
+        let textToCopy: String
+        switch (kind == .captions ? libraryDisplayMode : .bilingual) {
+        case .originalOnly:
+            textToCopy = source
+        case .chineseOnly:
+            textToCopy = (hasTranslation ? translation : nil) ?? source
+        case .bilingual:
+            if hasTranslation, let translation {
+                textToCopy = "\(translation) (\(source))"
+            } else {
+                textToCopy = source
+            }
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(textToCopy, forType: .string)
+        operationNotice = "已复制该句文字。"
+    }
+
+    private func copyBilingualLine(source: String, translation: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString("\(translation)\n\(source)", forType: .string)
+        operationNotice = "已复制双语对照。"
     }
 
     private func speakerText(for line: TranscriptLine) -> String {
@@ -1230,18 +1383,25 @@ public struct SessionLibraryView: View {
 
     private func displayTitle(for summary: SessionSummary) -> String {
         if let title = summary.record.title, !title.isEmpty { return title }
-        return summary.record.startedAt.speechRailFormatted()
+        let date = summary.record.startedAt
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return "今天 \(date.speechRailFormatted(.time))"
+        } else if calendar.isDateInYesterday(date) {
+            return "昨天 \(date.speechRailFormatted(.time))"
+        }
+        return date.speechRailFormatted(.dateTime)
     }
 
     private func recordSubtitle(_ summary: SessionSummary) -> String {
         var parts = [SessionCoordinator.formatted(summary.duration())]
         parts.append("\(summary.lineCount) 行")
-        if summary.speakerCount > 0 {
-            parts.append("\(summary.speakerCount) 位说话人")
+        if summary.speakerCount > 1 {
+            parts.append("\(summary.speakerCount) 人")
         }
         if let appName = summary.record.targetAppName, !appName.isEmpty {
-            parts.append("\(summary.record.audioSource.title)（\(appName)）")
-        } else {
+            parts.append(appName)
+        } else if summary.record.audioSource != .system {
             parts.append(summary.record.audioSource.title)
         }
         if summary.record.state == .archived, let reason = summary.record.endReason, reason != .user {
@@ -1302,12 +1462,21 @@ public struct SessionLibraryView: View {
             let rows = try await session.lines(sessionID: summary.id)
             let text = rows.map { row -> String in
                 let speaker = speakerText(for: row)
-                if let translated = row.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !translated.isEmpty,
-                   translated != row.text {
-                    return "\(speaker)  \(translated)\n    \(row.text)"
+                let source = row.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let translation = row.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let hasTranslation = hasDistinctMeaningfulTranslation(source: source, translation: translation)
+                switch (kind == .captions ? libraryDisplayMode : .bilingual) {
+                case .originalOnly:
+                    return "\(speaker)  \(source)"
+                case .chineseOnly:
+                    let content = (hasTranslation ? translation : nil) ?? source
+                    return "\(speaker)  \(content)"
+                case .bilingual:
+                    if hasTranslation, let translation {
+                        return "\(speaker)  \(translation)\n    \(source)"
+                    }
+                    return "\(speaker)  \(source)"
                 }
-                return "\(speaker)  \(row.text)"
             }.joined(separator: "\n")
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()

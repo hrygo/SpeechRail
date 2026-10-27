@@ -1549,8 +1549,32 @@ private struct PageActionButtonBody: View {
 
  var body: some View {
  configuration.label
+ .fontWeight(variant == .prominent ? .medium : .regular)
  .foregroundStyle(foregroundColor)
  .background(backgroundShape)
+ .overlay {
+ if variant == .prominent, isEnabled {
+ SpeechRailDesignTokens.Corner.controlShape
+ .strokeBorder(
+ SpeechRailDesignTokens.Color.rail.opacity(
+ configuration.isPressed ? 0.55 : (isHovered ? 0.42 : 0.28)
+ ),
+ lineWidth: 1
+ )
+ }
+ }
+ .shadow(
+ color: (variant == .prominent && isHovered && !configuration.isPressed && isEnabled)
+ ? SpeechRailDesignTokens.Color.rail.opacity(0.16)
+ : Color.clear,
+ radius: 6,
+ y: 2
+ )
+ .scaleEffect(
+ configuration.isPressed && isEnabled && !reduceMotion
+ ? SpeechRailDesignTokens.Interaction.pressScale
+ : 1.0
+ )
  .speechRailFocusRing(isFocused)
  .contentShape(SpeechRailDesignTokens.Corner.controlShape)
  .opacity(isEnabled ? 1 : SpeechRailDesignTokens.Interaction.disabledOpacity)
@@ -1589,7 +1613,7 @@ private struct PageActionButtonBody: View {
  case .standard:
  shape.fill(SpeechRailDesignTokens.Toolbar.Action.pressedFill)
  case .prominent:
- shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.24))
+ shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.28))
  case .destructive:
  shape.fill(SpeechRailDesignTokens.Color.critical.opacity(0.20))
  }
@@ -1598,7 +1622,7 @@ private struct PageActionButtonBody: View {
  case .standard:
  shape.fill(SpeechRailDesignTokens.Toolbar.Action.hoverFill)
  case .prominent:
- shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.14))
+ shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.18))
  case .destructive:
  shape.fill(SpeechRailDesignTokens.Color.critical.opacity(0.12))
  }
@@ -1607,7 +1631,7 @@ private struct PageActionButtonBody: View {
  case .standard:
  Color.clear
  case .prominent:
- shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.08))
+ shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.11))
  case .destructive:
  Color.clear
  }
@@ -3606,8 +3630,8 @@ struct OperationFeedbackCard: View {
             ))
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
-        .frame(width: min(SpeechRailDesignTokens.Layout.Sheet.formWidth,
-                          max(0, availableSize.width - SpeechRailDesignTokens.Spacing.sm * 2)))
+        .frame(maxWidth: min(SpeechRailDesignTokens.Layout.Sheet.compactWidth,
+                             max(0, availableSize.width - SpeechRailDesignTokens.Spacing.sm * 2)))
         .speechRailSurface(.elevated)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("operation-feedback")

@@ -1070,6 +1070,7 @@ public enum SpeechRailDesignTokens {
         public static let pressedFillOpacity: Double = 0.12
         public static let disabledOpacity: Double = 0.45
         public static let focusLineWidth: CGFloat = 2
+        public static let pressScale: CGFloat = 0.97
     }
 
     public enum Typography {

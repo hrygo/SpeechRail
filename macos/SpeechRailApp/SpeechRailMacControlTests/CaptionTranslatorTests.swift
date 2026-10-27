@@ -69,7 +69,7 @@ final class FakeTranslationClient: CaptionTranslationClient, @unchecked Sendable
 }
 
 @MainActor
-private final class GatedTranslationClient: CaptionTranslationClient, @unchecked Sendable {
+final class GatedTranslationClient: CaptionTranslationClient, @unchecked Sendable {
     private(set) var started: [String] = []
     private var continuations: [String: AsyncThrowingStream<String, any Error>.Continuation] = [:]
 
@@ -967,5 +967,62 @@ final class CaptionTranslatorTests: XCTestCase {
             client.started, ["Running English sentence."],
             "cancelAll 后排队行不得再发起模型请求"
         )
+    }
+
+    func testFinalQueueEnforcesMaximumPendingLimitAndEvictsOldestWithFallback() async throws {
+        let client = GatedTranslationClient()
+        let coordinator = CaptionTranslationCoordinator(
+            maximumConcurrentFinalTranslations: 1,
+            maximumPendingFinalTranslations: 2,
+            makeClient: { client }
+        )
+        let evictedFinished = expectation(description: "evicted oldest pending item")
+        var evictedFallback: String?
+
+        // 第 1 条立即进入 running
+        coordinator.translateCompletedLine(
+            lineID: "running-1",
+            sourceText: "Sentence one in flight.",
+            contextLines: [],
+            displayMode: .bilingual,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, _, _ in }
+        )
+        // 第 2 条进入 pending (1/2)，带 priorDraftHint
+        coordinator.translateCompletedLine(
+            lineID: "pending-oldest",
+            sourceText: "Sentence two oldest pending.",
+            contextLines: [],
+            displayMode: .bilingual,
+            priorDraftHint: "第二句保底草稿",
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, translated, _ in
+                evictedFallback = translated
+                evictedFinished.fulfill()
+            }
+        )
+        // 第 3 条进入 pending (2/2)
+        coordinator.translateCompletedLine(
+            lineID: "pending-middle",
+            sourceText: "Sentence three pending.",
+            contextLines: [],
+            displayMode: .bilingual,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, _, _ in }
+        )
+        // 第 4 条进入 pending，触发淘汰最旧的 pending-oldest
+        coordinator.translateCompletedLine(
+            lineID: "pending-newest",
+            sourceText: "Sentence four newest pending.",
+            contextLines: [],
+            displayMode: .bilingual,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, _, _ in }
+        )
+
+        await fulfillment(of: [evictedFinished], timeout: 1.0)
+        XCTAssertEqual(coordinator.pendingFinalTranslationCount, 2, "等待队列长度必须受 maximumPendingFinalTranslations 限制")
+        XCTAssertEqual(evictedFallback, "第二句保底草稿", "被淘汰的旧排队项必须回调 onFinished 清理状态并保留保底草稿")
+        coordinator.cancelAll()
     }
 }

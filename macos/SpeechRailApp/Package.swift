@@ -110,6 +110,7 @@ let package = Package(
                 "SpeechRailDesignTokens.swift",
                 "RealtimeASRClient.swift",
                 "CaptionSession.swift",
+                "CaptionParagraph.swift",
                 "CaptionTranslator.swift",
                 "ASRScenePreset.swift",
                 "AssistantInputTurnAssembler.swift",

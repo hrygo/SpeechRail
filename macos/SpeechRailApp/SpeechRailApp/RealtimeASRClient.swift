@@ -1141,6 +1141,7 @@ public actor RealtimeASRClient {
         keywords: [String]? = nil,
         scenePreset: ASRScenePreset = .caption,
         windowScene: SpeechRailWindowScene? = nil,
+        silenceDurationMilliseconds: Int? = nil,
         threshold: Double? = nil,
         diarizationEnabled: Bool = false,
         diarizationBackend: SpeechRailDiarizationBackend? = nil,
@@ -1168,7 +1169,7 @@ public actor RealtimeASRClient {
         self.model = model
         self.language = language
         self.keywords = keywords
-        self.silenceDurationMilliseconds = scenePreset.silenceDurationMilliseconds
+        self.silenceDurationMilliseconds = silenceDurationMilliseconds ?? scenePreset.silenceDurationMilliseconds
         self.prefixPaddingMilliseconds = scenePreset.prefixPaddingMilliseconds
         self.threshold = threshold ?? scenePreset.threshold
         self.diarizationEnabled = diarizationEnabled

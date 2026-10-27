@@ -547,6 +547,8 @@ struct CaptionBandView: View {
     @State private var copyFailure: String?
     @State private var copyNotice: String?
     @State private var copyNoticeID = UUID()
+    @State private var isCopyConfirmed = false
+    @State private var copyConfirmationTask: Task<Void, Never>?
     @State private var failureAutoDismissTask: Task<Void, Never>?
     /// 自己量出来的内容宽度：宽度参与折行，所以高度得跟着它变。
     @State private var contentWidth: CGFloat = 0
@@ -732,10 +734,12 @@ struct CaptionBandView: View {
         // 一次求值只问一次能力：`isTranslationAvailable` 会构造一次翻译客户端，
         // 菜单标签、帮助和禁用状态不该各构造一遍。
         let translationAvailable = session.isTranslationAvailable
+        let isDocked = session.placementMode == .dockedToTargetWindow
         return HStack(spacing: SpeechRailDesignTokens.Layout.captionBandToolbarSpacing) {
             iconButton(
                 systemImage: session.phase == .running ? "pause.fill" : "play.fill",
-                label: session.phase == .running ? "暂停" : "继续"
+                label: session.phase == .running ? "暂停实时字幕（快捷键 ⌘⇧L）" : "继续实时字幕（快捷键 ⌘⇧L）",
+                role: session.phase == .running ? .activeAccent : .warningAccent
             ) {
                 Task {
                     if session.phase == .running {
@@ -754,27 +758,45 @@ struct CaptionBandView: View {
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
             if session.audioTarget?.isApp == true {
                 iconButton(
-                    systemImage: session.placementMode == .dockedToTargetWindow ? "dock.rectangle" : "macwindow.on.rectangle",
-                    label: session.placementMode == .dockedToTargetWindow ? "吸附于目标窗口（点击转为自由悬停）" : "自由悬停（点击吸附至窗口）"
+                    systemImage: isDocked ? "dock.rectangle" : "macwindow.on.rectangle",
+                    label: isDocked
+                        ? "已吸附于目标窗口底部（点击转为自由悬停）"
+                        : "当前为自由悬停（点击吸附至目标窗口底部）",
+                    role: isDocked ? .activeAccent : .standard
                 ) {
-                    if session.placementMode == .dockedToTargetWindow {
+                    if isDocked {
                         session.placementMode = .freeFloatingPinned
                     } else {
                         session.placementMode = .dockedToTargetWindow
                     }
                 }
             }
-            iconButton(systemImage: "doc.on.doc", label: "复制这一段") {
+            iconButton(
+                systemImage: isCopyConfirmed ? "checkmark" : "doc.on.doc",
+                label: isCopyConfirmed ? "已复制当前字幕段" : "复制当前显示的最新字幕段落",
+                role: isCopyConfirmed ? .successAccent : .standard
+            ) {
                 copyCurrentSegment()
             }
-            iconButton(systemImage: "square.and.arrow.down", label: "导出 SRT…") {
+            iconButton(
+                systemImage: "square.and.arrow.down",
+                label: "将本次字幕导出为 SRT 字幕文件…"
+            ) {
                 Task { await session.exportSRT() }
             }
-            iconButton(systemImage: isPinned ? "pin.fill" : "pin", label: isPinned ? "取消钉住" : "钉住位置") {
+            iconButton(
+                systemImage: isPinned ? "pin.fill" : "pin",
+                label: isPinned ? "已钉住字幕条位置（点击解锁拖动）" : "钉住字幕条位置（锁定后防止误触拖动）",
+                role: isPinned ? .activeAccent : .standard
+            ) {
                 isPinned.toggle()
                 onPinChange(isPinned)
             }
-            iconButton(systemImage: "xmark", label: "结束并保存") {
+            iconButton(
+                systemImage: "xmark",
+                label: "结束本次字幕并保存记录",
+                role: .destructiveHover
+            ) {
                 onClose()
             }
         }
@@ -794,7 +816,7 @@ struct CaptionBandView: View {
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: session.audioTarget?.isApp == true ? "macwindow" : "mic.fill")
-                    .font(.system(size: 11))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                 Text(session.audioTarget?.displayTitle ?? "选择目标")
                     .font(SpeechRailDesignTokens.Typography.callout)
@@ -809,8 +831,9 @@ struct CaptionBandView: View {
             .padding(.horizontal, SpeechRailDesignTokens.Layout.captionBandTagPaddingH)
             .padding(.vertical, SpeechRailDesignTokens.Layout.captionBandTagPaddingV)
         }
-        .buttonStyle(.plain)
-        .help("切换收音目标应用或麦克风")
+        .buttonStyle(CaptionBandChipButtonStyle(isActive: session.audioTarget != nil))
+        .help(session.audioTarget.map { "当前收音目标：\($0.displayTitle)（点击切换应用窗口或麦克风）" } ?? "选择要捕获音频的应用窗口或麦克风")
+        .accessibilityLabel("收音目标 \(session.audioTarget?.displayTitle ?? "未选择")")
         .speechRailPointerCursor()
     }
 
@@ -830,8 +853,8 @@ struct CaptionBandView: View {
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: "globe")
-                    .font(.system(size: 11))
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(session.sourceLanguage == .auto ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.rail)
                 Text(session.sourceLanguage.shortLabel)
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
@@ -841,34 +864,37 @@ struct CaptionBandView: View {
             }
             .padding(.horizontal, SpeechRailDesignTokens.Layout.captionBandTagPaddingH)
             .padding(.vertical, SpeechRailDesignTokens.Layout.captionBandTagPaddingV)
+            .modifier(CaptionBandHoverChipModifier(isActive: session.sourceLanguage != .auto))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("识别和翻译用的源语言；「自动」适合中英混说。会话中途切换从下一次接上开始生效")
+        .help("当前源语言：\(session.sourceLanguage.title) · 「自动」适合中英混说，切换后立即更新翻译提示词并在下次重连同步识别语言")
         .accessibilityLabel("源语言 \(session.sourceLanguage.title)")
         .speechRailPointerCursor()
     }
 
     private func translationMenu(isAvailable: Bool) -> some View {
-        Menu {
+        let isActive = session.translationEnabled && isAvailable
+        return Menu {
             translationMenuContent
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: "translate")
-                    .font(.system(size: 11))
-                    .foregroundStyle(session.translationEnabled
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(isActive
                         ? SpeechRailDesignTokens.Color.rail
                         : SpeechRailDesignTokens.Color.inkSecondary)
                 Text(translationMenuTitle(isAvailable: isAvailable))
                     .font(SpeechRailDesignTokens.Typography.callout)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .foregroundStyle(isActive ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.ink)
                 Image(systemName: "chevron.down")
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .foregroundStyle(isActive ? SpeechRailDesignTokens.Color.rail.opacity(0.8) : SpeechRailDesignTokens.Color.inkSecondary)
             }
             .padding(.horizontal, SpeechRailDesignTokens.Layout.captionBandTagPaddingH)
             .padding(.vertical, SpeechRailDesignTokens.Layout.captionBandTagPaddingV)
+            .modifier(CaptionBandHoverChipModifier(isActive: isActive))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -924,11 +950,20 @@ struct CaptionBandView: View {
         Menu {
             translationMenuContent
         } label: {
-            Image(systemName: "translate")
-                .font(.system(size: 11))
-                .foregroundStyle(session.translationEnabled
-                    ? SpeechRailDesignTokens.Color.rail
-                    : SpeechRailDesignTokens.Color.inkTertiary)
+            HStack(spacing: 3) {
+                Image(systemName: "translate")
+                    .font(.system(size: 11, weight: .medium))
+                if session.translationEnabled {
+                    Text(session.displayMode == .chineseOnly ? "中" : "双语")
+                        .font(.system(size: 10, weight: .medium))
+                }
+            }
+            .foregroundStyle(session.translationEnabled
+                ? SpeechRailDesignTokens.Color.rail
+                : SpeechRailDesignTokens.Color.inkTertiary)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .modifier(CaptionBandHoverChipModifier(isActive: session.translationEnabled))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -940,8 +975,8 @@ struct CaptionBandView: View {
     }
 
     private var footerTranslationHelp: String {
-        guard session.translationEnabled else { return "翻译已关闭，点此打开（默认关闭）" }
-        return "翻译已开启（\(session.displayMode.title)），点此切换或关闭"
+        guard session.translationEnabled else { return "同传翻译已关闭 · 点击快速开启双语对照或仅中文" }
+        return "同传翻译已开启（\(session.displayMode.title)）· 点击切换排版或关闭"
     }
 
     private func translationMenuTitle(isAvailable: Bool) -> String {
@@ -952,9 +987,11 @@ struct CaptionBandView: View {
 
     private func translationMenuHelp(isAvailable: Bool) -> String {
         if !isAvailable {
-            return "还没有配置翻译模型：设置 → 助手 → 实时字幕翻译"
+            return "还没有配置翻译模型：请前往「设置 → 助手 → 实时字幕翻译」配置"
         }
-        return session.translationEnabled ? "翻译已开启，点此切换双语/仅中文或关闭" : "打开后把外语实时翻成中文（默认关闭）"
+        return session.translationEnabled
+            ? "实时翻译已开启（\(session.displayMode.title)）· 点击切换双语对照 / 仅中文或关闭"
+            : "点击开启实时中文字幕翻译（支持双语对照 / 仅中文，中文音源自动直通不耗流）"
     }
 
     private func enableTranslation(mode: CaptionDisplayMode) {
@@ -967,14 +1004,20 @@ struct CaptionBandView: View {
     private var fontMenu: some View {
         Menu {
             ForEach(CaptionBandFontSize.allCases) { size in
-                Button(size.title) {
+                Button {
                     fontSizeRaw = size.rawValue
+                } label: {
+                    if fontSize == size {
+                        Label(size.title, systemImage: "checkmark")
+                    } else {
+                        Text(size.title)
+                    }
                 }
             }
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text("字号")
-                    .font(SpeechRailDesignTokens.Typography.callout)
+                Image(systemName: "textformat.size")
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 Text(fontSize.title)
                     .font(SpeechRailDesignTokens.Typography.callout)
@@ -983,29 +1026,35 @@ struct CaptionBandView: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
-            // 稿里这是一颗 chip（`sizeTag` 的 padX 8 / padY 3）：多一点留白，
-            // 点起来才不像在点一行文字。
             .padding(.horizontal, SpeechRailDesignTokens.Layout.captionBandTagPaddingH)
             .padding(.vertical, SpeechRailDesignTokens.Layout.captionBandTagPaddingV)
+            .modifier(CaptionBandHoverChipModifier(isActive: false))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .help("当前字幕字号：\(fontSize.title)（点击切换紧凑 / 标准 / 大字）")
         .accessibilityLabel("字号 \(fontSize.title)")
         .speechRailPointerCursor()
     }
 
-    private func iconButton(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+    private func iconButton(
+        systemImage: String,
+        label: String,
+        role: CaptionBandIconButtonRole = .standard,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(SpeechRailDesignTokens.Typography.callout)
+                .font(.system(size: 12, weight: .semibold))
+                .contentTransition(.symbolEffect(.replace))
                 .frame(
                     width: SpeechRailDesignTokens.Layout.captionBandIconButtonSize,
                     height: SpeechRailDesignTokens.Layout.captionBandIconButtonSize
                 )
-                .contentShape(Rectangle())
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(CaptionBandIconButtonStyle(role: role))
         .help(label)
         .accessibilityLabel(label)
         .speechRailPointerCursor()
@@ -1042,7 +1091,7 @@ struct CaptionBandView: View {
             if !session.saveRecoveryRecords.isEmpty {
                 Button("未保存文字") { showsSaveRecovery = true }
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .buttonStyle(.borderless)
+                    .buttonStyle(CaptionBandChipButtonStyle(isActive: true))
                     .help("重试保存、复制未保存文字或处理不完整记录")
                     .popover(isPresented: $showsSaveRecovery) {
                         TranscriptSaveRecoveryPanel(
@@ -1067,8 +1116,11 @@ struct CaptionBandView: View {
                     }
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(CaptionBandChipButtonStyle(isActive: true))
+                .help("滚动回到底部并继续跟随最新字幕")
                 .accessibilityIdentifier("caption-band-return-latest")
                 .speechRailPointerCursor()
             }
@@ -1213,6 +1265,13 @@ struct CaptionBandView: View {
         }
         copyNoticeID = UUID()
         copyNotice = "已复制当前字幕。"
+        copyConfirmationTask?.cancel()
+        isCopyConfirmed = true
+        copyConfirmationTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard !Task.isCancelled else { return }
+            isCopyConfirmed = false
+        }
     }
 
     private func scrollToLatestIfFollowing() {
@@ -1231,5 +1290,262 @@ struct CaptionBandView: View {
         )
         let updated = transcriptFollow.geometryChanged(to: proximity, isUserInitiated: isUserInitiated)
         if updated != transcriptFollow { transcriptFollow = updated }
+    }
+}
+
+// MARK: - 浮层按钮与胶囊微交互样式
+
+enum CaptionBandIconButtonRole: Sendable, Equatable {
+    case standard
+    case activeAccent
+    case warningAccent
+    case successAccent
+    case destructiveHover
+}
+
+/// 字幕条图标按钮的高触感 ButtonStyle：提供语义色彩、悬停微胶囊高亮与按压回弹。
+struct CaptionBandIconButtonStyle: ButtonStyle {
+    let role: CaptionBandIconButtonRole
+
+    func makeBody(configuration: Configuration) -> some View {
+        CaptionBandIconButtonBody(configuration: configuration, role: role)
+    }
+}
+
+private struct CaptionBandIconButtonBody: View {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+
+    let configuration: ButtonStyle.Configuration
+    let role: CaptionBandIconButtonRole
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+    }
+
+    var body: some View {
+        configuration.label
+            .foregroundStyle(foregroundColor)
+            .background {
+                shape.fill(backgroundColor)
+            }
+            .overlay {
+                if let borderColor {
+                    shape.strokeBorder(borderColor, lineWidth: 0.75)
+                }
+            }
+            .scaleEffect(
+                configuration.isPressed && isEnabled && !reduceMotion
+                    ? 0.91
+                    : (isHovered && !reduceMotion ? 1.03 : 1.0)
+            )
+            .opacity(isEnabled ? 1 : SpeechRailDesignTokens.Interaction.disabledOpacity)
+            .onHover { hovering in
+                isHovered = isEnabled && hovering
+            }
+            .animation(
+                SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.hoverFeedback, reduceMotion: reduceMotion),
+                value: isHovered
+            )
+            .animation(
+                SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.pressFeedback, reduceMotion: reduceMotion),
+                value: configuration.isPressed
+            )
+    }
+
+    private var foregroundColor: Color {
+        guard isEnabled else { return SpeechRailDesignTokens.Color.disabled }
+        switch role {
+        case .standard:
+            return isHovered || configuration.isPressed
+                ? SpeechRailDesignTokens.Color.ink
+                : SpeechRailDesignTokens.Color.inkSecondary
+        case .activeAccent:
+            return SpeechRailDesignTokens.Color.rail
+        case .warningAccent:
+            return SpeechRailDesignTokens.Color.attention
+        case .successAccent:
+            return SpeechRailDesignTokens.Color.healthy
+        case .destructiveHover:
+            return isHovered || configuration.isPressed
+                ? SpeechRailDesignTokens.Color.critical
+                : SpeechRailDesignTokens.Color.inkSecondary
+        }
+    }
+
+    private var backgroundColor: Color {
+        if configuration.isPressed {
+            switch role {
+            case .standard:
+                return SpeechRailDesignTokens.Toolbar.Action.pressedFill
+            case .activeAccent:
+                return SpeechRailDesignTokens.Color.rail.opacity(0.26)
+            case .warningAccent:
+                return SpeechRailDesignTokens.Color.attention.opacity(0.28)
+            case .successAccent:
+                return SpeechRailDesignTokens.Color.healthy.opacity(0.24)
+            case .destructiveHover:
+                return SpeechRailDesignTokens.Color.critical.opacity(0.24)
+            }
+        }
+        if isHovered {
+            switch role {
+            case .standard:
+                return SpeechRailDesignTokens.Toolbar.Action.hoverFill
+            case .activeAccent:
+                return SpeechRailDesignTokens.Color.rail.opacity(0.18)
+            case .warningAccent:
+                return SpeechRailDesignTokens.Color.attention.opacity(0.20)
+            case .successAccent:
+                return SpeechRailDesignTokens.Color.healthy.opacity(0.16)
+            case .destructiveHover:
+                return SpeechRailDesignTokens.Color.critical.opacity(0.14)
+            }
+        }
+        switch role {
+        case .standard, .destructiveHover:
+            return Color.clear
+        case .activeAccent:
+            return SpeechRailDesignTokens.Color.rail.opacity(0.11)
+        case .warningAccent:
+            return SpeechRailDesignTokens.Color.attention.opacity(0.13)
+        case .successAccent:
+            return SpeechRailDesignTokens.Color.healthy.opacity(0.12)
+        }
+    }
+
+    private var borderColor: Color? {
+        switch role {
+        case .activeAccent:
+            return SpeechRailDesignTokens.Color.rail.opacity(isHovered ? 0.38 : 0.22)
+        case .warningAccent:
+            return SpeechRailDesignTokens.Color.attention.opacity(isHovered ? 0.42 : 0.25)
+        case .successAccent:
+            return SpeechRailDesignTokens.Color.healthy.opacity(0.32)
+        case .destructiveHover:
+            return isHovered ? SpeechRailDesignTokens.Color.critical.opacity(0.30) : nil
+        case .standard:
+            return isHovered ? SpeechRailDesignTokens.Surface.border : nil
+        }
+    }
+}
+
+/// 字幕条胶囊按钮（如选择收音目标、「回到最新」）的触感 ButtonStyle。
+struct CaptionBandChipButtonStyle: ButtonStyle {
+    let isActive: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        CaptionBandChipButtonBody(configuration: configuration, isActive: isActive)
+    }
+}
+
+private struct CaptionBandChipButtonBody: View {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+
+    let configuration: ButtonStyle.Configuration
+    let isActive: Bool
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+    }
+
+    var body: some View {
+        configuration.label
+            .background {
+                shape.fill(backgroundColor)
+            }
+            .overlay {
+                shape.strokeBorder(borderColor, lineWidth: 0.75)
+            }
+            .scaleEffect(
+                configuration.isPressed && isEnabled && !reduceMotion ? 0.96 : 1.0
+            )
+            .onHover { hovering in
+                isHovered = isEnabled && hovering
+            }
+            .animation(
+                SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.hoverFeedback, reduceMotion: reduceMotion),
+                value: isHovered
+            )
+            .animation(
+                SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.pressFeedback, reduceMotion: reduceMotion),
+                value: configuration.isPressed
+            )
+    }
+
+    private var backgroundColor: Color {
+        if configuration.isPressed {
+            return isActive
+                ? SpeechRailDesignTokens.Color.rail.opacity(0.22)
+                : SpeechRailDesignTokens.Toolbar.Action.pressedFill
+        }
+        if isHovered {
+            return isActive
+                ? SpeechRailDesignTokens.Color.rail.opacity(0.15)
+                : SpeechRailDesignTokens.Toolbar.Action.hoverFill
+        }
+        return isActive
+            ? SpeechRailDesignTokens.Color.rail.opacity(0.08)
+            : Color.primary.opacity(0.04)
+    }
+
+    private var borderColor: Color {
+        if isActive {
+            return SpeechRailDesignTokens.Color.rail.opacity(isHovered ? 0.36 : 0.20)
+        }
+        return isHovered
+            ? SpeechRailDesignTokens.Surface.border
+            : SpeechRailDesignTokens.Surface.border.opacity(0.55)
+    }
+}
+
+/// 字幕条下拉菜单胶囊（翻译、源语种、字号）的悬停高亮与激活态边框修饰器。
+struct CaptionBandHoverChipModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+    let isActive: Bool
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                shape.fill(backgroundColor)
+            }
+            .overlay {
+                shape.strokeBorder(borderColor, lineWidth: 0.75)
+            }
+            .onHover { hovering in
+                isHovered = hovering
+            }
+            .animation(
+                SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.hoverFeedback, reduceMotion: reduceMotion),
+                value: isHovered
+            )
+    }
+
+    private var backgroundColor: Color {
+        if isHovered {
+            return isActive
+                ? SpeechRailDesignTokens.Color.rail.opacity(0.18)
+                : SpeechRailDesignTokens.Toolbar.Action.hoverFill
+        }
+        return isActive
+            ? SpeechRailDesignTokens.Color.rail.opacity(0.10)
+            : Color.primary.opacity(0.04)
+    }
+
+    private var borderColor: Color {
+        if isActive {
+            return SpeechRailDesignTokens.Color.rail.opacity(isHovered ? 0.38 : 0.22)
+        }
+        return isHovered
+            ? SpeechRailDesignTokens.Surface.border
+            : SpeechRailDesignTokens.Surface.border.opacity(0.5)
     }
 }

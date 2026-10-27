@@ -2776,6 +2776,8 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
     public var createdAt: Date
     public var sourceLanguage: String?
     public var translatedText: String?
+    /// 实时字幕的语义段落 ID；同段后续行的译文以首行为准。
+    public var paragraphID: String?
 
     public init(
         id: String,
@@ -2796,7 +2798,8 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         attributionUnits: [TranscriptAttributionUnit] = [],
         speakerLabelIsManual: Bool = false,
         sourceLanguage: String? = nil,
-        translatedText: String? = nil
+        translatedText: String? = nil,
+        paragraphID: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -2817,6 +2820,7 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         self.createdAt = createdAt
         self.sourceLanguage = sourceLanguage
         self.translatedText = translatedText
+        self.paragraphID = paragraphID
     }
 
     /// 每个原字符恰出现一次。未对齐的正文保留为未知，不能借用相邻人的标签。
@@ -3420,6 +3424,7 @@ public struct LineDraft: Sendable {
     public var createdAt: Date?
     public var sourceLanguage: String?
     public var translatedText: String?
+    public var paragraphID: String?
 
     public init(
         sessionID: String,
@@ -3435,7 +3440,8 @@ public struct LineDraft: Sendable {
         timingQuality: SessionTimingQuality? = nil,
         createdAt: Date? = nil,
         sourceLanguage: String? = nil,
-        translatedText: String? = nil
+        translatedText: String? = nil,
+        paragraphID: String? = nil
     ) {
         self.sessionID = sessionID
         self.role = role
@@ -3451,6 +3457,7 @@ public struct LineDraft: Sendable {
         self.createdAt = createdAt
         self.sourceLanguage = sourceLanguage
         self.translatedText = translatedText
+        self.paragraphID = paragraphID
     }
 }
 
