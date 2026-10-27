@@ -1366,7 +1366,7 @@ private struct CaptionBandIconButtonBody: View {
         case .warningAccent:
             return SpeechRailDesignTokens.Color.attention
         case .successAccent:
-            return SpeechRailDesignTokens.Color.healthy
+            return SpeechRailDesignTokens.Color.ready
         case .destructiveHover:
             return isHovered || configuration.isPressed
                 ? SpeechRailDesignTokens.Color.critical
@@ -1384,7 +1384,7 @@ private struct CaptionBandIconButtonBody: View {
             case .warningAccent:
                 return SpeechRailDesignTokens.Color.attention.opacity(0.28)
             case .successAccent:
-                return SpeechRailDesignTokens.Color.healthy.opacity(0.24)
+                return SpeechRailDesignTokens.Color.ready.opacity(0.24)
             case .destructiveHover:
                 return SpeechRailDesignTokens.Color.critical.opacity(0.24)
             }
@@ -1398,7 +1398,7 @@ private struct CaptionBandIconButtonBody: View {
             case .warningAccent:
                 return SpeechRailDesignTokens.Color.attention.opacity(0.20)
             case .successAccent:
-                return SpeechRailDesignTokens.Color.healthy.opacity(0.16)
+                return SpeechRailDesignTokens.Color.ready.opacity(0.16)
             case .destructiveHover:
                 return SpeechRailDesignTokens.Color.critical.opacity(0.14)
             }
@@ -1411,7 +1411,7 @@ private struct CaptionBandIconButtonBody: View {
         case .warningAccent:
             return SpeechRailDesignTokens.Color.attention.opacity(0.13)
         case .successAccent:
-            return SpeechRailDesignTokens.Color.healthy.opacity(0.12)
+            return SpeechRailDesignTokens.Color.ready.opacity(0.12)
         }
     }
 
@@ -1422,7 +1422,7 @@ private struct CaptionBandIconButtonBody: View {
         case .warningAccent:
             return SpeechRailDesignTokens.Color.attention.opacity(isHovered ? 0.42 : 0.25)
         case .successAccent:
-            return SpeechRailDesignTokens.Color.healthy.opacity(0.32)
+            return SpeechRailDesignTokens.Color.ready.opacity(0.32)
         case .destructiveHover:
             return isHovered ? SpeechRailDesignTokens.Color.critical.opacity(0.30) : nil
         case .standard:
