@@ -70,7 +70,8 @@ public actor SessionStore: SessionArchiveWriting {
     /// v10（MA-14）：`knowledge_execution_event` 双时间事件日志 + `knowledge_supersession`。
     /// v11（MA-11）：`minutes.body_origin` + `parent_minutes_id`——用户改纪要产生**新版本**。
     /// v15：`session.target_bundle_id`, `session.target_app_name`, `line.source_language`, `line.translated_text`
-    public static let schemaVersion: Int32 = 15
+    /// v16：`line.paragraph_id`（实时字幕段落投影；首行承载整段译文）
+    public static let schemaVersion: Int32 = 16
 
     let directory: URL
     let fileManager: FileManager
@@ -202,6 +203,7 @@ public actor SessionStore: SessionArchiveWriting {
             }
             if version < 14 { try migrateV13ToV14() }
             if version < 15 { try migrateV14ToV15() }
+            if version < 16 { try migrateV15ToV16() }
             try execute("PRAGMA user_version=\(Self.schemaVersion);")
             try execute("COMMIT;")
         } catch {
@@ -298,7 +300,7 @@ public actor SessionStore: SessionArchiveWriting {
         try withStatement("""
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
                interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual,
-               source_language, translated_text
+               source_language, translated_text, paragraph_id
         FROM line WHERE id = ?;
         """) { statement in
             bind(statement, 1, id)
@@ -324,11 +326,11 @@ public actor SessionStore: SessionArchiveWriting {
         INSERT INTO line (
             id, session_id, ordinal, role, speaker_label, text, t_start, t_end,
             source, status, interrupted, device_switch, starred, timing_quality, created_at,
-            source_language, translated_text
+            source_language, translated_text, paragraph_id
         ) VALUES (
             ?, ?, (SELECT COALESCE(MAX(ordinal), 0) + 1 FROM line WHERE session_id = ?),
             ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?,
-            ?, ?
+            ?, ?, ?
         );
         """
         try withStatement(sql) { statement in
@@ -349,6 +351,7 @@ public actor SessionStore: SessionArchiveWriting {
             bind(statement, 14, (draft.createdAt ?? Date()).timeIntervalSince1970)
             bind(statement, 15, draft.sourceLanguage)
             bind(statement, 16, draft.translatedText)
+            bind(statement, 17, draft.paragraphID)
             try step(statement)
         }
         guard let ordinal = try scalarInt("SELECT ordinal FROM line WHERE id = ?;", args: [.text(id)]) else {
@@ -376,6 +379,15 @@ public actor SessionStore: SessionArchiveWriting {
             throw SessionStoreError.statementFailed("译文对应的转录行不存在")
         }
         return saved
+    }
+
+    /// 实时字幕段落建立/追加后，把段落 ID 补写到正式行；不碰正文和时间码。
+    public func attachLineParagraphID(lineID: String, paragraphID: String) throws {
+        try withStatement("UPDATE line SET paragraph_id = ? WHERE id = ?;") { statement in
+            bind(statement, 1, paragraphID)
+            bind(statement, 2, lineID)
+            try step(statement)
+        }
     }
 
     /// 分人链路只允许改归属列，**正文一个字不动**（§15.3 第 2 条）。
@@ -1722,7 +1734,7 @@ public actor SessionStore: SessionArchiveWriting {
                 continue
             }
             let line = try withStatement(
-                "SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status, interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual, source_language, translated_text FROM line WHERE id = ? LIMIT 1;"
+                "SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status, interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual, source_language, translated_text, paragraph_id FROM line WHERE id = ? LIMIT 1;"
             ) { statement -> TranscriptLine? in
                 bind(statement, 1, lineID)
                 guard try step(statement) == SQLITE_ROW else { return nil }
@@ -1910,7 +1922,7 @@ public actor SessionStore: SessionArchiveWriting {
         let sql = """
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
                interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual,
-               source_language, translated_text
+               source_language, translated_text, paragraph_id
         FROM line WHERE session_id = ? \(includePartial ? "" : "AND status = 'final'")
         ORDER BY ordinal ASC;
         """
@@ -1929,7 +1941,7 @@ public actor SessionStore: SessionArchiveWriting {
         let sql = """
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
                interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual,
-               source_language, translated_text
+               source_language, translated_text, paragraph_id
         FROM line WHERE session_id = ? AND status = 'final' \(beforeOrdinal == nil ? "" : "AND ordinal < ?")
         ORDER BY ordinal DESC LIMIT ?;
         """
@@ -1949,7 +1961,7 @@ public actor SessionStore: SessionArchiveWriting {
         let sql = """
         SELECT id, session_id, ordinal, role, speaker_label, text, t_start, t_end, source, status,
                interrupted, device_switch, starred, timing_quality, created_at, attribution_json, speaker_label_is_manual,
-               source_language, translated_text
+               source_language, translated_text, paragraph_id
         FROM line WHERE session_id = ? AND status = 'final' AND ordinal >= ? AND ordinal <= ? ORDER BY ordinal ASC;
         """
         return try withStatement(sql) { statement in
@@ -1977,7 +1989,7 @@ public actor SessionStore: SessionArchiveWriting {
         let sql = """
         SELECT l.id, l.session_id, l.ordinal, l.role, l.speaker_label, l.text, l.t_start, l.t_end,
                l.source, l.status, l.interrupted, l.device_switch, l.starred, l.timing_quality, l.created_at, l.attribution_json, l.speaker_label_is_manual,
-               l.source_language, l.translated_text
+               l.source_language, l.translated_text, l.paragraph_id
         FROM line l JOIN session s ON s.id = l.session_id
         WHERE l.status = 'final' AND l.text LIKE ? ESCAPE '\\'
         \(kind == nil ? "" : "AND s.kind = ?")
@@ -3642,7 +3654,8 @@ public actor SessionStore: SessionArchiveWriting {
             } ?? [],
             speakerLabelIsManual: columnInt(statement, 16) != 0,
             sourceLanguage: sqlite3_column_count(statement) > 17 ? columnText(statement, 17) : nil,
-            translatedText: sqlite3_column_count(statement) > 18 ? columnText(statement, 18) : nil
+            translatedText: sqlite3_column_count(statement) > 18 ? columnText(statement, 18) : nil,
+            paragraphID: sqlite3_column_count(statement) > 19 ? columnText(statement, 19) : nil
         )
     }
 

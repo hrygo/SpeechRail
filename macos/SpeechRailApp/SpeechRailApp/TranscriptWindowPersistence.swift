@@ -289,10 +289,10 @@ public final class TranscriptWindowCapture {
         }, didSave: { [weak self] command, ack in
             guard let self else { return }
             if case .sealed(let batch) = command {
+                self.confirmed.removeValue(forKey: batch.transactionID)
                 for row in batch.rows {
                     if let ordinal = ack.lineOrdinals[row.line.lineID] { await self.didSave(row.line, ordinal) }
                 }
-                self.confirmed.removeValue(forKey: batch.transactionID)
             }
             self.resolveWaiters(savedThrough: ack.savedThrough)
         })

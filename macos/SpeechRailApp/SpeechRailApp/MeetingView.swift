@@ -183,7 +183,7 @@ public struct MeetingView: View {
                 PageActionButton(
                     title: "会议设置…",
                     systemImage: "slider.horizontal.3",
-                    helpText: "打开会话设置：发言人区分、纪要模型与默认录音方式"
+                    helpText: "打开会话设置：纪要模型、对话服务与数据备份"
                 ) { openSettings() }
             } else if meeting.phase.isLive || meeting.phase == .interrupted {
                 // 稿 `screenMeetingRecording` 的页头三件：`⌘⇧.` 键帽 / 静音麦克风 / 结束会议。

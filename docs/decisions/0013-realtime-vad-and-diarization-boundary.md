@@ -25,3 +25,5 @@ endpointing 解决“何时结束一段转写”，diarization 解决“这一�
 - 16kHz/512-sample 帧为 32ms，因此 `400ms/900ms` 停止窗口实际量化到约 `416ms/928ms`。
 - `/health.realtime_vad` 独立报告 VAD 子能力；顶层 `/readyz=200` 不能证明 server VAD 可用。
 - 使用源码、测试和当前 runtime health 作为事实源；历史 VAD 方案中的统一默认值或旧模型实现不再覆盖本 ADR。
+- **2026-10-27 追加**：App 字幕场景 `ASRScenePreset.caption` 的调用方策略把 silence 从 `400ms` 调整为 `650ms`，用于减少“但/有的说”这类短停顿切句；generic `server_vad` 默认值 `400ms` 与 meeting 的 `900ms` 不变。按 32ms 帧量化，字幕停止窗口约为 `672ms`。
+- **2026-10-27 追加（段落投影）**：字幕把同一说话人、短间隔内的相邻行投影为语义段落；正式 `line` 记录与 SRT 行语义不变。Schema v16 增加 `line.paragraph_id`，同段首行承载整段译文，导出与回看按段落合并；本机可在字幕设置中关闭段落合并，或把静音窗口切回 `400ms/900ms`。

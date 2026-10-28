@@ -628,6 +628,14 @@ public enum SpeechRailDesignTokens {
         /// 窗口拾取框视觉常数。
         public static let windowPickerBorderWidth: CGFloat = 2.5
         public static let windowPickerCornerRadius: CGFloat = 12
+        public static let windowPickerControlBarCornerRadius: CGFloat = 14
+        public static let windowPickerBadgeCornerRadius: CGFloat = 8
+        public static let windowPickerKeycapCornerRadius: CGFloat = 4
+        public static let windowPickerTopBannerInset: CGFloat = 40
+        public static let windowPickerBottomBarInset: CGFloat = 48
+        public static let windowPickerAppIconSize: CGFloat = 18
+        public static let windowPickerDividerHeight: CGFloat = 20
+        public static let windowPickerShadowRadius: CGFloat = 12
     }
 
     /// Figma `Voice Chip` 组件的几何（脚本 `componentSet("Voice Chip", …)` 是
@@ -1062,6 +1070,7 @@ public enum SpeechRailDesignTokens {
         public static let pressedFillOpacity: Double = 0.12
         public static let disabledOpacity: Double = 0.45
         public static let focusLineWidth: CGFloat = 2
+        public static let pressScale: CGFloat = 0.97
     }
 
     public enum Typography {

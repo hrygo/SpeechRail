@@ -123,7 +123,9 @@ struct AudioInputTerminationTests {
             audio.offerLevel(0.7)
             try await wait { (isMeeting ? meeting.level : caption.level) == 0.7 }
             #expect((isMeeting ? meeting.transcriptPresentation.revision : caption.transcriptPresentation.revision) == projectionRevision)
-            for ordinal in 1...2_880 {
+            // Iterating 600 times exceeds the 500-line memory sliding window threshold to verify
+            // both bounded in-memory eviction and full SQLite persistence without excessive CI run time.
+            for ordinal in 1...600 {
                 let itemID = "item-\(ordinal)"
                 await client.emit(.segmentClosed(itemID: itemID,
                     sampleSpan: .init(startSample: (ordinal-1)*120_000, endSample: ordinal*120_000), reason: .vad, commitEventID: nil))
@@ -135,7 +137,7 @@ struct AudioInputTerminationTests {
             }
             if isMeeting { await meeting.stopCapture() } else { await caption.stopCapture() }
             #expect((isMeeting ? meeting.lines.count : caption.lines.count) == 500)
-            #expect(try await storage.store.lines(sessionID: id).count == 2_880)
+            #expect(try await storage.store.lines(sessionID: id).count == 600)
         }
     }
 

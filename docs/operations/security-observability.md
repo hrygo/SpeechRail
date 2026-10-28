@@ -2,7 +2,7 @@
 title: "SpeechRail 安全与可观测性"
 status: active
 version: "3.1.5"
-date: 2026-10-18
+date: 2026-10-27
 ---
 
 # SpeechRail 安全与可观测性
@@ -32,6 +32,13 @@ HTTP access 记录在响应完成或异常退出时各写一条，字段固定�
 `worker_state`。`outcome` 只允许 `completed`、`error`、`cancelled`、`disconnected`；记录
 不会复制请求体、响应体、Authorization 或自定义 voice 值。流式响应在已发送响应头后失败时，
 记录已发送的 HTTP status 与失败 outcome，客户端不会收到第二个 JSON 错误响应。
+
+Realtime 连接额外记两类识别语种事件，字段只有 `session_id`、`language`、`task`，不含
+prompt、关键词或转写正文：`realtime_asr_language_configured` 在 `session.update` 生效时
+记录服务端接受的语种，`realtime_asr_language_applied` 在每次建立 ASR worker 会话时记录
+实际交给引擎的语种。`language` 是语言码本身；未钉语种、未提供或值不可用时统一记为 `auto`。
+把这两条事件与客户端侧的 `session.updated` 回显对照，就能判断语种是在调用方、协议层还是
+worker 处丢失。
 
 这些记录由服务自身的 logging handler 落盘，而不是依赖 LaunchAgent 的 stdout/stderr 重定向
 （后者只保留无法进入日志的崩溃输出、无时间戳且不轮转）：

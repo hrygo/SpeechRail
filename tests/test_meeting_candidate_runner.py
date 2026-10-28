@@ -528,8 +528,11 @@ def test_activity_only_has_no_observed_asr_body():
             output.append(event)
 
         result = await bounded_run(
-            pcm(3), activity_factory=lambda: activity, text_replay=None,
-            epoch="session", sink=sink,
+            pcm(3),
+            activity_factory=lambda: activity,
+            text_replay=None,
+            epoch="session",
+            sink=sink,
         )
         assert result["complete"] is True
         assert result["accepted_samples"] == result["processed_samples"] == 480
@@ -541,7 +544,9 @@ def test_activity_only_has_no_observed_asr_body():
         assert len([e for e in output if e["kind"] == "activity_watermark"]) == 3
         frames = [e for e in output if e["kind"] == "stable_activity_frame"]
         assert [(e["start_sample"], e["end_sample"]) for e in frames] == [
-            (0, 160), (160, 320), (320, 480),
+            (0, 160),
+            (160, 320),
+            (320, 480),
         ]
         assert all(e["active_slots"] == [0] for e in frames)
         assert all(0 <= e["observed_at_seconds"] <= e["elapsed_seconds"] for e in frames)
@@ -580,17 +585,27 @@ def test_common_feed_runs_activity_adapter_with_original_governor_and_tail():
         async def workload(received, frames):
             assert received is shared
             report = await run_shared_activity_stream(
-                original, frames, activity_factory=lambda: activity,
-                epoch="session", sink=sink,
+                original,
+                frames,
+                activity_factory=lambda: activity,
+                epoch="session",
+                sink=sink,
             )
             reports.append(report)
             return report
 
-        result = await asyncio.wait_for(run_pcm_workload_schedule(
-            pcm=original, expected_pcm_sha256=hashlib.sha256(original).hexdigest(),
-            mode="diarization-only", governor=shared, diarization=workload,
-            chunk_samples=160, max_lateness_seconds=1,
-        ), 2)
+        result = await asyncio.wait_for(
+            run_pcm_workload_schedule(
+                pcm=original,
+                expected_pcm_sha256=hashlib.sha256(original).hexdigest(),
+                mode="diarization-only",
+                governor=shared,
+                diarization=workload,
+                chunk_samples=160,
+                max_lateness_seconds=1,
+            ),
+            2,
+        )
         assert result["schedule_completed"] is True
         assert result["certification_eligible"] is False
         assert reports[0]["processed_samples"] == 481
@@ -624,7 +639,7 @@ def test_shared_activity_verifies_actual_source_and_joins_cleanup(bad):
         elif bad == "short":
             chunks.pop()
         elif bad == "origin":
-            chunks[1] = replace(chunks[1], target_at=11., offered_at=11.)
+            chunks[1] = replace(chunks[1], target_at=11.0, offered_at=11.0)
         elif bad == "clock":
             chunks[1] = replace(chunks[1], offered_at=True)
 
@@ -639,8 +654,11 @@ def test_shared_activity_verifies_actual_source_and_joins_cleanup(bad):
             output.append(event)
 
         call = run_shared_activity_stream(
-            original, frames(), activity_factory=lambda: activity,
-            epoch="session", sink=sink,
+            original,
+            frames(),
+            activity_factory=lambda: activity,
+            epoch="session",
+            sink=sink,
         )
         if bad is not None:
             with pytest.raises(RuntimeError, match="candidate_run_failed"):
@@ -684,7 +702,11 @@ def test_shared_activity_closes_source_when_startup_rejects_clock():
 
         with pytest.raises(ValueError, match="clock"):
             await run_shared_activity_stream(
-                bytes(2), source, activity_factory=Activity, epoch="session", sink=sink,
+                bytes(2),
+                source,
+                activity_factory=Activity,
+                epoch="session",
+                sink=sink,
                 clock=lambda: True,
             )
         assert source.closed == 1 and source.reads == 0
@@ -718,9 +740,13 @@ def test_activity_pump_self_cancel_fails_without_waiting_for_input_deadline(self
         with pytest.raises(RuntimeError, match="candidate_run_failed"):
             await asyncio.wait_for(
                 run_candidate_stream(
-                    source(), activity_factory=lambda: activity, text_replay=None,
-                    epoch="session", sink=sink,
-                ), .2,
+                    source(),
+                    activity_factory=lambda: activity,
+                    text_replay=None,
+                    epoch="session",
+                    sink=sink,
+                ),
+                3.0,
             )
         assert source_closed == [True] and activity.cancels == 1
 
@@ -751,10 +777,15 @@ def test_repeated_cancellation_joins_activity_reaping_and_source_close():
         async def sink(event):
             pass
 
-        task = asyncio.create_task(run_candidate_stream(
-            source(), activity_factory=lambda: activity, text_replay=None,
-            epoch="session", sink=sink,
-        ))
+        task = asyncio.create_task(
+            run_candidate_stream(
+                source(),
+                activity_factory=lambda: activity,
+                text_replay=None,
+                epoch="session",
+                sink=sink,
+            )
+        )
         try:
             await asyncio.wait_for(consuming.wait(), 1)
             task.cancel()

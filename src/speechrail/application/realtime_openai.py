@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 from uuid import uuid4
@@ -24,9 +25,13 @@ from speechrail.compatibility.openai_realtime import (
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.alignment import AlignTextPort
 from speechrail.domain.asr_policy import resolve_effective_max_segment_ms
+from speechrail.observability.logging import event as log_event
+from speechrail.observability.logging import language_code
 from speechrail.runtime.cleanup import join_cleanup
 
 SendEvent = Callable[[dict[str, object]], Awaitable[int | None]]
+
+logger = logging.getLogger(__name__)
 
 
 def _str_list(value: object) -> list[str] | None:
@@ -387,4 +392,13 @@ class OpenAIRealtimeSession:
         self._asr_owner.apply_endpointing(endpointing)
         await self._asr_owner.configure_window(candidate)
         self._protocol_config.replace(candidate)
+        # 语种是「调用方说了什么」到「ASR worker 拿到什么」之间最容易静默断开的一环:
+        # 这里只记语言码与任务, 不记正文, 供事后把一次「识别语种不对」定位到具体一层。
+        log_event(
+            logger,
+            "realtime_asr_language_configured",
+            session_id=self._session_id,
+            language=language_code(candidate.get("language")),
+            task=str(candidate.get("task") or "conversation"),
+        )
         await self._send(session_updated(session_id=self._session_id, **self._session_fields()))

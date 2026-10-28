@@ -738,6 +738,7 @@ struct SpeechRailApp: App {
             SettingsView()
                 .environment(model)
                 .environment(preferences)
+                .environment(caption)
         }
         Window("SpeechRail 帮助", id: Self.helpWindowID) {
             SpeechRailHelpView()

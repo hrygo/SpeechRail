@@ -105,7 +105,7 @@ public struct SpeakerLabelingPanel: View {
                 Text("这一场没有标说话人")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text("正文照常记录。下次开始前在「会议设置…」中开启「发言人区分」，即可在记录中区分不同说话人。")
+                Text("正文照常记录。下次开始前在工作台开启「区分说话人」，即可在记录中区分不同说话人。")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)

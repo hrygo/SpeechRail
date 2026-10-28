@@ -279,7 +279,9 @@ jobs:
       - name: Restore Swift package build cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: macos/SpeechRailApp/.build
+          path: |
+            macos/SpeechRailApp/.build
+            ~/Library/Caches/org.swift.swiftpm
           key: swift-test-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/Package.swift', 'macos/SpeechRailApp/Package.resolved', 'scripts/ci_build_cache.py') }}-${{ hashFiles('macos/SpeechRailApp/**/*.swift') }}
           restore-keys: |
             swift-test-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('macos/SpeechRailApp/Package.swift', 'macos/SpeechRailApp/Package.resolved', 'scripts/ci_build_cache.py') }}-
@@ -288,7 +290,7 @@ jobs:
         run: python3 scripts/ci_build_cache.py restore --manifest macos/SpeechRailApp/.build/ci-inputs.json macos/SpeechRailApp
 
       - name: Run Swift package tests
-        run: swift test --package-path macos/SpeechRailApp
+        run: swift test --package-path macos/SpeechRailApp --parallel
 
       - name: Verify independent LLM support compilation
         run: python3 scripts/check_llm_support_boundary.py

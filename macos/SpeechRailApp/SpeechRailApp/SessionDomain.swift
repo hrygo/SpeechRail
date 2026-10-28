@@ -347,6 +347,14 @@ public enum CaptionSourceLanguage: String, CaseIterable, Codable, Identifiable, 
         case .chinese: "中文"
         }
     }
+
+    /// 传给 Realtime ASR 握手的 BCP-47 语言码；`自动` 留空，交给服务端检测。
+    ///
+    /// 与 `rawValue` 分开写是为了让契约字段的语义显式：`sourceLanguage` 同时影响
+    /// 识别与翻译，只有非自动档才应该锁死识别语言。中英混说仍应保留自动。
+    public var asrLanguageCode: String? {
+        self == .auto ? nil : rawValue
+    }
 }
 
 /// 字幕浮层与目标窗口的绑定状态（决策 D3）。
@@ -2768,6 +2776,8 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
     public var createdAt: Date
     public var sourceLanguage: String?
     public var translatedText: String?
+    /// 实时字幕的语义段落 ID；同段后续行的译文以首行为准。
+    public var paragraphID: String?
 
     public init(
         id: String,
@@ -2788,7 +2798,8 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         attributionUnits: [TranscriptAttributionUnit] = [],
         speakerLabelIsManual: Bool = false,
         sourceLanguage: String? = nil,
-        translatedText: String? = nil
+        translatedText: String? = nil,
+        paragraphID: String? = nil
     ) {
         self.id = id
         self.sessionID = sessionID
@@ -2809,6 +2820,7 @@ public struct TranscriptLine: Identifiable, Hashable, Sendable {
         self.createdAt = createdAt
         self.sourceLanguage = sourceLanguage
         self.translatedText = translatedText
+        self.paragraphID = paragraphID
     }
 
     /// 每个原字符恰出现一次。未对齐的正文保留为未知，不能借用相邻人的标签。
@@ -3412,6 +3424,7 @@ public struct LineDraft: Sendable {
     public var createdAt: Date?
     public var sourceLanguage: String?
     public var translatedText: String?
+    public var paragraphID: String?
 
     public init(
         sessionID: String,
@@ -3427,7 +3440,8 @@ public struct LineDraft: Sendable {
         timingQuality: SessionTimingQuality? = nil,
         createdAt: Date? = nil,
         sourceLanguage: String? = nil,
-        translatedText: String? = nil
+        translatedText: String? = nil,
+        paragraphID: String? = nil
     ) {
         self.sessionID = sessionID
         self.role = role
@@ -3443,6 +3457,7 @@ public struct LineDraft: Sendable {
         self.createdAt = createdAt
         self.sourceLanguage = sourceLanguage
         self.translatedText = translatedText
+        self.paragraphID = paragraphID
     }
 }
 

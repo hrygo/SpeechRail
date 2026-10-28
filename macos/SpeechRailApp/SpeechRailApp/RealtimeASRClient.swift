@@ -1115,6 +1115,7 @@ public actor RealtimeASRClient {
     /// Cumulative 24 kHz samples sent on this connection; clear does not reset it.
     private var uploadedSampleCount = 0
     private var expectedDrainCommitEventID: String?
+    private var inFlightDrainTask: Task<Void, any Error>?
     private var drainReceiptReceived = false
     private var drainFailure: Failure?
     private var expectedDrainSamples = 0
@@ -1140,6 +1141,7 @@ public actor RealtimeASRClient {
         keywords: [String]? = nil,
         scenePreset: ASRScenePreset = .caption,
         windowScene: SpeechRailWindowScene? = nil,
+        silenceDurationMilliseconds: Int? = nil,
         threshold: Double? = nil,
         diarizationEnabled: Bool = false,
         diarizationBackend: SpeechRailDiarizationBackend? = nil,
@@ -1167,7 +1169,7 @@ public actor RealtimeASRClient {
         self.model = model
         self.language = language
         self.keywords = keywords
-        self.silenceDurationMilliseconds = scenePreset.silenceDurationMilliseconds
+        self.silenceDurationMilliseconds = silenceDurationMilliseconds ?? scenePreset.silenceDurationMilliseconds
         self.prefixPaddingMilliseconds = scenePreset.prefixPaddingMilliseconds
         self.threshold = threshold ?? scenePreset.threshold
         self.diarizationEnabled = diarizationEnabled
@@ -1293,9 +1295,25 @@ public actor RealtimeASRClient {
 
     public func drainAndClear(timeout: Duration,
         beforeAuxiliary: @escaping @Sendable (Int) async throws -> Void) async throws {
-        guard expectedDrainCommitEventID == nil else {
-            throw Failure.transport("音频会话正在收尾。")
+        if let inFlightDrainTask {
+            try await inFlightDrainTask.value
+            return
         }
+        let task = Task {
+            try await self.performDrainAndClear(timeout: timeout, beforeAuxiliary: beforeAuxiliary)
+        }
+        inFlightDrainTask = task
+        do {
+            try await task.value
+            inFlightDrainTask = nil
+        } catch {
+            inFlightDrainTask = nil
+            throw error
+        }
+    }
+
+    private func performDrainAndClear(timeout: Duration,
+        beforeAuxiliary: @escaping @Sendable (Int) async throws -> Void) async throws {
         let eventID = UUID().uuidString
         expectedDrainCommitEventID = eventID
         expectedDrainSamples = uploadedSampleCount
@@ -1640,6 +1658,15 @@ public actor RealtimeASRClient {
         case "session.updated":
             guard acceptsASRPolicyEcho(object) else {
                 await rejectProtocolEvent(code: "invalid_server_event")
+                return
+            }
+            // 原音语种只在建连时生效：回显对不上就说明这段字幕会按另一种语言识别，
+            // 而这在这之前完全看不出来。宁可当场停下，也不要静默给一份错语种的字幕。
+            guard acceptsLanguageEcho(object) else {
+                await rejectProtocolEvent(
+                    code: "invalid_language_echo",
+                    message: "语音服务没有按所选原音语种识别，已关闭当前连接。"
+                )
                 return
             }
             if let diarizationBackend, diarizationEnabled {
@@ -2335,6 +2362,21 @@ public actor RealtimeASRClient {
         if let number = value as? NSNumber { return number.intValue }
         if let text = value as? String { return Int(text) }
         return nil
+    }
+
+    /// `session.updated` 回显的是这次连接**实际生效**的配置，识别语种就在里面。
+    ///
+    /// 语种不像策略那样能在会话中途改到生效：它只在握手时钉一次，之后每一段都按它识别。
+    /// 所以回显缺失或不等于请求值时，这段字幕的语种从第一句起就是错的，而调用方再也拿不到
+    /// 第二次确认的机会。自动档（`language == nil`）没有钉语种，也就没有可校验的值。
+    private func acceptsLanguageEcho(_ object: [String: Any]) -> Bool {
+        guard let requested = language else { return true }
+        guard let session = object["session"] as? [String: Any],
+              let audio = session["audio"] as? [String: Any],
+              let input = audio["input"] as? [String: Any],
+              let transcription = input["transcription"] as? [String: Any]
+        else { return false }
+        return transcription["language"] as? String == requested
     }
 
     private func acceptsASRPolicyEcho(_ object: [String: Any]) -> Bool {

@@ -53,12 +53,38 @@ def _bounded(value: LogValue) -> LogValue:
     return value
 
 
+def language_code(value: object) -> str:
+    """Render one session's ASR language as a bounded, low-cardinality log value.
+
+    ``auto`` covers both "the caller left detection to the server" and "the value
+    was not a usable code". An operator does not need to tell those apart to
+    answer the only question this field exists for: which language was asked for.
+    """
+
+    if isinstance(value, str) and value.strip():
+        return value.strip()[:16]
+    return "auto"
+
+
 def event(logger: logging.Logger, name: str, **fields: str | int | float | bool | None) -> None:
     safe = {
         key: value
         for key, value in fields.items()
         if key
-        in {"request_id", "session_id", "client", "model", "backend", "duration_ms", "error_code"}
+        in {
+            "request_id",
+            "session_id",
+            "client",
+            "model",
+            "backend",
+            "duration_ms",
+            "error_code",
+            # A language code and one of five fixed tasks are both low-cardinality,
+            # and together they let one session prove which ASR language it asked
+            # for without logging any transcript content.
+            "language",
+            "task",
+        }
     }
     logger.info(name, extra={"speechrail": safe})
 
@@ -245,4 +271,5 @@ __all__ = [
     "configure_logging",
     "default_log_directory",
     "event",
+    "language_code",
 ]

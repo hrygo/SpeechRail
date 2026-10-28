@@ -199,28 +199,45 @@ extension MeetingView {
         }
     }
 
-    /// 发言人区分容量配置胶囊
+    /// 发言人区分开关与容量配置胶囊（仅在会议工作台内呈现）
     private var speakerCapacityControls: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-            Image(systemName: "person.2.fill")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(preferences.meetingDiarizationEnabled ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkTertiary)
-            Text("发言人:")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            Picker("发言人", selection: $expectedSpeakerCount) {
-                ForEach(MeetingExpectedSpeakerCount.allCases) { count in
-                    Text(count.title).tag(count)
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Toggle(
+                isOn: Binding(
+                    get: { preferences.meetingDiarizationEnabled },
+                    set: { preferences.meetingDiarizationEnabled = $0 }
+                )
+            ) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Image(systemName: "person.2.fill")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(preferences.meetingDiarizationEnabled ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkTertiary)
+                    Text("区分说话人")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .disabled(!preferences.meetingDiarizationEnabled)
-            .help(!preferences.meetingDiarizationEnabled
-                ? "在设置 → 会话开启「会议显示说话人」后生效"
-                : expectedSpeakerCount == .moreThanFour
-                ? "最多区分 4 位说话人，其余或不确定的发言标为未识别；文字照常保留"
-                : "选择人数后，超出或不确定的发言会标为未识别；文字照常保留")
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .help("开启后自动区分不同发言人（最多 4 位），会中与会后均可随时标记姓名")
+
+            if preferences.meetingDiarizationEnabled {
+                Divider().frame(height: 12)
+                Picker("发言人数", selection: $expectedSpeakerCount) {
+                    ForEach(MeetingExpectedSpeakerCount.allCases) { count in
+                        Text(count.title).tag(count)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .fixedSize()
+                .help(
+                    expectedSpeakerCount == .moreThanFour
+                        ? "最多区分 4 位说话人，其余或不确定的发言标为未识别；文字照常保留"
+                        : "选择人数后，超出或不确定的发言会标为未识别；文字照常保留"
+                )
+            }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)

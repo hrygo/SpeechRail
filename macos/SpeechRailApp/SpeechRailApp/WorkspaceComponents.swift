@@ -1549,8 +1549,32 @@ private struct PageActionButtonBody: View {
 
  var body: some View {
  configuration.label
+ .fontWeight(variant == .prominent ? .medium : .regular)
  .foregroundStyle(foregroundColor)
  .background(backgroundShape)
+ .overlay {
+ if variant == .prominent, isEnabled {
+ SpeechRailDesignTokens.Corner.controlShape
+ .strokeBorder(
+ SpeechRailDesignTokens.Color.rail.opacity(
+ configuration.isPressed ? 0.55 : (isHovered ? 0.42 : 0.28)
+ ),
+ lineWidth: 1
+ )
+ }
+ }
+ .shadow(
+ color: (variant == .prominent && isHovered && !configuration.isPressed && isEnabled)
+ ? SpeechRailDesignTokens.Color.rail.opacity(0.16)
+ : Color.clear,
+ radius: 6,
+ y: 2
+ )
+ .scaleEffect(
+ configuration.isPressed && isEnabled && !reduceMotion
+ ? SpeechRailDesignTokens.Interaction.pressScale
+ : 1.0
+ )
  .speechRailFocusRing(isFocused)
  .contentShape(SpeechRailDesignTokens.Corner.controlShape)
  .opacity(isEnabled ? 1 : SpeechRailDesignTokens.Interaction.disabledOpacity)
@@ -1589,7 +1613,7 @@ private struct PageActionButtonBody: View {
  case .standard:
  shape.fill(SpeechRailDesignTokens.Toolbar.Action.pressedFill)
  case .prominent:
- shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.24))
+ shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.28))
  case .destructive:
  shape.fill(SpeechRailDesignTokens.Color.critical.opacity(0.20))
  }
@@ -1598,7 +1622,7 @@ private struct PageActionButtonBody: View {
  case .standard:
  shape.fill(SpeechRailDesignTokens.Toolbar.Action.hoverFill)
  case .prominent:
- shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.14))
+ shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.18))
  case .destructive:
  shape.fill(SpeechRailDesignTokens.Color.critical.opacity(0.12))
  }
@@ -1607,7 +1631,7 @@ private struct PageActionButtonBody: View {
  case .standard:
  Color.clear
  case .prominent:
- shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.08))
+ shape.fill(SpeechRailDesignTokens.Color.rail.opacity(0.11))
  case .destructive:
  Color.clear
  }
@@ -3434,8 +3458,8 @@ private struct OperationFeedbackModifier: ViewModifier {
             GeometryReader { geometry in
                 if let visible {
                     Group {
-                        if geometry.size.height < SpeechRailDesignTokens.Layout.Sheet.messageBodyMaximumHeight {
-                            // Thin caption windows and collapsed drawers need system-owned space.
+                        if !visible.autoDismiss && geometry.size.height < SpeechRailDesignTokens.Layout.Sheet.messageBodyMaximumHeight {
+                            // Non-dismissible critical cards on narrow/thin windows pop over to retain system space.
                             Color.clear.frame(width: 0, height: 0)
                                 .popover(isPresented: Binding(
                                     get: { self.visible?.id == visible.id },
@@ -3459,10 +3483,17 @@ private struct OperationFeedbackModifier: ViewModifier {
                         }
                     }
                     .id(visible.id)
-                    .padding(SpeechRailDesignTokens.Spacing.sm)
+                    .padding(.top, visible.autoDismiss ? SpeechRailDesignTokens.Spacing.xs : SpeechRailDesignTokens.Spacing.sm)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .transition(
+                        .asymmetric(
+                            insertion: .move(edge: .top).combined(with: .opacity),
+                            removal: .opacity.combined(with: .scale(scale: 0.95))
+                        )
+                    )
                 }
             }
+            .animation(SpeechRailDesignTokens.Motion.interactiveSpring, value: visible?.id)
         }
         .onChange(of: activeIDs) { _, ids in
             dismissedIDs.formIntersection(ids)
@@ -3483,7 +3514,88 @@ struct OperationFeedbackCard: View {
     @FocusState private var isDismissFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+        if feedback.autoDismiss {
+            transientCapsule
+        } else {
+            persistentAlertCard
+        }
+    }
+
+    // MARK: - 轻量 HUD 胶囊 (Toast / Capsule HUD)
+
+    private var transientCapsule: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Image(systemName: feedback.tone.systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(feedback.tone.color)
+                .accessibilityHidden(true)
+
+            Text(feedback.title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+
+            if !feedback.message.isEmpty && feedback.message != feedback.title {
+                Text(feedback.message)
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            if let title = feedback.actionTitle, let action = feedback.action {
+                Button(title) { dismiss(); action() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    .padding(.leading, SpeechRailDesignTokens.Spacing.micro)
+            }
+
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary.opacity(0.8))
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("关闭提示")
+            .accessibilityIdentifier("operation-feedback-dismiss")
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
+        .background {
+            Capsule(style: .continuous)
+                .fill(SpeechRailDesignTokens.Surface.elevatedMaterial)
+                .overlay {
+                    Capsule(style: .continuous)
+                        .strokeBorder(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Spacing.hairline)
+                }
+        }
+        .shadow(
+            color: SpeechRailDesignTokens.Surface.elevatedShadow,
+            radius: 8,
+            y: 4
+        )
+        .contentShape(Capsule())
+        .onTapGesture {
+            dismiss()
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("operation-feedback")
+        .task(id: "\(feedback.id):\(feedback.autoDismiss)") {
+            do {
+                try await Task.sleep(for: SpeechRailDesignTokens.Notice.transientDisplayDuration)
+                try Task.checkCancellation()
+            } catch { return }
+            dismiss()
+        }
+    }
+
+    // MARK: - 告警与错误处理卡 (Persistent Alert Card)
+
+    private var persistentAlertCard: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Image(systemName: feedback.tone.systemImage)
                     .font(SpeechRailDesignTokens.Typography.noticeIcon)
@@ -3495,14 +3607,17 @@ struct OperationFeedbackCard: View {
                 if let title = feedback.actionTitle, let action = feedback.action {
                     Button(title) { dismiss(); action() }
                         .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
                 }
-                Button(feedback.autoDismiss ? "收起" : "知道了", action: dismiss)
+                Button("知道了", action: dismiss)
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
                     .keyboardShortcut(.cancelAction)
                     .focused($isDismissFocused)
                     .accessibilityIdentifier("operation-feedback-dismiss")
             }
             .fixedSize(horizontal: false, vertical: true)
+
             ViewThatFits(in: .vertical) {
                 messageContent.fixedSize(horizontal: false, vertical: true)
                 ScrollView { messageContent }
@@ -3515,22 +3630,14 @@ struct OperationFeedbackCard: View {
             ))
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
-        .frame(width: min(SpeechRailDesignTokens.Layout.Sheet.formWidth,
-                          max(0, availableSize.width - SpeechRailDesignTokens.Spacing.sm * 2)))
+        .frame(maxWidth: min(SpeechRailDesignTokens.Layout.Sheet.compactWidth,
+                             max(0, availableSize.width - SpeechRailDesignTokens.Spacing.sm * 2)))
         .speechRailSurface(.elevated)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("operation-feedback")
-        .defaultFocus($isDismissFocused, !feedback.autoDismiss)
-        .task(id: "\(feedback.id):\(feedback.autoDismiss)") {
-            if feedback.autoDismiss {
-                do {
-                    try await Task.sleep(for: SpeechRailDesignTokens.Notice.transientDisplayDuration)
-                    try Task.checkCancellation()
-                } catch { return }
-                dismiss()
-            } else {
-                isDismissFocused = true
-            }
+        .defaultFocus($isDismissFocused, true)
+        .task(id: feedback.id) {
+            isDismissFocused = true
         }
     }
 

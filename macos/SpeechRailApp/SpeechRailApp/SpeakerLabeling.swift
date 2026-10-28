@@ -178,6 +178,11 @@ public final class SpeakerLabeling {
         state = enabled ? .active : .off
     }
 
+    public func clearDiagnostic() {
+        diagnosticCode = nil
+        note = nil
+    }
+
     /// 同场续接（新 epoch / 新连接）：只重置 uid 坐标系，保留面板显示。
     ///
     /// `segment_uid` 是服务端按连接生成的（`seg_{uuid4hex[:12]}`），跨连接无意义，

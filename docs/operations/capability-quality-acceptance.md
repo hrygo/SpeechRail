@@ -30,7 +30,7 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 | 能力 | 当前事实 |
 |---|---|
 | Realtime VAD | `auto → silero`，`speech_admission_enabled=true`，`ready=true` |
-| Sona subtitle policy | threshold `0.65`、prefix `300ms`、silence `400ms` |
+| Sona subtitle policy | threshold `0.65`、prefix `300ms`、silence `650ms` |
 | Sona meeting policy | threshold `0.65`、prefix `300ms`、silence `900ms` |
 | diarization | CoreML Sortformer FP16 profile ready；activity 与 endpointing 分离 |
 | clone TTS | deterministic seed、clone-only sampling、request-local loudness freeze、peak ceiling、reference signal validation |

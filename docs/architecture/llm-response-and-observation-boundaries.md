@@ -2,8 +2,8 @@
 title: "LLM 响应校验与观测边界"
 status: active
 audience: "macOS App 开发者"
-version: "1.0.2"
-date: 2026-10-20
+version: "1.1.0"
+date: 2026-10-27
 ---
 
 # LLM 响应校验与观测边界
@@ -32,6 +32,14 @@ JSON 格式参数，完整 schema 仍在提示中，严格 JSON、usage/预算�
 协议和格式协商属于 Provider，分窗 submitted 检查点、结果保存与恢复属于纪要 owner。
 无远端 ID 的 submitted 窗口在恢复时视为提交结果未知；历史远端 ID 只查询原任务。
 详见[纪要模型服务兼容与恢复](../developers/macos-app-development.md#纪要的模型服务兼容与恢复)。
+
+## 助手传输与思考控制
+
+助手默认走 Responses。部分兼容网关把 Responses 请求翻译成上游 Chat 请求时会丢掉 `enable_thinking`、`thinking`、`chat_template_kwargs` 等关闭思考字段，而 `reasoning.effort=none` 又可能被上游忽略；这时 Responses 正文里的 `reasoning` 项仍然带非空 summary，思考实际没有关掉。
+
+Provider 在助手启动探测（`check(operation: .responses, allowThinkingControlFallback: false)`）成功后检查该正文；只要还能看到带内容的 reasoning，就用 Chat 方言按 `enable_thinking` → `thinking.type` → `chat_template_kwargs` → `reasoning_effort` 的顺序各试探一次（每次一条短 Chat 请求，正文非空且 `reasoning_content` 为空才算成功）。第一个成功的方言会被记住，`stream()` 改走 `/chat/completions` 流式；Chat 完全不通或所有方言都关不掉时保持 Responses，不额外阻塞会话。判定结果只按端点+模型缓存在内存里，重启或换配置后重新探测。
+
+方言试探与传输判定由 Provider 拥有；助手编排层只消费 `stream()` 的正文流，不感知本轮走的是哪条协议。
 
 ## 依赖与观测
 

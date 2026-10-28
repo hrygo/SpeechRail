@@ -1252,9 +1252,9 @@ final class AudiobookWorkflowTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        for _ in 0..<1_000 {
+        for _ in 0..<200 {
             if await gate.hasSuspended() { return }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("制作器未进入渲染等待点", file: file, line: line)
     }

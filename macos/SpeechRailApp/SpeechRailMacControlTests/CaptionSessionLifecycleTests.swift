@@ -78,6 +78,82 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await super.tearDown()
     }
 
+    func testSourceLanguageMapsOnlyExplicitChoicesToASRCode() {
+        XCTAssertNil(CaptionSourceLanguage.auto.asrLanguageCode)
+        XCTAssertEqual(CaptionSourceLanguage.english.asrLanguageCode, "en")
+        XCTAssertEqual(CaptionSourceLanguage.japanese.asrLanguageCode, "ja")
+        XCTAssertEqual(CaptionSourceLanguage.korean.asrLanguageCode, "ko")
+        XCTAssertEqual(CaptionSourceLanguage.chinese.asrLanguageCode, "zh")
+    }
+
+    func testExplicitSourceLanguageIsForwardedToRealtimeASR() async throws {
+        let h = try await makeHarness()
+        h.session.sourceLanguage = .japanese
+        h.session.glossaryText = "SpeechRail=语音轨道, Realtime=实时"
+
+        _ = try await start(h)
+
+        XCTAssertEqual(
+            h.clients.madeConfigurations.last?.language, "ja",
+            "用户在字幕上选定的源语言必须进入 ASR 握手，而不是只影响翻译提示词"
+        )
+        XCTAssertEqual(
+            h.clients.madeConfigurations.last?.keywords,
+            ["SpeechRail", "Realtime"],
+            "术语表原文要作为 ASR 专名提示，不能把中文译法也塞进去"
+        )
+        XCTAssertEqual(h.clients.madeConfigurations.last?.scenePreset, .caption)
+        XCTAssertEqual(h.session.translationMetrics.finalRequests, 0)
+
+        // 会话运行中途切换原音语种（例如从日语切到英语）：应立即清理旧语种未定稿，并自动重连 ASR 透传新语种 "en"
+        // 事件是异步消费的：先等到它真的写进 partialText，再断言切换时被清空。
+        try await h.emit(.partialSnapshot(
+            itemID: "item-ja",
+            revision: 1,
+            text: "哇，那 sounds 真的很好",
+            evidence: .init(stablePrefixCodepoints: 4)
+        ))
+        try await h.settle { $0.session.partialText == "哇，那 sounds 真的很好" }
+        h.session.sourceLanguage = .english
+        XCTAssertNil(h.session.partialText, "切换原音语种时应立即清空旧语种下的混杂未定稿识别文本")
+        try await h.settle {
+            $0.clients.madeConfigurations.count >= 2
+                && $0.clients.madeConfigurations.last?.language == "en"
+                && $0.session.phase == .running
+        }
+    }
+
+    func testCaptionSilenceOverrideReachesRealtimeConfigurationAndPersists() async throws {
+        let h = try await makeHarness()
+        XCTAssertEqual(h.session.captionSilenceDurationMilliseconds, 650)
+        h.session.captionSilenceDurationMilliseconds = 400
+        _ = try await start(h)
+        XCTAssertEqual(h.clients.madeConfigurations.last?.silenceDurationMilliseconds, 400)
+        XCTAssertEqual(
+            h.defaults.integer(forKey: "speechrail.caption.silenceDurationMilliseconds"), 400
+        )
+        h.session.captionSilenceDurationMilliseconds = 100
+        XCTAssertEqual(h.session.captionSilenceDurationMilliseconds, 300, "越界值必须收敛到安全窗口")
+        XCTAssertEqual(
+            h.defaults.integer(forKey: "speechrail.caption.silenceDurationMilliseconds"), 300,
+            "越界收敛后的值必须同步写入 UserDefaults，防止重启后回退旧值"
+        )
+    }
+
+    func testGlossaryTextPersistsAndBoundsInput() async throws {
+        let h = try await makeHarness()
+        h.session.glossaryText = "SpeechRail=语音轨道"
+
+        XCTAssertEqual(
+            h.defaults.string(forKey: "speechrail.caption.glossaryText"),
+            "SpeechRail=语音轨道"
+        )
+        XCTAssertEqual(h.session.glossary.entries.first?.translation, "语音轨道")
+
+        h.session.glossaryText = String(repeating: "x", count: 2_100)
+        XCTAssertEqual(h.session.glossaryText.count, 2_000, "术语表输入要限长，避免撑大持久化与提示词")
+    }
+
     private func makeHarness(
         saveLine: (@Sendable (LineDraft, String) async throws -> Int)? = nil,
         attachTranscriptAttribution: (@Sendable (String, [TranscriptAttributionUnit]) async throws -> TranscriptLine)? = nil,
@@ -116,7 +192,8 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         let session = CaptionSession(
             coordinator: coordinator,
             dependencies: dependencies,
-            audioSourceFactory: { audio }
+            audioSourceFactory: { audio },
+            defaults: defaults
         )
         session.serviceReadiness = { .ready(profile: "test") }
         coordinator.starter = { kind in
@@ -284,6 +361,23 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.session.labeling.state, .off)
     }
 
+    func testTranscriptionFailureClearsAfterNextLineSavesButLabelingFailureDoesNot() async throws {
+        let h = try await makeHarness()
+        _ = try await start(h)
+
+        try await h.emit(.failed(itemID: "bad-item", code: "asr_failed", message: "合成失败"))
+        try await h.settle { $0.session.lastFailure != nil }
+        XCTAssertEqual(h.session.lastFailure, "asr_failed：合成失败")
+
+        try await h.emit(.completed(itemID: "good-item", transcript: "下一句正常"))
+        try await h.settle { $0.session.lines.count == 1 }
+        XCTAssertNil(
+            h.session.lastFailure,
+            "新一句保存成功后，上一句的转写失败提示不该一直挂在页脚"
+        )
+        XCTAssertNil(h.session.labeling.diagnosticCode)
+    }
+
     /// Gap1（字幕侧）：分人单项不可用不拦整场。
     ///
     /// 与会议侧同构：建两条连接（第一条带分人被拒，第二条不带分人成功），
@@ -419,6 +513,34 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertNotEqual(record?.state, .archived)
         XCTAssertNotNil(h.coordinator.pendingSeals[id])
         XCTAssertEqual(h.session.transcriptionStatusText, "字幕收尾尚未确认")
+    }
+
+    func testFinishIncompleteCaptureResolvesCompletionFailure() async throws {
+        let h = try await makeHarness()
+        let id = try await start(h)
+        h.coordinator.recordCaptureCompletionFailure(
+            recordID: id,
+            failure: .init(stage: .protocolDrain, message: "模拟收尾未确认")
+        )
+        XCTAssertNotNil(h.session.completionFailure)
+        let resolved = await h.session.finishIncompleteCapture(recordID: id)
+        XCTAssertTrue(resolved)
+        XCTAssertNil(h.session.completionFailure)
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.state, .archived)
+        XCTAssertEqual(record?.endReason, .interrupted)
+    }
+
+    func testFinishWhilePausedResetsToIdleAndCanStartNewSession() async throws {
+        let h = try await makeHarness()
+        let id = try await start(h)
+        await h.session.pause()
+        XCTAssertEqual(h.session.phase, .paused)
+        await h.session.finish()
+        XCTAssertEqual(h.session.phase, .idle)
+        let nextID = try await start(h)
+        XCTAssertNotEqual(id, nextID)
+        XCTAssertEqual(h.session.phase, .running)
     }
 
     func testReceiverDeadlineCannotSealCaptionAndLateBufferedFinalIsDiscarded() async throws {
@@ -1142,6 +1264,26 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(tiering.stablePrefix + tiering.volatileTail, "The budget is approved")
     }
 
+    func testBandContentTiersStableTranslationPrefixOnPrimaryRow() throws {
+        let content = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "The budget is approved",
+            partialTranslatedText: "预算已经批准",
+            partialStablePrefixLength: 6,
+            partialTranslationStablePrefixLength: 4,
+            displayMode: .bilingual
+        )
+        let row = try XCTUnwrap(content.rows.first)
+        XCTAssertEqual(row.primaryText, "预算已经批准")
+        let tiering = try XCTUnwrap(row.primaryTiering)
+        XCTAssertEqual(tiering.stablePrefix, "预算已经")
+        XCTAssertEqual(tiering.volatileTail, "批准")
+        XCTAssertFalse(tiering.isSecondary)
+        XCTAssertEqual(tiering.stablePrefix + tiering.volatileTail, row.primaryText)
+        XCTAssertTrue(try XCTUnwrap(row.sourceTiering).isSecondary)
+    }
+
     func testBandContentLeavesFlatColorWhenNoStablePrefix() throws {
         let content = CaptionBandContent(
             lines: [],
@@ -1162,6 +1304,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         fake.streamDeltas = ["预算已批准"]
         let h = try await makeHarness()
         h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
         _ = try await start(h)
 
         try await h.emit(.completed(itemID: "one", transcript: "The budget is approved"))
@@ -1193,6 +1336,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         fake.streamDeltas = ["预算已经批准"]
         let h = try await makeHarness()
         h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
         _ = try await start(h)
 
         try await h.emit(.partialSnapshot(itemID: "draft", revision: 1, text: "The budget is approved"))
@@ -1219,6 +1363,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         fake.failImmediatelyFromCall = 2
         let h = try await makeHarness()
         h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
         _ = try await start(h)
 
         try await h.emit(.partialSnapshot(itemID: "draft", revision: 1, text: "The budget is approved"))
@@ -1349,6 +1494,695 @@ final class CaptionSessionLifecycleTests: XCTestCase {
                 displayMode: .bilingual
             )
         )
+        // 长句在定稿瞬间发生后半句 ASR 词汇修订时（共享 >= 60% 且 >= 8 字符前缀），仍平滑继承 Stage 1 草稿不闪白
+        XCTAssertEqual(
+            CaptionSession.inheritableDraftTranslation(
+                lastPartialTranslation: "贴上这个标签让智能体 AI 热潮飙升",
+                lastPartialSourceText: "Sticker and put this on almost every thing in sight",
+                sourceText: "Sticker and put this on almost everything in sight, and that has caused hype",
+                displayMode: .bilingual
+            ),
+            "贴上这个标签让智能体 AI 热潮飙升"
+        )
+    }
+
+    func testPauseAndResumePreservesSelectedAppAudioTargetSource() async throws {
+        let h = try await makeHarness()
+        let targetApp = CaptionTargetApp(
+            bundleID: "com.apple.QuickTimePlayerX",
+            appName: "QuickTime Player",
+            windowID: 42,
+            isPlayingAudio: true,
+            pid: 999
+        )
+        var requestedTargets: [CaptionAudioTarget] = []
+        var fallbackFactoryCallCount = 0
+        let appAudio = ControllableCaptionAudioSource()
+        h.session.audioSourceFactory = {
+            fallbackFactoryCallCount += 1
+            return h.audio
+        }
+        h.session.makeAudioSourceForTarget = { target in
+            requestedTargets.append(target)
+            return appAudio
+        }
+
+        await h.session.selectTarget(.app(targetApp))
+        XCTAssertEqual(h.session.phase, .running)
+        XCTAssertEqual(requestedTargets, [.app(targetApp)])
+        XCTAssertEqual(fallbackFactoryCallCount, 0)
+
+        await h.session.pause()
+        XCTAssertEqual(h.session.phase, .paused)
+
+        await h.session.resume()
+        XCTAssertEqual(h.session.phase, .running)
+        XCTAssertEqual(
+            requestedTargets,
+            [.app(targetApp), .app(targetApp)],
+            "暂停后继续必须沿用已选目标应用音源，不能退回默认麦克风工厂"
+        )
+        XCTAssertEqual(fallbackFactoryCallCount, 0)
+    }
+
+    func testSystemAudioFailureMapsToSystemAudioUnavailableBlockReason() async throws {
+        let h = try await makeHarness()
+        let targetApp = CaptionTargetApp(
+            bundleID: "com.google.Chrome",
+            appName: "Google Chrome",
+            windowID: 100,
+            pid: 200
+        )
+        let failingSource = ControllableCaptionAudioSource()
+        failingSource.startFailure = MeetingAudioBlocked(
+            reason: .systemAudioUnavailable("未获系统录音授权。")
+        )
+        h.session.makeAudioSourceForTarget = { _ in failingSource }
+
+        await h.session.selectTarget(.app(targetApp))
+        XCTAssertEqual(h.session.phase, .idle)
+        XCTAssertEqual(
+            h.session.blocked,
+            .systemAudioUnavailable("未获系统录音授权。"),
+            "系统音频采集受阻应映射为 .systemAudioUnavailable，以便浮层提供切换麦克风出口"
+        )
+    }
+
+    func testChineseAndOriginalOnlyNeverShowTranslatingSpinnerAndPersistSourceLanguage() async throws {
+        // 1. 中文未定稿与仅原文未定稿不应标为 isTranslating
+        let zhPartial = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "今天我们测试实时字幕",
+            partialTranslatedText: nil,
+            displayMode: .bilingual
+        )
+        XCTAssertEqual(zhPartial.rows.first?.isTranslating, false, "中文未定稿不应显示翻译中")
+
+        let originalOnlyPartial = CaptionBandContent(
+            lines: [],
+            windowUnits: nil,
+            partialText: "The budget is approved",
+            partialTranslatedText: nil,
+            displayMode: .originalOnly
+        )
+        XCTAssertEqual(originalOnlyPartial.rows.first?.isTranslating, false, "仅原文模式不应显示翻译中")
+
+        // 2. 中文定稿行应将 source_language='zh' 持久化入库，且 currentSegmentText 遵循显示模式
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
+        h.session.displayMode = .bilingual
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "zh-1", transcript: "今天我们测试实时字幕"))
+        let recordID = try XCTUnwrap(h.session.sessionID)
+        try await h.settle {
+            guard let line = $0.session.lines.first else { return false }
+            return !line.isTranslating && line.sourceLanguage == "zh"
+        }
+        try await h.settle { _ in
+            let stored = try? await h.store.lines(sessionID: recordID)
+            return stored?.first?.sourceLanguage == "zh"
+        }
+
+        try await h.emit(.completed(itemID: "en-2", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 2 && !$0.session.lines[1].isTranslating }
+
+        h.session.displayMode = .bilingual
+        XCTAssertEqual(h.session.currentSegmentText, "预算已批准\nThe budget is approved")
+        h.session.displayMode = .chineseOnly
+        XCTAssertEqual(h.session.currentSegmentText, "预算已批准")
+        h.session.displayMode = .originalOnly
+        XCTAssertEqual(h.session.currentSegmentText, "The budget is approved")
+        h.session.displayMode = .bilingual
+    }
+
+    // MARK: 翻译开关（默认关，用户主动打开才调模型）
+
+    func testTranslationIsOffByDefaultAndNeverCallsClient() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+
+        XCTAssertFalse(h.session.translationEnabled, "翻译必须默认关闭")
+        XCTAssertEqual(h.session.effectiveDisplayMode, .originalOnly)
+        // 只改排版偏好不应该把翻译打开。
+        h.session.displayMode = .chineseOnly
+        XCTAssertFalse(h.session.translationEnabled)
+        XCTAssertEqual(h.session.effectiveDisplayMode, .originalOnly)
+        h.session.displayMode = .bilingual
+
+        _ = try await start(h)
+        try await h.emit(.partialSnapshot(itemID: "off", revision: 1, text: "The budget is approved"))
+        try await h.settle { $0.session.partialText == "The budget is approved" }
+        XCTAssertNil(h.session.partialTranslatedText, "翻译关着时不该有预览译文")
+        XCTAssertEqual(h.session.bandContent.rows.first?.primaryText, "The budget is approved")
+
+        try await h.emit(.completed(itemID: "off", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 }
+        let line = try XCTUnwrap(h.session.lines.first)
+        XCTAssertNil(line.translatedText)
+        XCTAssertFalse(line.isTranslating)
+        XCTAssertEqual(fake.callCount, 0, "翻译关着时一个模型请求都不该发")
+        XCTAssertEqual(h.session.bandContent.rows.first?.primaryText, "The budget is approved")
+        XCTAssertNil(h.session.bandContent.rows.first?.secondaryText)
+    }
+
+    func testEnablingTranslationTranslatesRecentLineAndShowsBilingual() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "on", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 }
+        XCTAssertNil(h.session.lines.first?.translatedText)
+
+        h.session.translationEnabled = true
+        try await h.settle {
+            $0.session.lines.count == 1
+                && $0.session.lines[0].translatedText == "预算已批准"
+                && !$0.session.lines[0].isTranslating
+        }
+        XCTAssertEqual(h.session.effectiveDisplayMode, .bilingual)
+        XCTAssertEqual(h.session.bandContent.rows.first?.primaryText, "预算已批准")
+        XCTAssertEqual(h.session.bandContent.rows.first?.secondaryText, "The budget is approved")
+        XCTAssertEqual(fake.callCount, 1, "打开开关后只补翻最近未翻译的行")
+    }
+
+    func testEnablingTranslationAfterParagraphSettlesStillTranslates() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "late-on", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 }
+        // 等段落宽限窗口结束，确认它已经从“待定”收口。
+        try await h.settle { !$0.session.hasOpenParagraph }
+        h.session.translationEnabled = true
+
+        try await h.settle {
+            $0.session.lines.first?.translatedText == "预算已批准"
+                && $0.session.lines.first?.isTranslating == false
+        }
+        XCTAssertEqual(fake.callCount, 1)
+    }
+
+    func testDisablingTranslationImmediatelyFallsBackToOriginal() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算已批准"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "on-then-off", transcript: "The budget is approved"))
+        try await h.settle { $0.session.lines.count == 1 && !$0.session.lines[0].isTranslating }
+        XCTAssertEqual(h.session.bandContent.rows.first?.primaryText, "预算已批准")
+
+        try await h.emit(.partialSnapshot(itemID: "next", revision: 1, text: "The team will start next week"))
+        try await h.settle { $0.session.partialTranslatedText != nil }
+
+        h.session.translationEnabled = false
+        XCTAssertEqual(h.session.effectiveDisplayMode, .originalOnly)
+        XCTAssertNil(h.session.partialTranslatedText, "关掉翻译要立即清掉未定稿译文")
+        XCTAssertEqual(h.session.lines.first?.translatedText, "预算已批准", "已存译文不删，重新打开可继续用")
+        XCTAssertEqual(h.session.bandContent.rows.first?.primaryText, "The budget is approved")
+        XCTAssertNil(h.session.bandContent.rows.first?.secondaryText)
+    }
+
+    func testTranslationPreferencePersistsAndLegacyOriginalOnlyStaysOff() async throws {
+        let h = try await makeHarness()
+        XCTAssertFalse(h.session.translationEnabled)
+        h.session.translationEnabled = true
+        XCTAssertTrue(h.defaults.bool(forKey: "speechrail.caption.translationEnabled"))
+
+        let restored = CaptionSession(coordinator: h.coordinator, defaults: h.defaults)
+        XCTAssertTrue(restored.translationEnabled, "开关是持久的，下次开字幕还按用户的选择")
+
+        // 旧版本只存过「仅原文」：它等价于翻译关，且排版偏好要退回能看见译文的那一档。
+        h.defaults.set(CaptionDisplayMode.originalOnly.rawValue, forKey: "speechrail.caption.displayMode")
+        h.defaults.removeObject(forKey: "speechrail.caption.translationEnabled")
+        let legacy = CaptionSession(coordinator: h.coordinator, defaults: h.defaults)
+        XCTAssertFalse(legacy.translationEnabled)
+        XCTAssertEqual(legacy.displayMode, .bilingual)
+        XCTAssertEqual(legacy.effectiveDisplayMode, .originalOnly)
+    }
+
+    func testTranslationAvailabilityFollowsConfiguredClient() async throws {
+        let h = try await makeHarness()
+        XCTAssertFalse(h.session.isTranslationAvailable, "没有配置翻译模型时开关不可用")
+
+        let fake = FakeTranslationClient()
+        h.session.makeTranslationClient = { fake }
+        XCTAssertTrue(h.session.isTranslationAvailable)
+    }
+
+    func testClearFailureAndFormalLineResetLastFailure() async throws {
+        let h = try await makeHarness()
+        _ = try await start(h)
+
+        // 1. 模拟说话人对齐告警（带有 diagnosticCode）
+        try await h.emit(.alignmentFailed(itemID: "align-1", code: "timestamp_unreliable", message: ""))
+        try await h.settle { $0.session.lastFailure != nil }
+        XCTAssertNotNil(h.session.lastFailure)
+
+        // 显式调用 clearFailure 可立即清空告警（供界面关闭按钮或自动倒计时调用）
+        h.session.clearFailure()
+        XCTAssertNil(h.session.lastFailure, "clearFailure 应立即清空告警")
+
+        // 2. 模拟无 diagnosticCode 的普通失败提示
+        try await h.emit(.failed(itemID: "fail-1", code: "asr_failed", message: "普通网络瞬态失败"))
+        try await h.settle { $0.session.lastFailure != nil }
+        XCTAssertNotNil(h.session.lastFailure)
+
+        // 下一句定稿行正常落盘时，历史过期告警应自动清除
+        try await h.emit(.completed(itemID: "item-next", transcript: "New sentence arrived"))
+        try await h.settle { $0.session.lines.count == 1 }
+        XCTAssertNil(h.session.lastFailure, "无 diagnosticCode 的过期失败在下一句成功定稿落盘后应自动清除")
+    }
+
+    // MARK: - 段落合并
+
+    func testFinalDanglingButAndContinuationAreDisplayedAsOneParagraph() async throws {
+        let h = try await makeHarness()
+        _ = try await start(h)
+
+        try await h.emit(.completed(
+            itemID: "but-1",
+            transcript: "能让我光靠看就能看出一身鸡皮疙瘩，但。"
+        ))
+        try await h.emit(.completed(
+            itemID: "but-2",
+            transcript: "看完幕后资料以后的我，却发现外媒开得更猛。"
+        ))
+        try await h.settle { $0.session.lines.count == 2 }
+
+        XCTAssertEqual(h.session.bandContent.rows.count, 1)
+        XCTAssertEqual(
+            h.session.bandContent.rows.first?.text,
+            "能让我光靠看就能看出一身鸡皮疙瘩，但看完幕后资料以后的我，却发现外媒开得更猛。"
+        )
+    }
+
+    func testParagraphAssemblerMergesDanglingButListLeadInAndPS5Appositive() {
+        let now = Date()
+        let cases: [(String, String)] = [
+            ("能让我看出一身鸡皮疙瘩，但。", "看完幕后资料以后的我，却发现外媒开得更猛。"),
+            ("有的说《影灵》是明年最期待的游戏，有的说。", "《影灵》是自己心目中的年度最佳游戏。"),
+            ("有的说影灵是下一款真正意义上的PS5。", "必备游戏，有的说也是明年最期待的动作游戏"),
+        ]
+
+        for (firstText, secondText) in cases {
+            let first = makeLine(firstText, start: 0, end: 1)
+            let paragraph = CaptionParagraph(line: first, observedAt: now, isTranslating: true)
+            let second = makeLine(secondText, start: 1.2, end: 3)
+            XCTAssertTrue(
+                CaptionParagraphAssembler.shouldMerge(
+                    paragraph,
+                    second,
+                    observedAt: now.addingTimeInterval(0.2)
+                ),
+                "应合并：\(firstText) / \(secondText)"
+            )
+        }
+    }
+
+    func testParagraphAssemblerDoesNotMergeTwoCompleteSentencesJustBecauseTheyAreClose() {
+        let now = Date()
+        let first = makeLine("第一条完整字幕。", start: 0, end: 1)
+        let paragraph = CaptionParagraph(line: first, observedAt: now, isTranslating: true)
+        let second = makeLine("第二条完整字幕。", start: 1.05, end: 2)
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(
+                paragraph,
+                second,
+                observedAt: now.addingTimeInterval(0.05)
+            )
+        )
+    }
+
+    func testParagraphAssemblerDoesNotMergeAcrossSpeakers() {
+        let now = Date()
+        var first = makeLine("但。", start: 0, end: 1)
+        first.speakerLabel = "A"
+        let paragraph = CaptionParagraph(line: first, observedAt: now, isTranslating: true)
+        var second = makeLine("下一句。", start: 1.1, end: 2)
+        second.speakerLabel = "B"
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(
+                paragraph,
+                second,
+                observedAt: now.addingTimeInterval(0.1)
+            )
+        )
+    }
+
+    func testBandContentRendersOneRowPerParagraphWithoutBlankGap() {
+        let now = Date()
+        let first = makeLine("但。", start: 0, end: 1)
+        let second = makeLine("看完幕后资料以后的我，却发现外媒开得更猛。", start: 1.2, end: 3)
+        var paragraph = CaptionParagraph(line: first, observedAt: now, isTranslating: true)
+        paragraph.append(second, observedAt: now.addingTimeInterval(0.2))
+        paragraph.translatedText = "但看完幕后资料以后，我发现外媒开得更猛。"
+        paragraph.isTranslating = false
+
+        let content = CaptionBandContent(
+            lines: [first, second],
+            paragraphs: [paragraph],
+            windowUnits: nil,
+            partialText: nil,
+            displayMode: .bilingual
+        )
+
+        XCTAssertEqual(content.rows.count, 1, "同一段的两条 ASR 行应只渲染一个块")
+        XCTAssertEqual(content.rows.first?.id, .paragraph(paragraph.id))
+        XCTAssertEqual(content.rows.first?.primaryText, "但看完幕后资料以后，我发现外媒开得更猛。")
+        XCTAssertEqual(content.rows.first?.secondaryText, "但看完幕后资料以后的我，却发现外媒开得更猛。")
+    }
+
+    func testParagraphIDsPersistForEveryGroupedLine() async throws {
+        let h = try await makeHarness()
+        let id = try await start(h)
+        try await h.emit(.completed(itemID: "persist-one", transcript: "The plan is on the"))
+        try await h.emit(.completed(itemID: "persist-two", transcript: "next page."))
+        try await h.settle {
+            $0.session.lines.count == 2
+                && $0.session.paragraphs.count == 1
+                && $0.session.lines.allSatisfy { $0.paragraphID != nil }
+        }
+        await h.session.finish()
+
+        let saved = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(saved.count, 2)
+        XCTAssertEqual(saved.map(\.paragraphID), [saved[0].id, saved[0].id])
+    }
+
+    func testParagraphAssemblyCanBeDisabledWithoutChangingLineRecords() async throws {
+        let now = Date()
+        let firstCandidate = makeLine("第一句，但。", start: 0, end: 1)
+        let secondCandidate = makeLine("看完幕后资料以后，外媒开得更猛。", start: 1.1, end: 3)
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(
+                CaptionParagraph(line: firstCandidate, observedAt: now, isTranslating: false),
+                secondCandidate,
+                observedAt: now.addingTimeInterval(0.1)
+            ),
+            "测试输入在默认开启段落合并时必须会合并为 1 段，才能真正覆盖开关"
+        )
+
+        let h = try await makeHarness()
+        h.session.paragraphAssemblyEnabled = false
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "flag-one", transcript: "第一句，但。"))
+        try await h.emit(.completed(itemID: "flag-two", transcript: "看完幕后资料以后，外媒开得更猛。"))
+        try await h.settle { $0.session.lines.count == 2 && $0.session.paragraphs.count == 2 }
+
+        XCTAssertEqual(h.session.bandContent.rows.count, 2)
+        XCTAssertEqual(h.session.lines.map(\.text), ["第一句，但。", "看完幕后资料以后，外媒开得更猛。"])
+        XCTAssertEqual(Set(h.session.paragraphs.map(\.id)).count, 2)
+    }
+
+    func testParagraphDisplayJoinsKoreanWithWordSpaces() {
+        let now = Date()
+        var paragraph = CaptionParagraph(
+            line: makeLine("오늘", start: 0, end: 1),
+            observedAt: now,
+            isTranslating: false
+        )
+        paragraph.append(makeLine("회의", start: 1.2, end: 2), observedAt: now.addingTimeInterval(0.1))
+        XCTAssertEqual(paragraph.displaySourceText, "오늘 회의")
+    }
+
+    func testParagraphAssemblerEnforcesMaximumLines() {
+        let now = Date()
+        var paragraph = CaptionParagraph(
+            line: makeLine("第一段，", start: 0, end: 1),
+            observedAt: now,
+            isTranslating: false
+        )
+        paragraph.append(makeLine("第二段，", start: 1.1, end: 2), observedAt: now)
+        paragraph.append(makeLine("第三段，", start: 2.1, end: 3), observedAt: now)
+        XCTAssertEqual(paragraph.lineIDs.count, 3)
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(
+                paragraph,
+                makeLine("第四段，", start: 3.1, end: 4),
+                observedAt: now
+            ),
+            "超过 3 行必须新开一段"
+        )
+    }
+
+    func testParagraphRetentionDropsEvictedRowsAndCapsGrowth() {
+        let now = Date()
+        let old = CaptionParagraph(
+            line: makeLine("旧段", id: "old", start: 0, end: 1),
+            observedAt: now, isTranslating: false
+        )
+        let open = CaptionParagraph(
+            line: makeLine("当前段", id: "open", start: 1, end: 2),
+            observedAt: now, isTranslating: false
+        )
+        let retained = CaptionParagraphAssembler.retained(
+            [old, open],
+            visibleLineIDs: ["open"],
+            openParagraphID: "open",
+            limit: 1
+        )
+        XCTAssertEqual(retained.map(\.id), ["open"], "tail 已淘汰的段应释放；当前段必须保留")
+
+        let a = CaptionParagraph(line: makeLine("A", id: "a"), observedAt: now, isTranslating: false)
+        let b = CaptionParagraph(line: makeLine("B", id: "b"), observedAt: now, isTranslating: false)
+        let capped = CaptionParagraphAssembler.retained(
+            [a, b], visibleLineIDs: ["a", "b"], openParagraphID: nil, limit: 1
+        )
+        XCTAssertEqual(capped.map(\.id), ["b"], "超过上限时保留最新的段")
+    }
+
+    func testParagraphTranslationCarriesCombinedSourceAndParagraphRule() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["合并后的译文"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
+        _ = try await start(h)
+
+        try await h.emit(.completed(itemID: "paragraph-one", transcript: "The first part is on the"))
+        try await h.emit(.completed(itemID: "paragraph-two", transcript: "next page."))
+        try await h.settle {
+            $0.session.paragraphs.count == 1
+                && $0.session.paragraphs.first?.translatedText == "合并后的译文"
+                && fake.callCount == 1
+        }
+
+        XCTAssertEqual(fake.lastSourceText, "The first part is on the next page.")
+        XCTAssertTrue(fake.lastSystemInstructions?.contains("【同段片段】") == true)
+        XCTAssertEqual(h.session.paragraphs.first?.lineIDs.count, 2)
+    }
+
+    func testFinishWaitsForLastParagraphTranslationBeforeCancelling() async throws {
+        let fake = GatedTranslationClient()
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
+        let id = try await start(h)
+
+        try await h.emit(.completed(itemID: "finish-paragraph", transcript: "The budget is approved"))
+        try await h.settle {
+            $0.session.lines.count == 1 && $0.session.lines.first?.paragraphID != nil
+        }
+
+        let finish = Task { await h.session.finish() }
+        for _ in 0..<200 where fake.started.isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(fake.started.contains("The budget is approved"))
+        // Prove finish is still waiting: without drainFinalTranslations the queue would
+        // already have been cancelled and this yield would arrive too late.
+        fake.yield("预算已批准", to: "The budget is approved")
+        fake.finish("The budget is approved")
+        await finish.value
+
+        let saved = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(saved.first?.translatedText, "预算已批准")
+        XCTAssertEqual(saved.first?.paragraphID, saved.first?.id)
+    }
+
+    func testEnablingTranslationMidSessionOnlyQueuesBoundedRecentParagraphTail() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["补翻结果"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = false
+        h.session.paragraphAssemblyEnabled = false
+        _ = try await start(h)
+
+        for index in 1...12 {
+            try await h.emit(.completed(itemID: "hist-\(index)", transcript: "Historical sentence number \(index)."))
+        }
+        try await h.settle { $0.session.paragraphs.count == 12 }
+
+        // 打开最后一段并收口前 11 段：开启翻译时最多只补翻最近 maximumRetranslatedRecentParagraphs (6) 段
+        h.session.translationEnabled = true
+        try await h.settle { _ in
+            fake.callCount == CaptionSession.maximumRetranslatedRecentParagraphs
+        }
+        XCTAssertEqual(
+            fake.callCount,
+            CaptionSession.maximumRetranslatedRecentParagraphs,
+            "中途开启翻译只能补翻最近的有限段落，不能将全部历史段落一次性塞入队列"
+        )
+    }
+
+    func testLateTranslationStillPersistsToStoreAfterParagraphIsPruned() async throws {
+        let fake = GatedTranslationClient()
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
+        h.session.paragraphAssemblyEnabled = false
+        let sessionID = try await start(h)
+
+        try await h.emit(.completed(itemID: "evict-target", transcript: "First sentence to be evicted."))
+        try await h.emit(.completed(itemID: "keep-target", transcript: "Second sentence stays in memory."))
+        try await h.settle { $0.session.lines.count == 2 && fake.started.contains("First sentence to be evicted.") }
+        let firstLineID = try XCTUnwrap(h.session.lines.first?.id)
+
+        // 通过真实 pruneParagraphs(limit: 1) 将第一段淘汰出内存 paragraphs 列表
+        h.session.pruneParagraphs(limit: 1)
+        XCTAssertNil(h.session.paragraphs.first(where: { $0.id == firstLineID }))
+
+        fake.yield("迟到但仍落库的译文", to: "First sentence to be evicted.")
+        fake.finish("First sentence to be evicted.")
+
+        try await h.settle {
+            let rows = (try? await $0.store.lines(sessionID: sessionID)) ?? []
+            return rows.first(where: { $0.id == firstLineID })?.translatedText == "迟到但仍落库的译文"
+        }
+        let saved = try await h.store.lines(sessionID: sessionID)
+        XCTAssertEqual(saved.first(where: { $0.id == firstLineID })?.translatedText, "迟到但仍落库的译文")
+        fake.finish("Second sentence stays in memory.")
+    }
+
+    func testParagraphExportSplitsOnConflictingSpeakerLabelsAndPropagatesLateSpeaker() {
+        let sharedParagraphID = "para-shared"
+        let line1 = TranscriptLine(
+            id: "l1",
+            sessionID: "s1",
+            ordinal: 1,
+            role: .speaker,
+            speakerLabel: nil,
+            text: "第一句上半段，",
+            tStart: 0.0,
+            tEnd: 1.2,
+            source: .system,
+            status: .final,
+            paragraphID: sharedParagraphID
+        )
+        let line2 = TranscriptLine(
+            id: "l2",
+            sessionID: "s1",
+            ordinal: 2,
+            role: .speaker,
+            speakerLabel: "A",
+            text: "第一句下半段。",
+            tStart: 1.3,
+            tEnd: 2.5,
+            source: .system,
+            status: .final,
+            paragraphID: sharedParagraphID
+        )
+        let line3 = TranscriptLine(
+            id: "l3",
+            sessionID: "s1",
+            ordinal: 3,
+            role: .speaker,
+            speakerLabel: "B",
+            text: "另一位说话人接话。",
+            tStart: 2.6,
+            tEnd: 3.8,
+            source: .system,
+            status: .final,
+            paragraphID: sharedParagraphID
+        )
+
+        let projected = SessionExporter.paragraphLines([line1, line2, line3])
+        XCTAssertEqual(projected.count, 2, "同段内发生明确换人（A -> B）时必须按说话人边界拆开，不能吞掉后一位说话人")
+        XCTAssertEqual(projected[0].speakerLabel, "A", "首行未标出说话人时应继承同段后续行到达的说话人标签")
+        XCTAssertEqual(projected[0].text, "第一句上半段第一句下半段。")
+        XCTAssertEqual(projected[1].speakerLabel, "B")
+        XCTAssertEqual(projected[1].text, "另一位说话人接话。")
+    }
+
+    func testParagraphAssemblerFlushDelayAdaptsToCompletenessAndAssemblyToggle() {
+        let now = Date()
+        let incomplete = CaptionParagraph(
+            line: makeLine("能让我看出一身鸡皮疙瘩，但。", start: 0, end: 1),
+            observedAt: now,
+            isTranslating: true
+        )
+        XCTAssertEqual(
+            CaptionParagraphAssembler.flushDelayMilliseconds(for: incomplete, assemblyEnabled: true),
+            CaptionParagraphAssembler.incompleteHoldMilliseconds
+        )
+        XCTAssertEqual(
+            CaptionParagraphAssembler.flushDelayMilliseconds(for: incomplete, assemblyEnabled: false),
+            0,
+            "关闭段落合并时必须 0ms 立即收口，不再白等宽限窗口"
+        )
+
+        var complete = CaptionParagraph(
+            line: makeLine("这是一句已经带句号的完整字幕。", start: 0, end: 1),
+            observedAt: now,
+            isTranslating: true
+        )
+        XCTAssertEqual(
+            CaptionParagraphAssembler.flushDelayMilliseconds(for: complete, assemblyEnabled: true),
+            CaptionParagraphAssembler.completeSentenceGraceMilliseconds
+        )
+
+        complete.append(makeLine("第二行，", start: 1.1, end: 2), observedAt: now)
+        complete.append(makeLine("第三行。", start: 2.1, end: 3), observedAt: now)
+        XCTAssertEqual(complete.lineIDs.count, CaptionParagraphAssembler.maximumLines)
+        XCTAssertEqual(
+            CaptionParagraphAssembler.flushDelayMilliseconds(for: complete, assemblyEnabled: true),
+            0,
+            "已达最大行数上限时无法再并入新行，应 0ms 立即收口"
+        )
+    }
+
+    func testPartialTailRollbackDoesNotFlickerCaptionBandWhileSingleFrameShrinks() async throws {
+        let h = try await makeHarness()
+        _ = try await start(h)
+
+        try await h.emit(.partialSnapshot(itemID: "item-jitter", revision: 1, text: "今天我们来看看这个实时字幕"))
+        try await h.settle { $0.session.partialText == "今天我们来看看这个实时字幕" }
+
+        // 单帧尾部回退 2 个字：界面应保持原显示不闪烁
+        try await h.emit(.partialSnapshot(itemID: "item-jitter", revision: 2, text: "今天我们来看看这个实时"))
+        try await h.settle { $0.session.partialText == "今天我们来看看这个实时字幕" }
+        XCTAssertEqual(h.session.partialText, "今天我们来看看这个实时字幕")
+
+        // 下一帧继续增长：正常推进到最新文本
+        try await h.emit(.partialSnapshot(itemID: "item-jitter", revision: 3, text: "今天我们来看看这个实时字幕模块"))
+        try await h.settle { $0.session.partialText == "今天我们来看看这个实时字幕模块" }
+    }
+
+    private func makeLine(
+        _ text: String,
+        id: String = UUID().uuidString,
+        start: TimeInterval? = nil,
+        end: TimeInterval? = nil
+    ) -> CaptionSession.Line {
+        CaptionSession.Line(id: id, ordinal: 1, text: text, start: start, end: end)
     }
 
     @MainActor
@@ -1408,17 +2242,22 @@ final class CaptionSessionLifecycleTests: XCTestCase {
 private final class ControllableCaptionAudioSource: AudioChunkSource, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: AudioChunkStream.Continuation?
+    var startFailure: (any Error)?
 
     func start() async throws -> AudioChunkStream {
+        let failure = lock.withLock { startFailure }
+        if let failure {
+            throw failure
+        }
         let pair = AudioChunkStream.makeStream()
         setContinuation(pair.continuation)
         return pair.stream
     }
 
     private func setContinuation(_ value: AudioChunkStream.Continuation) {
-        lock.lock()
-        continuation = value
-        lock.unlock()
+        lock.withLock {
+            continuation = value
+        }
     }
 
     func stop() async {
@@ -1427,9 +2266,7 @@ private final class ControllableCaptionAudioSource: AudioChunkSource, @unchecked
     }
 
     func emit(_ chunk: AudioChunk) {
-        lock.lock()
-        let current = continuation
-        lock.unlock()
+        let current = lock.withLock { continuation }
         current?.offer(chunk)
     }
 }

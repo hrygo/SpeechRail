@@ -18,7 +18,7 @@ date: 2026-10-20
 4. QwenPaw 的历史接入记录不能替代当前配置/模型状态；再次切换前必须单独 smoke。
 5. 默认 loopback，非 loopback 配置必须有 API key；敏感音频/文本不写入仓库或常规日志。
 6. 当前 release 版本以 `pyproject.toml` 与 `scripts/check_version_consistency.py` 门禁为准，本文件不复制具体版本号。历史受管运行时记录仅保留为**历史部署证据**，不能据此推断当前受管安装状态。源码修改必须重新构建并走 managed release，不能直接改 `runtime/current`。
-7. `server_vad` 的 generic contract 默认值与调用方策略分离：Sona subtitle 为 `0.65/300ms/400ms`，meeting 为 `0.65/300ms/900ms`（threshold/prefix/silence）。SpeechRail 不替调用方决定其业务 endpointing 窗口。
+7. 实时字幕的段落是正式 `line` 之上的显示/翻译投影：`line.paragraph_id` 只用于合并显示与导出，行号、正文和持久化行语义不变；同段首行承载整段译文。`server_vad` 的 generic contract 默认值与调用方策略分离：Sona subtitle 为 `0.65/300ms/650ms`，meeting 为 `0.65/300ms/900ms`（threshold/prefix/silence）。SpeechRail 不替调用方决定其业务 endpointing 窗口。
 8. Realtime VAD 评分与 `SpeechAdmission` 状态机是一条 endpointing 链；continuous diarization activity 是另一条 speaker evidence 链，不是重复 VAD，也不改写 canonical completed text。
 9. reference clone 由所选 TTS spec 的 `tts_base` capability 承担，并经 vendor public `generate(ref_audio, ref_text, ...)` 路径执行；`fast` / `quality` 使用 8-bit Base，`reference` 使用 bf16 Base。VoiceDesign 只处理设计任务，不作为 clone fallback。现有请求级 seed、低温度采样、首次有效片段后冻结响度增益、peak ceiling 与非 `1.0` speed 拒绝仍保留，但这些只覆盖确定性/电平边界，不等价于跨文本 speaker identity 已通过。
 10. Qwen3-ASR 没有原生词级时间戳：请求 `timestamp_granularities` 时，vendor 会尝试解析隐式的 `Qwen/Qwen3-ForcedAligner` 仓库，在受管离线环境下无法解析。因此词级时间戳由独立的固定文本 aligner 在冻结转写上计算，不来自 ASR 解码；`diarized_json` 的分段来自分人，不请求时间轴。未显式供给 aligner 时，需要时间戳的调用按有效契约失败，而不是伪造位置。分人由任务 opt-in 触发，只有显式供给 Sortformer 与 aligner 时才按当前 readiness 声明。
@@ -34,7 +34,7 @@ date: 2026-10-20
   `gpt-4o-transcribe-diarize` / `diarized_json`。调用方必须自己实现 LLM、历史、工具、播放
   和 barge-in 编排，TTS 由调用方显式的 `speechrail.tts.start`/`append_text`/`finish_text` 驱动。
 - `/health` 分别反映 ASR/TTS worker readiness，并以 `realtime_vad.ready/code/message` 单独报告 `server_vad` 子能力；`/readyz` 在至少一个 ASR/TTS 能力可接受请求时返回 200，同时返回 VAD 诊断；`/metrics` 提供 Prometheus 纯文本与 JSON 指标。
-- VAD 使用 512 samples/16kHz 的 32ms 帧；因此 Sona 的 `400ms/900ms` 停止配置实际量化为约 `416ms/928ms`。该量化属于帧时钟行为，不应被误读为两个 VAD 同时运行。
+- VAD 使用 512 samples/16kHz 的 32ms 帧；因此 Sona 的 `650ms/900ms` 停止配置实际量化为约 `672ms/928ms`。该量化属于帧时钟行为，不应被误读为两个 VAD 同时运行。
 - 上传字节数与解码后音频时长受限（`SPEECHRAIL_MAX_AUDIO_SECONDS`，超限返回 400 `audio_too_long`）；CORS 与速率限制不在当前能力范围。
 - `diarization_ready` 只表示显式供给的 CoreML bundle、aligner 与 worker 路径可用，不表示真实质量、尾部正确性或固定物理内存开销。未 opt-in 或未供给制品时，`/v1/models` 不出现 `gpt-4o-transcribe-diarize`。D1 仅记录 M5 Max、90 秒输入的历史 564 MB max RSS；不能外推到其他设备或组合。DER/JER、P95、ASR 共存与两小时 soak 仍未验收。
 - 常驻运行提供 macOS `LaunchAgent` CLI、安装模板和操作手册；服务默认不自动安装或启用。
@@ -44,7 +44,8 @@ date: 2026-10-20
   `/v1/realtime` 上的 24 kHz 单声道 PCM16，**不新增任何接口**，也不承载 LLM、会议持久化或
   用户资产（`docs/architecture/product-scope.md` §3 的红线）。
   新增的三件事都在 App 这一侧：设备按功能启用、功能离开即释放；PCM 不落盘、记录只落本机
-  SQLite；对话与内心 OS 使用 Responses，纪要优先 Chat Completions，仅在接口明确不可用时
+  SQLite；对话与内心 OS 默认使用 Responses，端点在 Responses 上关不掉思考时对话改用 Chat
+  关闭 thinking，纪要优先 Chat Completions，仅在接口明确不可用时
   改用普通 Responses；均直连用户配置的端点。纪要新任务不要求后台响应。
   详表见 `docs/design/2026-09-18-session-layer/TECHNICAL-DESIGN.md` §2.1。
 - 每个 spec 的 Base clone 与 CustomVoice artifact，以及 `reference` 的 BF16 VoiceDesign artifact，会增加安装体积与多 worker 活跃态 RAM，但不在请求级 capability 切换时反复换模。旧版 VoiceDesign-only RAM / latency 数据不能直接当作当前多 capability 架构的实测数据；跨档数据也不可互相替代。对应资源与延迟证据仍按专项授权验收。

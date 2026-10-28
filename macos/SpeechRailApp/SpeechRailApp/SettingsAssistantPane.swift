@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsAssistantPane: View {
     @Environment(AppModel.self) private var model
     @Environment(SessionPreferences.self) private var preferences
+    @Environment(CaptionSession.self) private var caption
 
     @AppStorage(SpeechRailDesignTokens.CaptionBand.fontSizeDefaultsKey)
     private var captionFontSizeRaw = CaptionBandFontSize.standard.rawValue
@@ -243,24 +244,44 @@ struct SettingsAssistantPane: View {
                 }
                 settingsRowSeparator
                 settingsRow {
-                    Toggle(isOn: diarizationCaptionsBinding) {
+                    Toggle(isOn: translationBinding) {
                         settingsRowLabel(
-                            "字幕显示说话人",
-                            caption: diarizationCaption(for: preferences.captionsDiarizationEnabled)
+                            "翻译成中文",
+                            caption: translationCaption
                         )
                     }
                         .modifier(settingsRowControl())
+                        .disabled(!caption.translationEnabled && !caption.isTranslationAvailable)
                 }
                 settingsRowSeparator
                 settingsRow {
-                    Toggle(isOn: diarizationMeetingBinding) {
+                    Picker(selection: sourceLanguageBinding) {
+                        ForEach(CaptionSourceLanguage.allCases) { language in
+                            Text(language.title).tag(language.rawValue)
+                        }
+                    } label: {
                         settingsRowLabel(
-                            "会议显示说话人",
-                            caption: diarizationCaption(for: preferences.meetingDiarizationEnabled, isMeeting: true)
+                            "音频源语言",
+                            caption: "影响识别与翻译；「自动」适合中英混说。会话中途修改，暂停后继续生效。"
                         )
                     }
-                        .modifier(settingsRowControl())
+                    .pickerStyle(.menu)
+                    .modifier(settingsRowControl())
                 }
+                settingsRowSeparator
+                settingsRow {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        settingsRowLabel(
+                            "字幕术语表",
+                            caption: "用逗号分隔；可写「原文=译法」。识别从下一次接上开始生效，翻译从下一句起生效，最多 24 个。"
+                        )
+                        TextField("例如：SpeechRail=语音轨道, Transformer=变换器", text: glossaryBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                            .accessibilityIdentifier("caption-glossary-field")
+                    }
+                }
+
                 settingsRowSeparator
                 settingsRow {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -406,18 +427,40 @@ struct SettingsAssistantPane: View {
         )
     }
 
-    private var diarizationCaptionsBinding: Binding<Bool> {
+    /// 音频源语言不只是翻译设置：非自动档会随下一次建连透传给 ASR。
+    private var sourceLanguageBinding: Binding<String> {
         Binding(
-            get: { preferences.captionsDiarizationEnabled },
-            set: { preferences.captionsDiarizationEnabled = $0 }
+            get: { caption.sourceLanguage.rawValue },
+            set: { caption.sourceLanguage = CaptionSourceLanguage(rawValue: $0) ?? .auto }
         )
     }
 
-    private var diarizationMeetingBinding: Binding<Bool> {
+    private var glossaryBinding: Binding<String> {
         Binding(
-            get: { preferences.meetingDiarizationEnabled },
-            set: { preferences.meetingDiarizationEnabled = $0 }
+            get: { caption.glossaryText },
+            set: { caption.glossaryText = $0 }
         )
+    }
+
+
+    /// 字幕翻译的总开关。与字幕带、字幕页共用同一个 `CaptionSession` 状态，避免三处各存一份。
+    private var translationBinding: Binding<Bool> {
+        Binding(
+            get: { caption.translationEnabled },
+            set: { enabled in
+                if enabled, caption.displayMode == .originalOnly {
+                    caption.displayMode = .bilingual
+                }
+                caption.translationEnabled = enabled
+            }
+        )
+    }
+
+    private var translationCaption: String {
+        guard caption.isTranslationAvailable else {
+            return "默认关闭。先在下面「实时字幕翻译」里配好地址和模型，才能打开。"
+        }
+        return "默认关闭。打开后外语字幕会实时翻成中文；字幕带上也能随时开关。"
     }
 
     private var notifyBinding: Binding<Bool> {
@@ -431,11 +474,6 @@ struct SettingsAssistantPane: View {
         model.creatorVoices.filter(\.available)
     }
 
-    private func diarizationCaption(for enabled: Bool, isMeeting: Bool = false) -> String {
-        return enabled
-            ? "已开启：最多区分 4 位发言人，使用匿名编号。" + (isMeeting ? "超额或不确定的发言保留为未识别。" : "")
-            : "默认关闭；最多区分 4 位发言人，打开后对新会话生效。"
-    }
 
     @ViewBuilder
     private func moduleConfigurationRows(for module: LLMModule) -> some View {

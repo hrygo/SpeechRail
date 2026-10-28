@@ -67,7 +67,11 @@ public enum ASRScenePreset: String, CaseIterable, Equatable, Sendable {
             1_200
         case .assistantDuplex, .meeting:
             900
-        case .caption, .teleprompter:
+        case .caption:
+            // 400ms 会在“但/有的说”这类短停顿处切断语义；650ms 仍低于会议的 900ms，
+            // 只减少碎句，不把字幕延迟拉到会议级别。
+            650
+        case .teleprompter:
             400
         }
     }

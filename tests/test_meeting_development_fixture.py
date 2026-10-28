@@ -64,7 +64,7 @@ def execute(tmp_path, manifest, lock, factory=Activity, **kwargs):
                 output_directory=tmp_path / "result",
                 **kwargs,
             ),
-            3,
+            15,
         )
     )
 

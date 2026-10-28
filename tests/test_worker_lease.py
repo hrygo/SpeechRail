@@ -35,7 +35,9 @@ def test_internal_close_cancellation_keeps_other_workers_under_ttl_monitoring(
 
         failed, other = CancelledWorker(), OtherWorker()
         evictor = WorkerIdleEvictor(
-            [failed, other], idle_timeout_seconds=10, check_interval_seconds=0,
+            [failed, other],
+            idle_timeout_seconds=10,
+            check_interval_seconds=0,
         )
         now[0] = 111.0
         await evictor.start()
@@ -53,7 +55,8 @@ def test_internal_close_cancellation_keeps_other_workers_under_ttl_monitoring(
 
 @pytest.mark.parametrize("internal_cancel", [False, True])
 def test_monitor_shutdown_cancellation_survives_failed_owned_close(
-    monkeypatch: pytest.MonkeyPatch, internal_cancel: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    internal_cancel: bool,
 ) -> None:
     from types import SimpleNamespace
 
@@ -75,7 +78,9 @@ def test_monitor_shutdown_cancellation_survives_failed_owned_close(
 
         failed, other = FailingWorker(), _FakeWorker()
         evictor = WorkerIdleEvictor(
-            [failed, other], idle_timeout_seconds=10, check_interval_seconds=0,
+            [failed, other],
+            idle_timeout_seconds=10,
+            check_interval_seconds=0,
         )
         now[0] = 111.0
         await evictor.start()
@@ -285,6 +290,7 @@ def test_evictor_close_is_blocked_while_worker_lock_is_held() -> None:
 
         async def close(self) -> None:
             import time
+
             async with self.lock:
                 self.close_entered_at = time.monotonic()
                 self.closed = True
@@ -292,6 +298,7 @@ def test_evictor_close_is_blocked_while_worker_lock_is_held() -> None:
 
     async def run() -> None:
         import time
+
         worker = _LockingWorker()
         evictor = WorkerIdleEvictor(
             (worker,), idle_timeout_seconds=0.05, check_interval_seconds=0.02
@@ -462,13 +469,19 @@ def test_two_stage_standby_and_eviction() -> None:
         try:
             assert evictor.state_of(worker) == WorkerLifecycleState.ACTIVE
             # 1. Wait for warm standby
-            await asyncio.sleep(0.04)
+            for _ in range(50):
+                if evictor.state_of(worker) == WorkerLifecycleState.WARM_STANDBY:
+                    break
+                await asyncio.sleep(0.01)
             assert evictor.state_of(worker) == WorkerLifecycleState.WARM_STANDBY
             assert worker.trimmed is True
             assert worker.closed is False
 
             # 2. Wait for cold eviction
-            await asyncio.sleep(0.06)
+            for _ in range(50):
+                if evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED:
+                    break
+                await asyncio.sleep(0.01)
             assert evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED
             assert worker.closed is True
         finally:

@@ -3181,7 +3181,7 @@ private struct AudiobookProductionEmptySheet: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
-        .frame(width: min(SpeechRailDesignTokens.Layout.Sheet.formWidth,
+        .frame(width: min(SpeechRailDesignTokens.Layout.Sheet.compactWidth,
                           max(0, availableSize.width - SpeechRailDesignTokens.Spacing.lg)))
         .operationFeedback([OperationFeedback(workflow.errorMessage, onDismiss: { workflow.errorMessage = nil })])
         .defaultFocus($isDoneFocused, true)

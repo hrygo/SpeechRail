@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -2750,6 +2751,54 @@ def test_regular_realtime_transcription_never_calls_the_fixed_text_aligner() -> 
         assert completed["type"] == "conversation.item.input_audio_transcription.completed"
 
     assert aligner.calls == 0
+
+
+def test_session_update_logs_the_accepted_asr_language_without_content(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """语种有没有传到位只能靠日志自证, 所以这条事件只带语言码, 不带正文。"""
+
+    client, _factory = _client()
+    with (
+        caplog.at_level(logging.INFO, logger="speechrail.application.realtime_openai"),
+        client.websocket_connect("/v1/realtime") as socket,
+    ):
+        socket.receive_json()
+        socket.send_json(
+            session_update(language="en", prompt="private prompt", keywords=["私密词"])
+        )
+        echoed = socket.receive_json()
+        assert echoed["type"] == "session.updated"
+        # 客户端就是靠这一份回显确认语种真的生效了, 所以它必须原样带回 "en"。
+        assert (
+            echoed["session"]["audio"]["input"]["transcription"]["language"] == "en"
+        )
+
+    records = [r for r in caplog.records if r.getMessage() == "realtime_asr_language_configured"]
+    assert records, "an accepted session.update must record the ASR language it will use"
+    fields = records[-1].speechrail
+    assert fields["language"] == "en"
+    assert fields["task"] == "conversation"
+    assert isinstance(fields["session_id"], str) and fields["session_id"]
+    assert "private" not in str(fields)
+    assert "私密" not in str(fields)
+
+
+def test_session_update_logs_auto_when_no_language_is_pinned(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, _factory = _client()
+    with (
+        caplog.at_level(logging.INFO, logger="speechrail.application.realtime_openai"),
+        client.websocket_connect("/v1/realtime") as socket,
+    ):
+        socket.receive_json()
+        socket.send_json(session_update())
+        assert socket.receive_json()["type"] == "session.updated"
+
+    records = [r for r in caplog.records if r.getMessage() == "realtime_asr_language_configured"]
+    assert records
+    assert records[-1].speechrail["language"] == "auto"
 
 
 def test_openai_session_update_rejects_non_string_language_hints() -> None:

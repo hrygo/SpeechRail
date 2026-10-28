@@ -165,6 +165,23 @@ final class LLMProviderTests: XCTestCase {
     "usage":{"input_tokens":8,"output_tokens":3,"output_tokens_details":{"reasoning_tokens":2}}}
     """
 
+    /// 走了 Responses、但端点没真正关掉思考的正文：reasoning 项带非空 summary。
+    private static let responsesBodyWithReasoning = """
+    {"id":"resp_test","object":"response","status":"completed","output":[\
+    {"type":"reasoning","summary":[{"type":"summary_text","text":"先想一下"}]},\
+    {"type":"message","role":"assistant","content":[{"type":"output_text","text":"好"}]}]}
+    """
+
+    private static let chatReasoningBody = """
+    {"choices":[{"message":{"role":"assistant","content":"pong",\
+    "reasoning_content":"先想一下"},"finish_reason":"stop"}]}
+    """
+
+    /// 真正关掉了思考的 Chat 探测响应：没有 `reasoning_content`。
+    private static let chatProbeCleanBody = """
+    {"choices":[{"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}]}
+    """
+
     private static let rejectedBody = """
     {"error":{"message":"Unrecognized request argument supplied: thinking",\
     "type":"invalid_request_error"}}
@@ -627,7 +644,7 @@ final class LLMProviderTests: XCTestCase {
         let result = await makeProvider().checkCompatibleJSON(configuration: openCodeConfiguration, apiKey: nil)
         guard case .connected = result else { return XCTFail("检查应与生成使用同一参数策略：\(result)") }
         let bodies = FakeTransport.requestBodies()
-        XCTAssertEqual(bodies[2]["max_completion_tokens"] as? Int, 16)
+        XCTAssertEqual(bodies[2]["max_completion_tokens"] as? Int, 256)
         XCTAssertNil(bodies[2]["max_tokens"])
         XCTAssertTrue(bodies.allSatisfy { $0["temperature"] == nil })
     }
@@ -1599,15 +1616,25 @@ final class LLMProviderTests: XCTestCase {
     /// 心跳/注释不调用 noteText，不延长等待——此处直接验证"不调用即不重置"：
     /// deadline 按墙钟推进，不因等待中的事件而顺延。
     func testStreamTimerTextResetsStallDeadline() async throws {
+        // 规则层显式时间点断言：确定性验证 stall 展期与首正文解除，避免 CI 调度抖动
+        let start = ContinuousClock.now
+        var deadline = StreamDeadlineState(
+            firstProgressDeadline: nil,
+            stallTimeout: .milliseconds(400),
+            initialStall: start.advanced(by: .milliseconds(50))
+        )
+        try deadline.advance(event: .text, now: start.advanced(by: .milliseconds(50)))
+        XCTAssertTrue(deadline.firstTextSeen, "noteText 后 firstTextSeen 必须为真，首正文 deadline 永久解除")
+        XCTAssertEqual(deadline.stallDeadline, start.advanced(by: .milliseconds(450)))
+        XCTAssertNil(deadline.expiry(now: start.advanced(by: .milliseconds(200))), "见正文后停滞 deadline 应被重置，不应误杀合法推理等待")
+
+        // 计时器集成验证：采用宽裕超时窗口（1000ms），防止高负载 CI runner 调度延迟产生假失败
         let timer = StreamTimer(
             firstDeadline: nil,
-            stallTimeout: .milliseconds(200),
-            initialStall: ContinuousClock.now.advanced(by: .milliseconds(50))
+            stallTimeout: .milliseconds(1000),
+            initialStall: ContinuousClock.now.advanced(by: .milliseconds(200))
         )
-        // 50ms 后 noteText：stall 重新展期 200ms；再睡 100ms 仍未到期。
-        try await Task.sleep(for: .milliseconds(50))
         try timer.advance(events: [.text], now: .now)
-        try await Task.sleep(for: .milliseconds(100))
         let expired = timer.expired
         XCTAssertFalse(expired, "见正文后停滞 deadline 应被重置，不应误杀合法推理等待")
         let seen = timer.firstTextSeen
@@ -2107,8 +2134,138 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertEqual(probes.count, 2)
         XCTAssertNotNil(probes[0]["chat_template_kwargs"])
         XCTAssertNil(probes[1]["chat_template_kwargs"], "第二次探测不该再带上被拒绝的参数")
-        XCTAssertEqual(probes[0]["max_output_tokens"] as? Int, 16)
+        XCTAssertEqual(probes[0]["max_output_tokens"] as? Int, 256)
         XCTAssertEqual(probes[1]["model"] as? String, "test-model")
+    }
+
+    /// 探测预算必须留出「先 reasoning、后正文」的空间：16 个 token 时模型在产出正文之前
+    /// 就被 `max_output_tokens` 截断，响应变成没有正文的 incomplete，换端点或模型都过不了检查。
+    func testProbeBudgetLeavesRoomForFirstAnswerFromThinkingModels() async throws {
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: Self.modelsBody),
+            .init(status: 200, contentType: "application/json", body: Self.okBody)
+        ])
+        _ = await makeProvider().check(configuration: configuration, apiKey: nil, operation: .responses)
+        XCTAssertEqual(probeBodies().first?["max_output_tokens"] as? Int, 256)
+
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: Self.modelsBody),
+            .init(status: 200, contentType: "application/json", body: try chatBody())
+        ])
+        _ = await makeProvider().check(configuration: configuration, apiKey: nil, operation: .chat)
+        let chatProbe = zip(FakeTransport.requestURLs(), FakeTransport.requestBodies())
+            .filter { $0.0.hasSuffix("/chat/completions") }
+            .map(\.1)
+            .first
+        XCTAssertEqual(chatProbe?["max_tokens"] as? Int, 256)
+    }
+
+    func testResponsesReportedReasoningOnlyCountsNonEmptySummary() {
+        XCTAssertTrue(LLMProvider.responsesReportedReasoning(Data(Self.responsesBodyWithReasoning.utf8)))
+        XCTAssertFalse(LLMProvider.responsesReportedReasoning(Data(Self.okBody.utf8)))
+        XCTAssertFalse(LLMProvider.responsesReportedReasoning(
+            Data(#"{"output":[{"type":"reasoning","summary":[]}]}"#.utf8)
+        ))
+    }
+
+    /// Responses 正文里还带 reasoning，说明这个端点在 Responses 上关不掉思考：
+    /// 助手改用 Chat，并用真正有效的 `enable_thinking=false` 关掉思考。
+    func testAssistantFallsBackToChatWhenResponsesStillReasons() async throws {
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: Self.modelsBody),
+            .init(status: 200, contentType: "application/json", body: Self.responsesBodyWithReasoning),
+            .init(status: 200, contentType: "application/json", body: Self.chatProbeCleanBody),
+            .init(status: 200, contentType: "text/event-stream",
+                  body: "data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\n\ndata: [DONE]\n\n")
+        ])
+        let provider = makeProvider()
+        let result = await provider.check(
+            configuration: configuration,
+            apiKey: nil,
+            operation: .responses,
+            allowThinkingControlFallback: false
+        )
+        XCTAssertTrue(result.isReady)
+        XCTAssertEqual(FakeTransport.requestURLs().count, 3, "\(FakeTransport.requestURLs())")
+
+        var text = ""
+        for try await delta in await provider.stream(
+            configuration: configuration,
+            messages: [LLMMessage(role: .user, text: "问题")],
+            apiKey: nil,
+            maxOutputTokens: 128,
+            instructions: "只说一句话。"
+        ) {
+            text += delta
+        }
+
+        XCTAssertEqual(text, "好")
+        let paths = FakeTransport.requestURLs().compactMap { URL(string: $0)?.path }
+        XCTAssertEqual(Array(paths.suffix(2)), ["/v1/chat/completions", "/v1/chat/completions"])
+        let streamBody = FakeTransport.requestBodies().last
+        XCTAssertEqual(streamBody?["enable_thinking"] as? Bool, false)
+        let messages = streamBody?["messages"] as? [[String: Any]]
+        XCTAssertEqual(messages?.first?["role"] as? String, "system")
+        XCTAssertEqual(messages?.first?["content"] as? String, "只说一句话。")
+    }
+
+    /// Chat 上也没有任何方言能关掉思考时，助手保持 Responses，不把整场会话切成 Chat。
+    func testAssistantKeepsResponsesWhenChatCannotStopThinking() async throws {
+        var exchanges: [FakeTransport.Exchange] = [
+            .init(status: 200, contentType: "application/json", body: Self.modelsBody),
+            .init(status: 200, contentType: "application/json", body: Self.responsesBodyWithReasoning)
+        ]
+        for _ in 0..<4 {
+            exchanges.append(.init(status: 200, contentType: "application/json", body: Self.chatReasoningBody))
+        }
+        exchanges.append(.init(
+            status: 200,
+            contentType: "text/event-stream",
+            body: "data: {\"type\":\"response.output_text.delta\",\"delta\":\"好\"}\n\ndata: {\"type\":\"response.completed\"}\n\n"
+        ))
+        FakeTransport.reset(exchanges)
+
+        let provider = makeProvider()
+        let result = await provider.check(
+            configuration: configuration,
+            apiKey: nil,
+            operation: .responses,
+            allowThinkingControlFallback: false
+        )
+        XCTAssertTrue(result.isReady)
+
+        var text = ""
+        for try await delta in await provider.stream(
+            configuration: configuration,
+            messages: [LLMMessage(role: .user, text: "问题")],
+            apiKey: nil,
+            maxOutputTokens: 128,
+            instructions: nil
+        ) {
+            text += delta
+        }
+
+        XCTAssertEqual(text, "好")
+        let paths = FakeTransport.requestURLs().compactMap { URL(string: $0)?.path }
+        XCTAssertEqual(paths.filter { $0 == "/v1/chat/completions" }.count, 4)
+        XCTAssertEqual(paths.last, "/v1/responses")
+    }
+
+    /// Responses 探测没有 reasoning 时不做任何 Chat 试探，省掉启动前的额外往返。
+    func testAssistantProbeWithoutReasoningKeepsResponsesOnly() async throws {
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: Self.modelsBody),
+            .init(status: 200, contentType: "application/json", body: Self.okBody)
+        ])
+        let result = await makeProvider().check(
+            configuration: configuration,
+            apiKey: nil,
+            operation: .responses,
+            allowThinkingControlFallback: false
+        )
+        XCTAssertTrue(result.isReady)
+        let paths = FakeTransport.requestURLs().compactMap { URL(string: $0)?.path }
+        XCTAssertEqual(paths, ["/v1/models", "/v1/responses"])
     }
 
     func testAssistantProbeRequiresThinkingControl() async throws {

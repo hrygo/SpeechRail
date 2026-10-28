@@ -133,6 +133,103 @@ final class MeetingRecoveryMaterialTests: XCTestCase {
         )
         XCTAssertTrue(originalOnly.contains("The budget is approved"))
         XCTAssertFalse(originalOnly.contains("预算已批准"), "仅原文模式不带译文")
+
+        let markdown = SessionExporter.export(
+            SessionExportPayload(record: record.record, lines: lines, captionDisplayMode: .bilingual),
+            as: .markdown
+        )
+        XCTAssertTrue(markdown.contains("The budget is approved"))
+        XCTAssertTrue(markdown.contains("> 预算已批准"))
+
+        let plainText = SessionExporter.export(
+            SessionExportPayload(record: record.record, lines: lines, captionDisplayMode: .bilingual),
+            as: .plainText
+        )
+        XCTAssertTrue(plainText.contains("预算已批准"))
+        XCTAssertTrue(plainText.contains("The budget is approved"))
+
+        let jsonString = SessionExporter.export(
+            SessionExportPayload(record: record.record, lines: lines, captionDisplayMode: .bilingual),
+            as: .json
+        )
+        let jsonObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(jsonString.utf8)) as? [String: Any]
+        )
+        let jsonLines = try XCTUnwrap(jsonObject["lines"] as? [[String: Any]])
+        XCTAssertEqual(jsonLines.first?["translated_text"] as? String, "预算已批准")
+        XCTAssertEqual(jsonLines.first?["source_language"] as? String, "en")
+    }
+
+    func testSingleLineParagraphKeepsItsSpeakerAttributionOnExport() {
+        let line = TranscriptLine(
+            id: "single", sessionID: "session", ordinal: 1, role: .speaker,
+            text: "同一句", source: .microphone,
+            attributionUnits: [
+                .init(id: "a", textStart: 0, textEnd: 1, speakerLabel: "A")
+            ],
+            paragraphID: "single"
+        )
+        let projected = SessionExporter.paragraphLines([line])
+        XCTAssertEqual(projected.count, 1)
+        XCTAssertEqual(projected.first?.attributionUnits.count, 1)
+        XCTAssertFalse(projected.first?.speakerLabelIsManual ?? true)
+    }
+
+    func testCaptionExportGroupsPersistedParagraphAndUsesFirstLineTranslation() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "但。", source: .system, tStart: 0, tEnd: 1), id: "paragraph-first")
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "看完幕后资料以后，外媒开得更猛。", source: .system, tStart: 1, tEnd: 4), id: "paragraph-second")
+        _ = try await store.attachLineParagraphID(lineID: "paragraph-first", paragraphID: "paragraph-first")
+        _ = try await store.attachLineParagraphID(lineID: "paragraph-second", paragraphID: "paragraph-first")
+        _ = try await store.attachLineTranslation(
+            lineID: "paragraph-first", translatedText: "但看完幕后资料以后，外媒开得更猛。", sourceLanguage: "zh"
+        )
+        let sessions = try await store.listSessions()
+        let record = try XCTUnwrap(sessions.first)
+        let lines = try await store.lines(sessionID: id)
+        let payload = SessionExportPayload(record: record.record, lines: lines, captionDisplayMode: .bilingual)
+
+        let plain = SessionExporter.export(payload, as: .plainText)
+        XCTAssertTrue(plain.contains("但看完幕后资料以后，外媒开得更猛。"))
+        XCTAssertFalse(plain.contains("但。 看完"))
+
+        let markdown = SessionExporter.export(payload, as: .markdown)
+        XCTAssertTrue(markdown.contains("但看完幕后资料以后，外媒开得更猛。"))
+        XCTAssertFalse(markdown.contains("但。 看完"))
+
+        let srt = SessionExporter.export(payload, as: .srt)
+        let srtCues = srt.components(separatedBy: "\n\n").filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        XCTAssertEqual(srtCues.count, 1, "同一段落的多条 ASR 行在 SRT 中应合并为 1 条字幕块")
+        XCTAssertTrue(srt.contains("00:00:00,000 --> 00:00:04,000"), "SRT 应跨越整段的起止时间码")
+        XCTAssertTrue(srt.contains("但看完幕后资料以后，外媒开得更猛。"))
+
+        let jsonString = SessionExporter.export(payload, as: .json)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(jsonString.utf8)) as? [String: Any])
+        let jsonLines = try XCTUnwrap(root["lines"] as? [[String: Any]])
+        XCTAssertEqual(jsonLines.count, 1)
+        XCTAssertEqual(jsonLines.first?["paragraph_id"] as? String, "paragraph-first")
+        XCTAssertEqual(jsonLines.first?["translated_text"] as? String, "但看完幕后资料以后，外媒开得更猛。")
+    }
+
+    func testCaptionExportGroupsKoreanWithWordSpaces() async throws {
+        let store = try XCTUnwrap(store)
+        let id = try await seedSession()
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "오늘", source: .system, tStart: 0, tEnd: 1), id: "korean-first")
+        _ = try await store.appendLine(.init(sessionID: id, role: .speaker,
+            text: "회의", source: .system, tStart: 1, tEnd: 2), id: "korean-second")
+        _ = try await store.attachLineParagraphID(lineID: "korean-first", paragraphID: "korean-first")
+        _ = try await store.attachLineParagraphID(lineID: "korean-second", paragraphID: "korean-first")
+        let sessions = try await store.listSessions()
+        let record = try XCTUnwrap(sessions.first)
+        let lines = try await store.lines(sessionID: id)
+        let plain = SessionExporter.export(
+            SessionExportPayload(record: record.record, lines: lines), as: .plainText
+        )
+        XCTAssertTrue(plain.contains("오늘 회의"))
     }
 
     func testLiveAndStoredPresentationKeepMixedSpeakersUnicodeAndUnknownWords() {
@@ -269,6 +366,39 @@ final class MeetingRecoveryMaterialTests: XCTestCase {
         try await store.open()
         let reopened = try await store.lines(sessionID: id)
         XCTAssertEqual(reopened, rows)
+    }
+
+    func testSchemaV15ToV16UpgradeAddsParagraphIDAndPreservesLegacyRows() async throws {
+        let store = try XCTUnwrap(store)
+        let directory = try XCTUnwrap(directory)
+        let id = try await seedSession()
+        _ = try await store.appendLine(
+            .init(sessionID: id, role: .speaker, text: "v15 旧行", source: .microphone),
+            id: "legacy-v15-line"
+        )
+        await store.close()
+
+        var db: OpaquePointer?
+        XCTAssertEqual(
+            sqlite3_open_v2(directory.appendingPathComponent(SessionStore.fileName).path, &db, SQLITE_OPEN_READWRITE, nil),
+            SQLITE_OK
+        )
+        XCTAssertEqual(
+            sqlite3_exec(db, "ALTER TABLE line DROP COLUMN paragraph_id; PRAGMA user_version=15;", nil, nil, nil),
+            SQLITE_OK
+        )
+        sqlite3_close_v2(db)
+
+        try await store.open()
+        let upgradedRows = try await store.lines(sessionID: id)
+        XCTAssertEqual(upgradedRows.count, 1)
+        XCTAssertEqual(upgradedRows.first?.id, "legacy-v15-line")
+        XCTAssertEqual(upgradedRows.first?.text, "v15 旧行")
+        XCTAssertNil(upgradedRows.first?.paragraphID, "v15 旧记录升级到 v16 后 paragraph_id 应保持为 nil")
+
+        try await store.attachLineParagraphID(lineID: "legacy-v15-line", paragraphID: "para-v16")
+        let attachedRows = try await store.lines(sessionID: id)
+        XCTAssertEqual(attachedRows.first?.paragraphID, "para-v16")
     }
 
     func testEmptyAutomaticSnapshotClearsPriorSummary() async throws {

@@ -5,31 +5,43 @@ import Foundation
 
 /// 将选定的应用目标适配为 `AudioChunkSource`。
 ///
-/// 内部复用成熟稳定的 `AudioSourceCoordinator` 系统音频采集通道与 CoreAudio tap，
-/// 保持 24kHz / 单声道 / PCM16 输出，离开会话时即刻释放音频设备与 tap。
-///
-/// `AudioSourceCoordinator` 是 `@MainActor`（它同时服务会话设置界面），所以这一个
-/// 适配器整体也在主线程上：`start()` / `stop()` 是协议里的 `async` 要求，调用方本来
-/// 就要 await，跨隔离域的开销落在一次跳转上，采集本身仍在 tap 的实时线程里跑。
+/// 直接使用 `SystemAudioCapture`（XPC + `CoreAudioTapCapture`）按目标应用 `bundleID`
+/// 采集 24kHz / 单声道 / PCM16 音频，不经过多路 `StreamMixer`（省去 40ms 混音缓冲与后台轮询，
+/// 且在目标应用退出时能立即将 `.sourceLost` 终止信号传回 `CaptionSession`）。
 @MainActor
 public final class AppAudioTapChunkSource: AudioChunkSource, @unchecked Sendable {
     private let target: CaptionTargetApp
-    private let coordinator = AudioSourceCoordinator()
+    private var capture: SystemAudioCapture?
 
     public init(target: CaptionTargetApp) {
         self.target = target
     }
 
     public func start() async throws -> AudioChunkStream {
-        let selection = AudioSourceCoordinator.Selection(
-            usesMicrophone: false,
-            systemApps: [SystemAudioApp(bundleID: target.bundleID, name: target.appName)]
+        await stop()
+        let systemCapture = SystemAudioCapture(
+            selection: .init(
+                bundleIDs: [target.bundleID],
+                label: target.appName
+            )
         )
-        return try await coordinator.start(selection: selection)
+        self.capture = systemCapture
+        do {
+            return try await systemCapture.start()
+        } catch {
+            await systemCapture.stop()
+            if self.capture === systemCapture {
+                self.capture = nil
+            }
+            if error is CancellationError { throw error }
+            throw MeetingAudioBlocked(reason: .systemAudioUnavailable(error.localizedDescription))
+        }
     }
 
     public func stop() async {
-        await coordinator.stop()
+        let active = capture
+        capture = nil
+        await active?.stop()
     }
 }
 
@@ -111,9 +123,9 @@ extension CaptionSession {
             }
         }
 
-        // 3. 翻译客户端工厂
+        // 3. 翻译客户端工厂（仅在实时字幕翻译模块或全局 LLM 已配置时启用）
         self.makeTranslationClient = { [weak preferences] in
-            guard let preferences else { return nil }
+            guard let preferences, preferences.isLLMConfigured(for: .captions) else { return nil }
             return LLMTranslationClient(preferences: preferences)
         }
     }
