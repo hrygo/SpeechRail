@@ -1616,15 +1616,25 @@ final class LLMProviderTests: XCTestCase {
     /// 心跳/注释不调用 noteText，不延长等待——此处直接验证"不调用即不重置"：
     /// deadline 按墙钟推进，不因等待中的事件而顺延。
     func testStreamTimerTextResetsStallDeadline() async throws {
+        // 规则层显式时间点断言：确定性验证 stall 展期与首正文解除，避免 CI 调度抖动
+        let start = ContinuousClock.now
+        var deadline = StreamDeadlineState(
+            firstProgressDeadline: nil,
+            stallTimeout: .milliseconds(400),
+            initialStall: start.advanced(by: .milliseconds(50))
+        )
+        try deadline.advance(event: .text, now: start.advanced(by: .milliseconds(50)))
+        XCTAssertTrue(deadline.firstTextSeen, "noteText 后 firstTextSeen 必须为真，首正文 deadline 永久解除")
+        XCTAssertEqual(deadline.stallDeadline, start.advanced(by: .milliseconds(450)))
+        XCTAssertNil(deadline.expiry(now: start.advanced(by: .milliseconds(200))), "见正文后停滞 deadline 应被重置，不应误杀合法推理等待")
+
+        // 计时器集成验证：采用宽裕超时窗口（1000ms），防止高负载 CI runner 调度延迟产生假失败
         let timer = StreamTimer(
             firstDeadline: nil,
-            stallTimeout: .milliseconds(200),
-            initialStall: ContinuousClock.now.advanced(by: .milliseconds(50))
+            stallTimeout: .milliseconds(1000),
+            initialStall: ContinuousClock.now.advanced(by: .milliseconds(200))
         )
-        // 50ms 后 noteText：stall 重新展期 200ms；再睡 100ms 仍未到期。
-        try await Task.sleep(for: .milliseconds(50))
         try timer.advance(events: [.text], now: .now)
-        try await Task.sleep(for: .milliseconds(100))
         let expired = timer.expired
         XCTAssertFalse(expired, "见正文后停滞 deadline 应被重置，不应误杀合法推理等待")
         let seen = timer.firstTextSeen

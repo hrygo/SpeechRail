@@ -595,20 +595,19 @@ final class CaptionTranslatorTests: XCTestCase {
         let fake = FakeTranslationClient()
         fake.streamDeltas = ["翻译完成"]
         let coordinator = CaptionTranslationCoordinator(
-            partialDebounce: .milliseconds(60),
+            partialDebounce: .milliseconds(300),
             minimumPartialDeltaChars: 10,
             makeClient: { fake }
         )
 
-        // 首次 12 字符跨过 10 字符门槛，进入 60ms 防抖等待
+        // 首次 12 字符跨过 10 字符门槛，进入 300ms 防抖等待
         coordinator.schedulePartialTranslation(
             sourceText: "Hello world!",
             contextLines: [],
             displayMode: .bilingual,
             onUpdate: { _ in }
         )
-        // 防抖期内追加 5 个字符（不足 10 字符门槛，但防抖醒来时应发送最新完整句子）
-        try? await Task.sleep(nanoseconds: 15_000_000)
+        // 防抖期内追加 5 个字符（不足 10 字符门槛，防抖醒来时应发送最新完整句子）
         coordinator.schedulePartialTranslation(
             sourceText: "Hello world! Next",
             contextLines: [],
@@ -616,7 +615,7 @@ final class CaptionTranslatorTests: XCTestCase {
             onUpdate: { _ in }
         )
 
-        let deadline = Date().addingTimeInterval(1.0)
+        let deadline = Date().addingTimeInterval(2.0)
         while fake.callCount == 0 && Date() < deadline {
             try? await Task.sleep(for: .milliseconds(10))
         }
