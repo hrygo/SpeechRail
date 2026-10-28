@@ -473,6 +473,9 @@ extension MeetingView {
                         Button("检查麦克风音量…") { isCheckingInput = true }
                             .speechRailButton(.secondary)
                             .help("查看当前麦克风的实时音量反应")
+                            .popover(isPresented: $isCheckingInput, arrowEdge: .bottom) {
+                                InputLevelSheet()
+                            }
                     }
                     .padding(.top, SpeechRailDesignTokens.Spacing.micro)
                 }

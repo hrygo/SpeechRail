@@ -82,34 +82,11 @@ public struct TeleprompterTrialReadingSheet: View {
     // MARK: - 头部说明
 
     private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text("计时试读")
-                    .font(SpeechRailDesignTokens.Typography.display)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-
-                Text(
-                    "大声朗读一段代表性文字（\(TeleprompterTimingPolicy.trialGuidanceText)），"
-                        + "系统将测定你的个人语速并校准预测。"
-                )
-                    .font(SpeechRailDesignTokens.Typography.callout)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            }
-            Spacer()
-            Button {
-                dismiss()
-            } label: {
-                SpeechRailButtonIcon(.close, size: SpeechRailDesignTokens.Icon.buttonIconSize)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .frame(
-                        width: SpeechRailDesignTokens.Control.iconButtonSize,
-                        height: SpeechRailDesignTokens.Control.iconButtonSize
-                    )
-            }
-            .buttonStyle(.plain)
-            .speechRailPointerCursor()
-            .accessibilityLabel("关闭")
-        }
+        SpeechRailSheetHeader(
+            title: "计时试读",
+            subtitle: "大声朗读一段代表性文字（\(TeleprompterTimingPolicy.trialGuidanceText)），系统将测定你的个人语速并校准预测。",
+            onClose: { dismiss() }
+        )
     }
 
     // MARK: - 试读样本正文

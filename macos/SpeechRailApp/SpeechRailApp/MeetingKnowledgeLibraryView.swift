@@ -194,30 +194,35 @@ struct MeetingKnowledgeLibraryView: View {
         .sheet(item: $archivePreview) { pending in
             archivePreviewSheet(pending)
         }
-        .alert("新建项目", isPresented: $newProjectPromptPresented) {
-            TextField("项目名", text: $projectNameDraft)
-            Button("取消", role: .cancel) {}
-            Button("新建") {
-                let name = projectNameDraft
-                Task { _ = await model.createProject(named: name) }
-            }
-        } message: {
-            Text("项目是你自己分的，导入和生成都不会替你猜。")
+        .sheet(isPresented: $newProjectPromptPresented) {
+            SpeechRailQuickInputSheet(
+                title: "新建项目",
+                subtitle: "项目是你自己分的，导入和生成都不会替你猜。",
+                placeholder: "项目名",
+                text: $projectNameDraft,
+                confirmTitle: "新建",
+                onCancel: { newProjectPromptPresented = false },
+                onConfirm: {
+                    let name = projectNameDraft
+                    newProjectPromptPresented = false
+                    Task { _ = await model.createProject(named: name) }
+                }
+            )
         }
-        .alert("项目改名", isPresented: Binding(
-            get: { renameTarget != nil },
-            set: { if !$0 { renameTarget = nil } }
-        )) {
-            TextField("项目名", text: $renameDraft)
-            Button("取消", role: .cancel) { renameTarget = nil }
-            Button("保存") {
-                guard let project = renameTarget else { return }
-                let name = renameDraft
-                renameTarget = nil
-                Task { await model.renameProject(id: project.id, to: name) }
-            }
-        } message: {
-            Text("改名只改显示，归属这场会议的项目不变。")
+        .sheet(item: $renameTarget) { project in
+            SpeechRailQuickInputSheet(
+                title: "项目改名",
+                subtitle: "改名只改显示，归属这场会议的项目不变。",
+                placeholder: "项目名",
+                text: $renameDraft,
+                confirmTitle: "保存",
+                onCancel: { renameTarget = nil },
+                onConfirm: {
+                    let name = renameDraft
+                    renameTarget = nil
+                    Task { await model.renameProject(id: project.id, to: name) }
+                }
+            )
         }
         .sheet(isPresented: $manageProjectsPresented) { manageProjectsSheet }
         .sheet(isPresented: $openItemsPresented) { openItemsSheet }
@@ -378,8 +383,12 @@ struct MeetingKnowledgeLibraryView: View {
     /// 未完成事项（MC-56）。**给出全量总数，并且翻得完**——
     /// 只显示最近 10 条却在标题里写"共 37 条"，比不给这个面板更糟。
     private var openItemsSheet: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
+        SpeechRailSheetScaffold(
+            title: "未完成事项",
+            subtitle: model.openItemsHeadline,
+            onClose: { openItemsPresented = false }
+        ) {
+            VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Picker("", selection: Binding(
                     get: { model.openItemMode },
                     set: { mode in Task { await model.setOpenItemMode(mode) } }
@@ -394,8 +403,10 @@ struct MeetingKnowledgeLibraryView: View {
 
                 if model.openItemsError != nil {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Text("暂时无法读取未完成事项。").foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        Text("暂时无法读取未完成事项。")
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         Button("重试") { Task { await model.loadOpenItems(offset: 0) } }
+                            .speechRailButton(.secondary)
                     }
                     .padding(SpeechRailDesignTokens.Layout.contentPadding)
                     Spacer()
@@ -405,7 +416,7 @@ struct MeetingKnowledgeLibraryView: View {
                 } else if model.openItems.isEmpty {
                     // 空态说清为什么空，不写"暂无数据"。
                     Text(model.openItemsEmptyHint)
-                        .font(.callout)
+                        .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Spacer()
@@ -415,8 +426,6 @@ struct MeetingKnowledgeLibraryView: View {
                             ForEach(model.openItems) { item in
                                 openItemRow(item)
                             }
-                        } header: {
-                            Text(model.openItemsHeadline)
                         } footer: {
                             if model.hasMoreOpenItems {
                                 Button("再显示 \(min(model.openItemLimit, model.openItemCounts.total - model.openItems.count)) 条") {
@@ -428,15 +437,14 @@ struct MeetingKnowledgeLibraryView: View {
                             }
                         }
                     }
+                    .listStyle(.inset)
                 }
             }
-            .navigationTitle("未完成事项")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("好") { openItemsPresented = false }
-                        .keyboardShortcut(.defaultAction)
-                }
-            }
+        } footer: {
+            Spacer(minLength: 0)
+            Button("完成") { openItemsPresented = false }
+                .speechRailButton(.primary)
+                .keyboardShortcut(.defaultAction)
         }
         .frame(
             minWidth: SpeechRailDesignTokens.Layout.Sheet.regularWidth,
@@ -489,12 +497,18 @@ struct MeetingKnowledgeLibraryView: View {
 
     /// 跨会议结论冲突（MC-58）。**只摆矛盾，让用户定，系统不合成一致意见**。
     private var conflictsSheet: some View {
-        NavigationStack {
+        SpeechRailSheetScaffold(
+            title: model.conflictsHeadline,
+            subtitle: "只摆出两场会议的原话差异，由你决定是否采用后一条取代前一条。",
+            onClose: { conflictsPresented = false }
+        ) {
             VStack(spacing: 0) {
                 if model.conflictError != nil {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Text("暂时无法读取跨会议结论。").foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        Text("暂时无法读取跨会议结论。")
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         Button("重试") { Task { await model.loadConflicts() } }
+                            .speechRailButton(.secondary)
                     }
                     .padding(SpeechRailDesignTokens.Layout.contentPadding)
                     Spacer()
@@ -503,7 +517,7 @@ struct MeetingKnowledgeLibraryView: View {
                     Spacer()
                 } else if model.conflicts.isEmpty {
                     Text(model.conflictsEmptyHint)
-                        .font(.callout)
+                        .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Spacer()
@@ -513,15 +527,14 @@ struct MeetingKnowledgeLibraryView: View {
                             conflictRow(conflict)
                         }
                     }
+                    .listStyle(.inset)
                 }
             }
-            .navigationTitle(model.conflictsHeadline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("好") { conflictsPresented = false }
-                        .keyboardShortcut(.defaultAction)
-                }
-            }
+        } footer: {
+            Spacer(minLength: 0)
+            Button("完成") { conflictsPresented = false }
+                .speechRailButton(.primary)
+                .keyboardShortcut(.defaultAction)
         }
         .frame(
             minWidth: SpeechRailDesignTokens.Layout.Sheet.formWidth,
@@ -582,14 +595,20 @@ struct MeetingKnowledgeLibraryView: View {
     /// 这里按生效时间升序全摆出来。界面不提供任何改状态的入口——
     /// 改状态走菜单，"看历史"和"改状态"混在一处，用户会顺手改掉一条。
     private func openItemTimelineSheet(_ item: KnowledgeEvidence) -> some View {
-        NavigationStack {
+        SpeechRailSheetScaffold(
+            title: "变更历史",
+            subtitle: model.executionTimelineHeadline,
+            onClose: {
+                model.clearTimeline()
+                openItemTimelineTarget = nil
+            }
+        ) {
             VStack(alignment: .leading, spacing: 0) {
                 if model.executionTimeline.isEmpty {
                     Text(model.executionTimelineEmptyHint)
-                        .font(.callout)
+                        .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(SpeechRailDesignTokens.Layout.contentPadding)
                     Spacer()
                 } else {
                     List {
@@ -597,24 +616,22 @@ struct MeetingKnowledgeLibraryView: View {
                             ForEach(model.executionTimeline, id: \.id) { event in
                                 executionEventRow(event)
                             }
-                        } header: {
-                            Text(model.executionTimelineHeadline)
                         } footer: {
                             Text("这是当时记下的原话，后来的修改没有改写它。")
-                                .font(.caption)
+                                .font(SpeechRailDesignTokens.Typography.caption)
                         }
                     }
+                    .listStyle(.inset)
                 }
             }
-            .navigationTitle("变更历史")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("好") {
-                        model.clearTimeline()
-                        openItemTimelineTarget = nil
-                    }
-                }
+        } footer: {
+            Spacer(minLength: 0)
+            Button("完成") {
+                model.clearTimeline()
+                openItemTimelineTarget = nil
             }
+            .speechRailButton(.primary)
+            .keyboardShortcut(.defaultAction)
         }
         .frame(
             minWidth: SpeechRailDesignTokens.Layout.Sheet.regularWidth,
@@ -721,47 +738,53 @@ struct MeetingKnowledgeLibraryView: View {
     /// 都实现完整、都有测试，但生产代码里没有任何地方构造它——
     /// 用户能搜、能筛、能导出，却**没法问一句**。
     private var askSheet: some View {
-        NavigationStack {
+        SpeechRailSheetScaffold(
+            title: "问知识库",
+            subtitle: askScopeCaption,
+            onClose: {
+                askPresented = false
+                model.clearAnswer()
+            }
+        ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                TextField("问一句，例如：上次说的灰度排期是哪天", text: $model.askDraft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...3)
-                    .accessibilityLabel("要问的问题")
-                HStack {
-                    // 范围跟着库页当前的筛选走，这里要说出来：不然用户以为问的是全库。
-                    Text(askScopeCaption)
-                        .font(.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    Spacer()
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    TextField("问一句，例如：上次说的灰度排期是哪天", text: $model.askDraft, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...3)
+                        .speechRailSingleLineInput(.regular)
+                        .accessibilityLabel("要问的问题")
                     if model.isAsking {
                         ProgressView().controlSize(.small)
                     }
-                    Button("问") {
+                    Button("提问") {
                         Task { await model.ask(model.askDraft, resolvedConfiguration: resolvedAskConfiguration) }
                     }
+                    .speechRailButton(.primary)
                     .disabled(model.isAsking || model.askDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .keyboardShortcut(.defaultAction)
                 }
-                Divider()
-                answerBody
-                Spacer(minLength: 0)
-            }
-            .padding(SpeechRailDesignTokens.Layout.contentPadding)
-            .frame(
-                minWidth: SpeechRailDesignTokens.Layout.Sheet.regularWidth,
-                minHeight: SpeechRailDesignTokens.Layout.Sheet.regularMinimumHeight,
-                alignment: .leading
-            )
-            .navigationTitle("问知识库")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") {
-                        askPresented = false
-                        model.clearAnswer()
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        answerBody
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .scrollBounceBehavior(.basedOnSize)
             }
+        } footer: {
+            Spacer(minLength: 0)
+            Button("关闭") {
+                askPresented = false
+                model.clearAnswer()
+            }
+            .speechRailButton(.secondary)
+            .keyboardShortcut(.cancelAction)
         }
+        .frame(
+            minWidth: SpeechRailDesignTokens.Layout.Sheet.formWidth,
+            minHeight: SpeechRailDesignTokens.Layout.Sheet.regularMinimumHeight,
+            alignment: .leading
+        )
         .operationFeedback([
             OperationFeedback(model.askError, title: "提问未完成")
         ])
@@ -829,12 +852,21 @@ struct MeetingKnowledgeLibraryView: View {
     ///
     /// 它是纯数据：不发送、不建日程、不写回库，所以这里也不给任何"发出去了"的出口。
     private var prepSheet: some View {
-        NavigationStack {
+        SpeechRailSheetScaffold(
+            title: "会前准备稿",
+            subtitle: "按需优先核对的事项排在最前；仅供会前参考，不会自动外发或改写记录。",
+            onClose: {
+                prepPresented = false
+                model.clearPrepDraft()
+            }
+        ) {
             VStack(spacing: 0) {
                 if model.prepError != nil {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Text("暂时无法读取会前准备稿。").foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        Text("暂时无法读取会前准备稿。")
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         Button("重试") { Task { await model.loadPrepDraft() } }
+                            .speechRailButton(.secondary)
                     }
                     .padding(SpeechRailDesignTokens.Layout.contentPadding)
                     Spacer()
@@ -843,10 +875,9 @@ struct MeetingKnowledgeLibraryView: View {
                     Spacer()
                 } else if let draft = model.prepDraft, draft.isEmpty {
                     Text("你授权的范围内没有待跟进的内容。")
-                        .font(.callout)
+                        .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(SpeechRailDesignTokens.Layout.contentPadding)
                     Spacer()
                 } else if let draft = model.prepDraft {
                     List {
@@ -876,22 +907,21 @@ struct MeetingKnowledgeLibraryView: View {
                         }
                         Section {
                             Text(prepFooter(draft))
-                                .font(.caption)
+                                .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         }
                     }
+                    .listStyle(.inset)
                 }
             }
-            .navigationTitle("会前准备稿")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("好") {
-                        prepPresented = false
-                        model.clearPrepDraft()
-                    }
-                    .keyboardShortcut(.defaultAction)
-                }
+        } footer: {
+            Spacer(minLength: 0)
+            Button("完成") {
+                prepPresented = false
+                model.clearPrepDraft()
             }
+            .speechRailButton(.primary)
+            .keyboardShortcut(.defaultAction)
         }
         .frame(
             minWidth: SpeechRailDesignTokens.Layout.Sheet.regularWidth,
@@ -1404,55 +1434,54 @@ struct MeetingKnowledgeLibraryView: View {
         let preview = pending.preview
         let manifest = preview.manifest
         let identical = preview.conflicts.count - preview.realConflicts.count
-        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text("这个包里有什么")
-                .font(.headline)
-            Text(manifest.documentTitle ?? "未命名会议")
-                .font(.callout)
-            Text(
-                "第 \(manifest.selectedVersion) 版纪要 · \(manifest.scope.title) · "
-                    + "导出于 \(manifest.createdAt.speechRailFormatted())"
-            )
-            .font(.caption)
-            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        return SpeechRailSheetScaffold(
+            title: "这个包里有什么",
+            subtitle: "\(manifest.documentTitle ?? "未命名会议") · 第 \(manifest.selectedVersion) 版纪要 · \(manifest.scope.title) · 导出于 \(manifest.createdAt.speechRailFormatted())",
+            onClose: { archivePreview = nil }
+        ) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                archiveCount("要新增", preview.newObjectCount)
+                if identical > 0 {
+                    archiveCount("与本机完全相同，跳过", identical)
+                }
 
-            archiveCount("要新增", preview.newObjectCount)
-            if identical > 0 {
-                archiveCount("与本机完全相同，跳过", identical)
-            }
-
-            if !preview.realConflicts.isEmpty {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Text("有 \(preview.realConflicts.count) 处同 ID 但内容不同")
-                        .font(.callout)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                    Text("这些是你已经有的内容。这里不提供覆盖入口——先决定要不要保留本机这一份。")
-                        .font(.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    ForEach(preview.realConflicts.prefix(5), id: \.self) { conflict in
-                        Text("· \(conflict.kind.rawValue) \(conflict.id)")
-                            .font(.caption)
+                if !preview.realConflicts.isEmpty {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text("有 \(preview.realConflicts.count) 处同 ID 但内容不同")
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                        Text("这些是你已经有的内容。这里不提供覆盖入口——先决定要不要保留本机这一份。")
+                            .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        ForEach(preview.realConflicts.prefix(5), id: \.self) { conflict in
+                            Text("· \(conflict.kind.rawValue) \(conflict.id)")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
                     }
                 }
             }
-
-            HStack {
-                Spacer()
-                if preview.isSafeToImport {
-                    Button("导入") {
-                        let url = pending.packageURL
-                        archivePreview = nil
-                        Task { await performImport(at: url) }
-                    }
+        } footer: {
+            Spacer(minLength: 0)
+            if preview.isSafeToImport {
+                Button("取消") { archivePreview = nil }
+                    .speechRailButton(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                Button("导入") {
+                    let url = pending.packageURL
+                    archivePreview = nil
+                    Task { await performImport(at: url) }
                 }
-                Button("好", role: .cancel) { archivePreview = nil }
+                .speechRailButton(.primary)
+                .keyboardShortcut(.defaultAction)
+            } else {
+                Button("好") { archivePreview = nil }
+                    .speechRailButton(.primary)
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(SpeechRailDesignTokens.Layout.contentPadding)
-        .frame(minWidth: SpeechRailDesignTokens.Layout.Sheet.compactWidth, alignment: .leading)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth, alignment: .leading)
     }
 
     private func performImport(at packageURL: URL) async {
@@ -1536,40 +1565,46 @@ struct MeetingKnowledgeLibraryView: View {
     /// 项目管理。当前只做改名——方案没要求删项目，库层也没有那个 API，
     /// 凭空加一个"删除项目"要么丢会议、要么留一堆孤儿，都不该顺手做。
     private var manageProjectsSheet: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text("项目")
-                .font(.headline)
-            if model.projects.isEmpty {
-                Text("还没有项目。")
-                    .font(.callout)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            } else {
-                ForEach(model.projects) { project in
-                    HStack {
-                        Text(project.name).font(.callout)
-                        Spacer()
-                        Button("改名") {
-                            renameDraft = project.name
-                            renameTarget = project
-                            manageProjectsPresented = false
+        SpeechRailSheetScaffold(
+            title: "项目管理",
+            subtitle: "按项目整理会议记录；可以新建项目或修改现有项目显示名称。",
+            onClose: { manageProjectsPresented = false }
+        ) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                if model.projects.isEmpty {
+                    Text("还没有项目。")
+                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                } else {
+                    ForEach(model.projects) { project in
+                        HStack {
+                            Text(project.name)
+                                .font(SpeechRailDesignTokens.Typography.callout)
+                            Spacer()
+                            Button("改名") {
+                                renameDraft = project.name
+                                renameTarget = project
+                                manageProjectsPresented = false
+                            }
+                            .speechRailButton(.secondary)
+                            .controlSize(.small)
                         }
-                        .controlSize(.small)
                     }
                 }
             }
-            HStack {
-                Spacer()
-                Button("新建项目…") {
-                    projectNameDraft = ""
-                    manageProjectsPresented = false
-                    newProjectPromptPresented = true
-                }
-                Button("好", role: .cancel) { manageProjectsPresented = false }
-                    .keyboardShortcut(.defaultAction)
+        } footer: {
+            Button("新建项目…") {
+                projectNameDraft = ""
+                manageProjectsPresented = false
+                newProjectPromptPresented = true
             }
+            .speechRailButton(.secondary)
+            Spacer(minLength: 0)
+            Button("完成") { manageProjectsPresented = false }
+                .speechRailButton(.primary)
+                .keyboardShortcut(.defaultAction)
         }
-        .padding(SpeechRailDesignTokens.Layout.contentPadding)
-        .frame(minWidth: SpeechRailDesignTokens.Layout.creatorVoicePopoverWidth, alignment: .leading)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.quickPromptWidth, alignment: .leading)
         .onKeyPress(.escape) {
             manageProjectsPresented = false
             return .handled
@@ -1579,37 +1614,28 @@ struct MeetingKnowledgeLibraryView: View {
     /// 标签编辑。**标签是用户写的，导入与生成都不猜**（MA-13），
     /// 所以这里不給建议、不自动补全——用户想到什么就写什么。
     private var tagsSheet: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text("给这场会议加标签")
-                .font(.headline)
-            Text("用顿号或逗号分隔。标签是你自己写的，导入和生成都不会替你猜。")
-                .font(.callout)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            TextField("例如：季度规划、招聘", text: $tagDraft)
-                .textFieldStyle(.plain)
-                .accessibilityLabel("标签，用顿号或逗号分隔")
-            HStack {
-                Spacer()
-                Button("取消", role: .cancel) { tagsSheetPresented = false }
-                Button("保存") {
-                    guard let documentID = model.selectedDocumentID else { return }
-                    let tags = tagDraft
-                        .replacingOccurrences(of: "，", with: "、")
-                        .split(separator: "、")
-                        .map { $0.trimmingCharacters(in: .whitespaces) }
-                        .filter { !$0.isEmpty }
-                    tagsSheetPresented = false
-                    Task {
-                        await model.setTags(tags, for: documentID)
-                        await model.reload()
-                    }
+        SpeechRailQuickInputSheet(
+            title: "给这场会议加标签",
+            subtitle: "用顿号或逗号分隔。标签是你自己写的，导入和生成都不会替你猜。",
+            placeholder: "例如：季度规划、招聘",
+            text: $tagDraft,
+            confirmTitle: "保存",
+            allowsEmpty: true,
+            onCancel: { tagsSheetPresented = false },
+            onConfirm: {
+                guard let documentID = model.selectedDocumentID else { return }
+                let tags = tagDraft
+                    .replacingOccurrences(of: "，", with: "、")
+                    .split(separator: "、")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                tagsSheetPresented = false
+                Task {
+                    await model.setTags(tags, for: documentID)
+                    await model.reload()
                 }
-                .keyboardShortcut(.defaultAction)
             }
-        }
-        .padding(SpeechRailDesignTokens.Layout.contentPadding)
-        .frame(minWidth: SpeechRailDesignTokens.Layout.inspectorColumnWidth, alignment: .leading)
+        )
     }
 
     private func requestDeletion(
@@ -1954,36 +1980,41 @@ private struct OpenItemEditSheet: View {
     @State private var due: String = ""
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    Text(text)
-                        .font(.callout)
+        SpeechRailSheetScaffold(
+            title: "负责人与期限",
+            subtitle: text,
+            showsDividers: false,
+            onClose: onCancel
+        ) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Text("负责人")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                }
-                Section("负责人") {
-                    // 留空表示"还不知道"，不是从正文里猜一个出来。
                     TextField("还没定负责人", text: $owner)
+                        .textFieldStyle(.plain)
+                        .speechRailSingleLineInput(.regular)
                 }
-                Section("期限") {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Text("期限")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     TextField("还没定期限，可以写「五月前」", text: $due)
+                        .textFieldStyle(.plain)
+                        .speechRailSingleLineInput(.regular)
+                        .onSubmit { onSave(owner, due) }
                 }
             }
-            .formStyle(.grouped)
-            .navigationTitle("负责人与期限")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消", action: onCancel)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") { onSave(owner, due) }
-                }
-            }
+        } footer: {
+            Spacer(minLength: 0)
+            Button("取消", action: onCancel)
+                .speechRailButton(.secondary)
+                .keyboardShortcut(.cancelAction)
+            Button("保存") { onSave(owner, due) }
+                .speechRailButton(.primary)
+                .keyboardShortcut(.defaultAction)
         }
-        .frame(
-            minWidth: SpeechRailDesignTokens.Layout.Sheet.compactWidth,
-            minHeight: SpeechRailDesignTokens.Layout.Sheet.compactMinimumHeight
-        )
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth, alignment: .leading)
         .onAppear {
             owner = initialOwner
             due = initialDue

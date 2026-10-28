@@ -1,6 +1,8 @@
 #if SWIFT_PACKAGE
-import SpeechRailAppSupport
+@testable import SpeechRailAppSupport
 #endif
+import AppKit
+import SwiftUI
 import XCTest
 
 final class WindowLayoutPolicyTests: XCTestCase {
@@ -104,12 +106,36 @@ final class WindowLayoutPolicyTests: XCTestCase {
     }
 }
 
-#if !SWIFT_PACKAGE
-import AppKit
-import SwiftUI
-
 @MainActor
 final class OperationFeedbackLayoutTests: XCTestCase {
+    func testPresentationClassificationByToneAndAction() {
+        let copyReceipt = OperationFeedback("已复制", tone: .healthy, title: "已复制", autoDismiss: true)
+        XCTAssertEqual(copyReceipt?.presentation, .hud)
+        XCTAssertEqual(copyReceipt?.autoDismiss, true)
+
+        let neutralSummary = OperationFeedback(
+            "已为你生成 3 段候选音频，可在右侧面板试听并采用。",
+            tone: .neutral,
+            title: "作品操作结果"
+        )
+        XCTAssertEqual(neutralSummary?.presentation, .snackbar)
+        XCTAssertEqual(neutralSummary?.autoDismiss, true)
+
+        let undoTrash = OperationFeedback(
+            "《荒原》已移入废纸篓",
+            tone: .neutral,
+            title: "已移入废纸篓",
+            actionTitle: "撤销",
+            action: {}
+        )
+        XCTAssertEqual(undoTrash?.presentation, .snackbar)
+        XCTAssertEqual(undoTrash?.autoDismiss, true)
+
+        let criticalError = OperationFeedback("服务连接中断，请检查本机服务状态。", tone: .critical, title: "操作未完成", autoDismiss: true)
+        XCTAssertEqual(criticalError?.presentation, .alertCard)
+        XCTAssertEqual(criticalError?.autoDismiss, false)
+    }
+
     func testFeedbackDoesNotChangeWorkspaceSizeForShortOrLongErrors() {
         for message in ["导出失败，请重试。", String(repeating: "长错误详情需要可以完整阅读。\n", count: 500)] {
             let host = NSHostingView(rootView:
@@ -122,14 +148,20 @@ final class OperationFeedbackLayoutTests: XCTestCase {
         }
     }
 
-    func testActualFeedbackCardRemainsWithinItsHostBounds() {
+    func testActualFeedbackCardRemainsWithinItsHostBoundsAcrossPresentations() {
+        let samples: [OperationFeedback] = [
+            OperationFeedback("已复制", tone: .healthy, title: "已复制", autoDismiss: true)!,
+            OperationFeedback("《荒原》已移入废纸篓", tone: .neutral, title: "已移入废纸篓", actionTitle: "撤销", action: {})!,
+            OperationFeedback(String(repeating: "完整错误详情不应溢出卡片。\n", count: 500), tone: .critical)!
+        ]
         for size in [CGSize(width: 420, height: 280), CGSize(width: 640, height: 480)] {
-            let message = String(repeating: "完整错误详情不应溢出卡片。\n", count: 500)
-            let host = NSHostingView(rootView: OperationFeedbackCard(
-                feedback: OperationFeedback(message)!, availableSize: size, dismiss: {}
-            ))
-            XCTAssertLessThanOrEqual(host.fittingSize.width, size.width)
-            XCTAssertLessThanOrEqual(host.fittingSize.height, size.height)
+            for sample in samples {
+                let host = NSHostingView(rootView: OperationFeedbackCard(
+                    feedback: sample, availableSize: size, dismiss: {}
+                ))
+                XCTAssertLessThanOrEqual(host.fittingSize.width, size.width)
+                XCTAssertLessThanOrEqual(host.fittingSize.height, size.height)
+            }
         }
     }
 
@@ -143,4 +175,3 @@ final class OperationFeedbackLayoutTests: XCTestCase {
         XCTAssertEqual(host.fittingSize.height, 280, accuracy: 1)
     }
 }
-#endif

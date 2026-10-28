@@ -21,29 +21,33 @@ struct SpeakerLabelingSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.hairline) {
-                    Text("标注说话人")
-                        .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                    Text("改的是说话人的名字与归属，记录正文一个字都不动。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                }
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-                Button("关闭") { close() }
-                    .keyboardShortcut(.defaultAction)
-            }
+            SpeechRailSheetHeader(
+                title: "标注说话人",
+                subtitle: "改的是说话人的名字与归属，记录正文一个字都不动。",
+                isCompact: true,
+                onClose: { close() }
+            )
             if let sessionID {
                 ScrollView(.vertical) {
                     SpeakerLabelingPanel(labeling: labeling, sessionID: sessionID, isLive: true, transcriptRevision: transcriptRevision)
                 }
+                .scrollBounceBehavior(.basedOnSize)
+            }
+            HStack {
+                Spacer(minLength: 0)
+                Button("完成") { close() }
+                    .speechRailButton(.primary)
+                    .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(SpeechRailDesignTokens.Spacing.gutter)
+        .padding(SpeechRailDesignTokens.Spacing.md)
         .frame(
-            width: SpeechRailDesignTokens.Layout.Sheet.regularWidth,
-            height: SpeechRailDesignTokens.Layout.Sheet.regularHeight,
+            width: SpeechRailDesignTokens.Layout.Sheet.popoverUtilityWidth,
             alignment: .topLeading
+        )
+        .frame(
+            minHeight: SpeechRailDesignTokens.Layout.emptyStateMinimumHeight,
+            maxHeight: SpeechRailDesignTokens.Layout.Sheet.popoverUtilityMaxHeight
         )
         .onKeyPress(.escape) {
             close()

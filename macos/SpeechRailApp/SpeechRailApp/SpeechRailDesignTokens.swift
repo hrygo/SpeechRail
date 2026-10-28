@@ -365,6 +365,14 @@ public enum SpeechRailDesignTokens {
         public enum Sheet {
             /// 操作结果浮层的正文滚动上限。
             public static let messageBodyMaximumHeight: CGFloat = 200
+            /// 极简输入弹层（单字段重命名、标签编辑、快速新建项目）：380pt。
+            public static let quickPromptWidth: CGFloat = 380
+            /// 上下文工具与轻量辅助 Popover 宽度（电平检测、配置指引、实时说话人标注）：380pt。
+            public static let popoverUtilityWidth: CGFloat = 380
+            /// 实时说话人标注等列表型 Popover 的最大可视高度，避免遮挡后方实时字幕或转录。
+            public static let popoverUtilityMaxHeight: CGFloat = 380
+            /// 可交互浮动通知条（Snackbar / Undo 条）的最大宽度上限：480pt。
+            public static let snackbarMaximumWidth: CGFloat = 480
             /// 紧凑型弹层（重命名记录、快速确认）：420pt。
             public static let compactWidth: CGFloat = 420
             /// 详情/测试弹层（设备自检、快捷键帮助）：460pt。
@@ -1081,6 +1089,8 @@ public enum SpeechRailDesignTokens {
         public static let display: Font = .system(.title, weight: .semibold)
         /// 卡片 / 面板级标题。稿上与页标题同档（`Title / Page`），所以取值与 `display` 一致。
         public static let windowTitle: Font = .system(.title, weight: .semibold)
+        /// 模态 Sheet 与工作区弹层标题（15pt Semi Bold，清晰区分主工作区页面标题与弹层局部标题）。
+        public static let sheetTitle: Font = .system(.title3, weight: .semibold)
         public static let sectionTitle: Font = .system(.headline, weight: .semibold)
         public static let body: Font = .body
         /// Figma `Body / Medium`：候选卡槽位名与表格主列等需要中等字重的正文。
@@ -1194,6 +1204,14 @@ public enum SpeechRailDesignTokens {
         public static let statusBannerIcon: Font = .system(size: Control.statusBannerIconSize, weight: .semibold)
         /// 轻量通知条图标字形（16pt semibold）。
         public static let noticeIcon: Font = .system(size: Notice.iconSize, weight: .semibold)
+        /// 轻量 HUD 胶囊与 Snackbar 图标字形（13pt semibold）。
+        public static let hudIcon: Font = .system(size: Notice.hudIconSize, weight: .semibold)
+        /// 轻量 HUD 胶囊与 Snackbar 标题字形（12pt semibold）。
+        public static let hudTitle: Font = .system(.callout, weight: .semibold)
+        /// 轻量 HUD 胶囊与 Snackbar 补充正文字形（11pt regular）。
+        public static let hudMessage: Font = .system(.subheadline, weight: .regular)
+        /// 轻量 HUD 胶囊与 Snackbar 内联动作字形（11pt semibold）。
+        public static let hudAction: Font = .system(.subheadline, weight: .semibold)
         /// 标注胶囊图标字形（10pt regular）。
         public static let chipIcon: Font = .system(size: Chip.iconSize)
         /// 会话页面级空态主图标字形（28pt regular）。
@@ -1568,11 +1586,18 @@ public enum SpeechRailDesignTokens {
         public static let stageQuickOpacityStep: Double = 0.08
     }
 
-    /// 轻量内联通知栏与状态反馈规范（NoticeBar / InlineAlert）
+    /// 轻量内联通知栏与状态反馈规范（NoticeBar / InlineAlert / OperationFeedback）
     public enum Notice {
-        /// 临时操作反馈的展示时间；收起后仍可通过相应管理入口恢复。
-        public static let transientDisplayDuration: Duration = .seconds(4)
+        /// 瞬态 HUD 胶囊（已复制、已保存等回执）的默认展示时间。
+        public static let transientDisplayDuration: Duration = .seconds(3.5)
+        /// 带内联动作或摘要说明的浮动通知条（Snackbar / Undo）的默认展示时间。
+        public static let actionableDisplayDuration: Duration = .seconds(5.5)
         public static let iconSize: CGFloat = 16
+        public static let hudIconSize: CGFloat = 13
+        public static let hudDismissFrame: CGFloat = 16
+        public static let hudShadowRadius: CGFloat = 8
+        public static let hudShadowYOffset: CGFloat = 4
+        public static let removalScale: CGFloat = 0.96
         public static let paddingHorizontal: CGFloat = Spacing.md
         public static let paddingVertical: CGFloat = Spacing.sm
         public static let cornerRadius: CGFloat = Corner.nested

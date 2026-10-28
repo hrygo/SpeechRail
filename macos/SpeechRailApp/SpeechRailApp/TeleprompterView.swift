@@ -157,9 +157,10 @@ public struct TeleprompterView: View {
                 }
             }
         }
-        .alert(
+        .confirmationDialog(
             "确定删除这份稿件？",
             isPresented: $isDeleteAlertPresented,
+            titleVisibility: .visible,
             presenting: documentToDelete
         ) { doc in
             Button("删除", role: .destructive) {
@@ -175,9 +176,10 @@ public struct TeleprompterView: View {
         } message: { doc in
             Text("删除「\(doc.title)」后无法恢复。")
         }
-        .alert(
+        .confirmationDialog(
             "删除无法打开的稿件？",
             isPresented: $isUnavailableDeleteAlertPresented,
+            titleVisibility: .visible,
             presenting: unavailableDocumentToDelete
         ) { item in
             Button("删除", role: .destructive) {

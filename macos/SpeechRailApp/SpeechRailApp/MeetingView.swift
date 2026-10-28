@@ -316,13 +316,6 @@ public struct MeetingView: View {
                     idealHeight: SpeechRailDesignTokens.Layout.meetingLibraryIdealHeight
                 )
         }
-        .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
-        .sheet(isPresented: $isLabelingSpeakers) {
-            SpeakerLabelingSheet(labeling: meeting.labeling, sessionID: meeting.sessionID,
-                transcriptRevision: meeting.transcriptPresentation.revision) {
-                isLabelingSpeakers = false
-            }
-        }
         .operationFeedback([
             recoveryFeedback,
             OperationFeedback(operationError, onDismiss: { operationError = nil }),
