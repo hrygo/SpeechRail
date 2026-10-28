@@ -305,7 +305,10 @@ final class CaptionTranslatorTests: XCTestCase {
             onUpdate: { latestUpdate = $0 }
         )
 
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        let deadline = Date().addingTimeInterval(1.0)
+        while latestUpdate != "最后结果" && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertEqual(latestUpdate, "最后结果")
         XCTAssertEqual(fake.callCount, 1, "Only the last debounced partial should have fired")
         XCTAssertEqual(fake.lastSourceText, "Hello world 12345678")
@@ -613,7 +616,10 @@ final class CaptionTranslatorTests: XCTestCase {
             onUpdate: { _ in }
         )
 
-        try? await Task.sleep(nanoseconds: 120_000_000)
+        let deadline = Date().addingTimeInterval(1.0)
+        while fake.callCount == 0 && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertEqual(fake.callCount, 1)
         XCTAssertEqual(
             fake.lastSourceText,
@@ -895,7 +901,10 @@ final class CaptionTranslatorTests: XCTestCase {
         client.yield("第一句", to: "First English sentence.")
         client.finish("First English sentence.")
         await fulfillment(of: [firstFinished], timeout: 1)
-        try await Task.sleep(for: .milliseconds(50))
+        let startedDeadline = Date().addingTimeInterval(1.0)
+        while client.started.count < 2 && Date() < startedDeadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertEqual(
             client.started, ["First English sentence.", "Second English sentence."],
             "第一句收口后队列才推进到第二句"
@@ -965,7 +974,10 @@ final class CaptionTranslatorTests: XCTestCase {
             }
         )
 
-        try await Task.sleep(for: .milliseconds(50))
+        let started1Deadline = Date().addingTimeInterval(1.0)
+        while client.started.isEmpty && Date() < started1Deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertEqual(client.started, ["Running English sentence."])
         coordinator.cancelAll()
         await fulfillment(of: [queuedFinished], timeout: 1)

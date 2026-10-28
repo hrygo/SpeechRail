@@ -2168,7 +2168,7 @@ final class CaptionSessionLifecycleTests: XCTestCase {
 
         // 单帧尾部回退 2 个字：界面应保持原显示不闪烁
         try await h.emit(.partialSnapshot(itemID: "item-jitter", revision: 2, text: "今天我们来看看这个实时"))
-        try await Task.sleep(for: .milliseconds(30))
+        try await h.settle { $0.session.partialText == "今天我们来看看这个实时字幕" }
         XCTAssertEqual(h.session.partialText, "今天我们来看看这个实时字幕")
 
         // 下一帧继续增长：正常推进到最新文本
