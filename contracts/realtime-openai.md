@@ -100,6 +100,10 @@ query 不得携带 key。每连接有独立 session、epoch、sequence 与临时
   该默认值与 `task` 无关。
 - `session.speechrail.expected_asr_revision` 只绑定连接的 ASR 模型身份，在 `session.updated`
   回显。TTS opt-in 只启用能力，不选择音色或绑定 TTS 模型。
+- 识别语种回显在 `session.audio.input.transcription.language`。请求了具体语种时，
+  `session.updated` 必须原样回显同一个值；自动识别不发送该字段，服务端也不回显。
+  语种只在建连时生效，此后无法在会话中途变更，因此回显缺失或不等于请求值即表示这条
+  连接不会按请求的语种识别，调用方可以按协议错误终止，而不是继续产出另一种语言的文字。
 - 模型、语言、能力与预算在首个工作前验证；TTS 音色与 revision 在每次
   `speechrail.tts.start` 验证。未知模型、voice、revision、Q4/Q6、Design runtime voice 均 fail closed。
 - 缺失字段使用服务端当前默认；显式 `null` 只对 schema 声明可空的字段有效，不能用 `null`

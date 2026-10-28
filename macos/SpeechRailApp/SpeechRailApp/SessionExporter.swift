@@ -187,12 +187,27 @@ public enum SessionExporter {
             }
             if let index = indexByParagraph[paragraphID], result.indices.contains(index) {
                 var merged = result[index]
+                let leftSpeaker = merged.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let rightSpeaker = line.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let hasSpeakerConflict = (leftSpeaker?.isEmpty == false)
+                    && (rightSpeaker?.isEmpty == false)
+                    && leftSpeaker != rightSpeaker
+                if hasSpeakerConflict {
+                    // Late diarization or manual speaker assignment proved a turn change
+                    // inside the paragraph: split here so two speakers are never fused.
+                    indexByParagraph[paragraphID] = result.count
+                    result.append(line)
+                    continue
+                }
                 merged.text = joinedExportText([merged.text, line.text])
                 if let end = line.tEnd { merged.tEnd = end }
                 if merged.translatedText?.isEmpty != false {
                     merged.translatedText = line.translatedText
                 }
                 if merged.sourceLanguage == nil { merged.sourceLanguage = line.sourceLanguage }
+                if (merged.speakerLabel?.isEmpty != false), let rightSpeaker, !rightSpeaker.isEmpty {
+                    merged.speakerLabel = rightSpeaker
+                }
                 // Attribution offsets address the original line; merging them would
                 // make runs point at the wrong characters. Keep the speaker prefix.
                 merged.attributionUnits = []

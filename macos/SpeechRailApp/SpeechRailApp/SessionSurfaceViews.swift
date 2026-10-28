@@ -296,6 +296,15 @@ public struct SessionLibraryView: View {
     private var speakerNames: [String: String] { detail?.review.speakerNames ?? [:] }
     @State private var libraryDisplayMode: CaptionDisplayMode = .bilingual
     @State private var searchText = ""
+    @State private var recordFilter: RecordListFilter = .all
+    @State private var detailSearchText = ""
+    @State private var selectedSpeakerFilter: String?
+    @State private var editingSpeakerLabel: String?
+    @State private var speakerRenameDraft = ""
+    @State private var renamingRecordID: String?
+    @State private var recordRenameDraft = ""
+    @State private var showsLiveSpeakerSheet = false
+    @State private var manualSpeakerModeRecordIDs: Set<String> = []
     /// 全文检索命中（MC-49/MC-52/MC-54）：转录终稿与已完成纪要正文。
     /// 为空表示未检索或无命中；与标题过滤互斥，检索优先。
     @State private var knowledgeHits: [SessionStore.KnowledgeHit] = []
@@ -314,6 +323,14 @@ public struct SessionLibraryView: View {
     @State private var showsBlockedHelp = false
     /// 想打开翻译但还没配模型：不把开关拨过去，而是明确告诉用户缺什么、去哪配。
     @State private var showsTranslationSetupHint = false
+
+    private enum RecordListFilter: String, CaseIterable, Identifiable {
+        case all = "全部"
+        case multiSpeaker = "多人"
+        case active = "进行中"
+
+        var id: String { rawValue }
+    }
 
     public init(kind: SessionKind) {
         self.kind = kind
@@ -376,6 +393,9 @@ public struct SessionLibraryView: View {
                 if summaries.isEmpty {
                     emptyState
                 } else {
+                    if kind == .captions {
+                        captionQuickControlBar
+                    }
                     library
                 }
             }
@@ -434,6 +454,27 @@ public struct SessionLibraryView: View {
         }
         .onChange(of: navigation.layoutTier, initial: true) { _, _ in
             syncInspectorWithLayoutContract(navigation.layoutContract)
+        }
+        .onChange(of: caption.sessionID) { _, newSessionID in
+            guard kind == .captions else { return }
+            Task {
+                await reload()
+                if let newSessionID {
+                    selectedID = newSessionID
+                }
+            }
+        }
+        .onChange(of: caption.phase) { _, _ in
+            guard kind == .captions else { return }
+            Task { await reload() }
+        }
+        .onChange(of: caption.transcriptPresentation.revision) { _, _ in
+            guard kind == .captions, let activeID = caption.sessionID, selectedID == activeID else { return }
+            Task { await loadLines() }
+        }
+        .onChange(of: caption.labeling.attributionRevision) { _, _ in
+            guard kind == .captions, let activeID = caption.sessionID, selectedID == activeID else { return }
+            Task { await loadLines() }
         }
         .task(id: refreshToken) { await reload() }
         .task(id: selectedID) { await loadLines() }
@@ -654,6 +695,25 @@ public struct SessionLibraryView: View {
         )
     }
 
+    private var diarizationBinding: Binding<Bool> {
+        Binding(
+            get: { preferences.captionsDiarizationEnabled },
+            set: { enabled in
+                preferences.captionsDiarizationEnabled = enabled
+                if !enabled {
+                    if recordFilter == .multiSpeaker && !summaries.contains(where: { $0.speakerCount > 1 }) {
+                        recordFilter = .all
+                    }
+                    if let summary = selectedSummary, !isSpeakerAttributionActive(for: summary) {
+                        selectedSpeakerFilter = nil
+                        editingSpeakerLabel = nil
+                    }
+                }
+                caption.notifyDiarizationPreferenceChanged()
+            }
+        )
+    }
+
     private var translationSetupDetail: String {
         if !caption.isTranslationAvailable {
             return "还没有配置翻译模型。先在「字幕设置 → 助手 → 实时字幕翻译」里填好地址和模型。"
@@ -670,6 +730,168 @@ public struct SessionLibraryView: View {
         guard caption.translationEnabled else { return "关闭（只看原文）" }
         guard caption.isTranslationAvailable else { return "已开启 · 未配置模型" }
         return caption.displayMode == .chineseOnly ? "已开启 · 仅中文" : "已开启 · 双语对照"
+    }
+
+    /// 历史记录库顶部的实时字幕快捷控制台：有历史记录后依然能随时切换目标音源、原音语种、同传翻译、断句灵敏度与暂停/结束状态。
+    private var captionQuickControlBar: some View {
+        CardSurface {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                // 1. 收音目标快速切换
+                Button {
+                    Task { await caption.promptSelectTarget() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: caption.audioTarget?.isApp == true ? "macwindow" : "mic.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        Text(caption.audioTarget?.displayTitle ?? "选择收音窗口 / 麦克风")
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(SpeechRailDesignTokens.Color.rail.opacity(0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(SpeechRailDesignTokens.Color.rail.opacity(0.22), lineWidth: 0.75)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("点击切换实时字幕采集的目标应用窗口或麦克风")
+                .speechRailPointerCursor()
+
+                Divider().frame(height: 16)
+
+                // 2. 原音语种选择
+                HStack(spacing: 4) {
+                    Text("原音")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Picker("原音语种", selection: Binding(
+                        get: { caption.sourceLanguage },
+                        set: { caption.sourceLanguage = $0 }
+                    )) {
+                        ForEach(CaptionSourceLanguage.allCases) { lang in
+                            Text(lang == .chinese ? "中文（不翻译）" : lang.title).tag(lang)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .fixedSize()
+                }
+                .help("选择视频或音频的源语言；切换后立即同步给语音识别与同传翻译")
+
+                // 3. 同传翻译与双语排版
+                HStack(spacing: 6) {
+                    Toggle("同传翻译", isOn: translationBinding)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                    if caption.translationEnabled {
+                        Picker("排版", selection: Binding(
+                            get: { caption.displayMode },
+                            set: { caption.displayMode = $0 }
+                        )) {
+                            Text("双语对照").tag(CaptionDisplayMode.bilingual)
+                            Text("仅中文").tag(CaptionDisplayMode.chineseOnly)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .controlSize(.small)
+                        .frame(width: 120)
+                    }
+                }
+                .help(translationSetupDetail)
+
+                Divider().frame(height: 16)
+
+                // 4. 断句灵敏度与段落合并
+                HStack(spacing: 6) {
+                    Picker("断句", selection: captionSilenceBinding) {
+                        Text("断句 400ms").tag(400)
+                        Text("断句 650ms").tag(650)
+                        Text("断句 900ms").tag(900)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .fixedSize()
+                    .help("调整句末静音切分窗口：400ms 出字更快，900ms 断句更完整")
+
+                    Toggle("段落合并", isOn: paragraphAssemblyBinding)
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .help("把同一句话被切成的多行自动合并为完整段落并整段精翻")
+
+                    Toggle("区分说话人", isOn: diarizationBinding)
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .help("开启说话人分离（谁在说话）；运行中切换会自动重连并启用分人标记")
+                }
+
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                if caption.phase.isLive, preferences.captionsDiarizationEnabled || !caption.labeling.labels.isEmpty {
+                    Button {
+                        showsLiveSpeakerSheet = true
+                    } label: {
+                        Label("标注说话人", systemImage: "person.crop.rectangle")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("实时改名、合并或标记当前字幕会话中的说话人")
+                }
+
+                // 5. 运行态快捷控制（暂停/继续、结束）
+                if caption.phase.isLive {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Button {
+                            Task {
+                                if caption.phase == .running {
+                                    await caption.pause()
+                                } else {
+                                    await caption.resume()
+                                }
+                            }
+                        } label: {
+                            Label(
+                                caption.phase == .running ? "暂停" : "继续",
+                                systemImage: caption.phase == .running ? "pause.fill" : "play.fill"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help(caption.phase == .running ? "暂停实时字幕（⌘⇧L）" : "继续实时字幕（⌘⇧L）")
+
+                        Button(role: .destructive) {
+                            Task {
+                                await caption.finish()
+                                await reload()
+                            }
+                        } label: {
+                            Label("结束保存", systemImage: "stop.fill")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help("结束当前实时字幕并归档保存到下方记录列表")
+                    }
+                }
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        }
     }
 
     /// 实时字幕的空态（稿 ``实时字幕 · 记录库 · 未开始（前置检查）`）。
@@ -764,13 +986,22 @@ public struct SessionLibraryView: View {
                     SessionHairline()
                     SessionCheckRow(
                         tone: preferences.captionsDiarizationEnabled ? .ready : .neutral,
-                        name: "谁在说话 · 可选",
-                        detail: "这台 Mac 标不出谁在说话时就只记文字，正文照常；它也不用配对话模型。"
-                    )
+                        name: "谁在说话（区分说话人） · 可选",
+                        detail: preferences.captionsDiarizationEnabled
+                            ? "已开启：自动区分不同发言人（A / B / C…），在工作台中可随时按人筛选或点击标记姓名。"
+                            : "默认关闭（保障最低识别与同传延迟）。打开后自动区分发言人并在工作台开启按人标记；标不出时正文照常记录。"
+                    ) {
+                        Toggle("", isOn: diarizationBinding)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .accessibilityLabel("谁在说话（区分说话人）")
+                            .accessibilityIdentifier("caption-diarization-toggle")
+                    }
                     Spacer(minLength: 0)
                     SessionHairline()
                     CardFoot(
-                        note: "字幕带按目标应用定向采集音频；翻译默认关闭，在字幕带或这里都能打开。"
+                        note: "字幕带按目标应用定向采集音频；说话人区分等工作台设置仅在此工作台内集中配置。"
                             + "记录库空着的时候，这里只有「开始字幕」。"
                     ) { EmptyView() }
                 }
@@ -786,6 +1017,7 @@ public struct SessionLibraryView: View {
                             SessionKVRow("收音目标", caption.audioTarget?.displayTitle ?? "按窗口选择 / 麦克风")
                             SessionKVRow("源语言", caption.sourceLanguage.title)
                             SessionKVRow("翻译", translationInspectorValue)
+                            SessionKVRow("说话人区分", preferences.captionsDiarizationEnabled ? "已开启（可标记姓名）" : "关闭")
                             SessionKVRow("字幕带位置", caption.placementMode == .dockedToTargetWindow ? "吸附目标窗口" : "自由悬停")
                             SessionKVRow("识别精度", profileRowText)
                             SessionKVRow("默认字号", "标准")
@@ -986,22 +1218,93 @@ public struct SessionLibraryView: View {
         CardSurface {
             VStack(spacing: 0) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    SectionHeading(title: "记录", detail: "\(summaries.count)")
+                    SectionHeading(title: "记录", detail: "\(filteredSummaries.count) / \(summaries.count)")
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                    if kind == .captions {
+                        Button {
+                            Task {
+                                if caption.phase.isLive {
+                                    await caption.openBand()
+                                } else {
+                                    await caption.promptSelectTarget()
+                                }
+                            }
+                        } label: {
+                            Image(systemName: caption.phase.isLive ? "captions.bubble.fill" : "plus.circle.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        }
+                        .buttonStyle(.plain)
+                        .help(caption.phase.isLive ? "显示实时字幕带" : "开启新的实时字幕")
+                        .speechRailPointerCursor()
+                    }
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
                 .padding(.top, SpeechRailDesignTokens.Spacing.sm)
                 .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
 
-                TextField("搜索记录", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .speechRailSingleLineInput(.compact)
-                    .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
-                    .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
-                    .onSubmit {
-                        // 回车触发全文检索：标题过滤搜不到正文，这一步查转录与纪要。
-                        Task { await runKnowledgeSearch() }
+                // 搜索框（带搜索图标与一键清除）
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    TextField("搜索标题或按回车搜全文…", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .onSubmit {
+                            Task { await runKnowledgeSearch() }
+                        }
+                    if !searchText.isEmpty {
+                        Button {
+                            searchText = ""
+                            knowledgeHits = []
+                            knowledgeError = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("清空搜索")
+                        .speechRailPointerCursor()
                     }
+                }
+                .speechRailSingleLineInput(.compact)
+                .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
+                .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+
+                // 左侧栏快速筛选胶囊（未开启分人且无多人记录时不展示「多人」筛选项）
+                HStack(spacing: 4) {
+                    ForEach(availableRecordListFilters) { filter in
+                        let isSelected = recordFilter == filter
+                        Button {
+                            recordFilter = filter
+                        } label: {
+                            Text(filter.rawValue)
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(
+                                    isSelected
+                                        ? SpeechRailDesignTokens.Color.rail
+                                        : SpeechRailDesignTokens.Color.inkSecondary
+                                )
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule()
+                                        .fill(
+                                            isSelected
+                                                ? SpeechRailDesignTokens.Color.rail.opacity(0.14)
+                                                : Color.primary.opacity(0.04)
+                                        )
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .speechRailPointerCursor()
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, SpeechRailDesignTokens.Layout.sessionListPadding)
+                .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+
                 // 全文检索命中数；无命中时回到标题过滤，不清空列表。
                 if !knowledgeHits.isEmpty {
                     Text("全文找到 \(knowledgeHits.count) 条")
@@ -1028,6 +1331,12 @@ public struct SessionLibraryView: View {
                         recordRow(summary)
                             .tag(summary.id)
                             .contextMenu {
+                                Button("重命名记录…") {
+                                    selectedID = summary.id
+                                    renamingRecordID = summary.id
+                                    recordRenameDraft = summary.record.title ?? displayTitle(for: summary)
+                                }
+                                Divider()
                                 Menu("导出") {
                                     ForEach(orderedFormats) { format in
                                         Button(format.title) {
@@ -1038,6 +1347,7 @@ public struct SessionLibraryView: View {
                                 Button("复制全文") {
                                     Task { await copyTranscript(of: summary) }
                                 }
+                                Divider()
                                 Button("移除记录…", role: .destructive) {
                                     pendingRemoval = summary
                                 }
@@ -1052,7 +1362,26 @@ public struct SessionLibraryView: View {
     }
 
     private func recordRow(_ summary: SessionSummary) -> some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+        let isAppAudio = (summary.record.targetAppName?.isEmpty == false) || summary.record.audioSource == .system
+        let isLiveRecording = summary.record.state == .recording
+        return HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(
+                        isLiveRecording
+                            ? SpeechRailDesignTokens.Color.rail.opacity(0.16)
+                            : SpeechRailDesignTokens.Color.recessedField
+                    )
+                    .frame(width: 26, height: 26)
+                Image(systemName: isAppAudio ? "macwindow" : "mic.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(
+                        isLiveRecording
+                            ? SpeechRailDesignTokens.Color.rail
+                            : SpeechRailDesignTokens.Color.inkSecondary
+                    )
+            }
+
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text(displayTitle(for: summary))
@@ -1069,14 +1398,17 @@ public struct SessionLibraryView: View {
                         StatusPill(tone: .attention, label: "整理中")
                     }
                 }
-                Text(recordSubtitle(summary))
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(
-                        maxWidth: SpeechRailDesignTokens.Layout.sessionListRowInnerWidth,
-                        alignment: .leading
-                    )
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(recordSubtitle(summary))
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    if summary.speakerCount > 0 {
+                        Text("· 👤\(summary.speakerCount)")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    }
+                }
             }
             InPlaceDeleteButton(
                 style: .compactIcon,
@@ -1092,7 +1424,42 @@ public struct SessionLibraryView: View {
         CardSurface {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    SectionHeading(title: displayTitle(for: summary), detail: recordSubtitle(summary))
+                    if renamingRecordID == summary.id {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            TextField("输入记录标题…", text: $recordRenameDraft)
+                                .textFieldStyle(.plain)
+                                .speechRailSingleLineInput(.compact)
+                                .frame(width: 220)
+                                .onSubmit {
+                                    Task { await saveRecordTitle(for: summary) }
+                                }
+                            Button("保存") {
+                                Task { await saveRecordTitle(for: summary) }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            Button("取消") {
+                                renamingRecordID = nil
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    } else {
+                        HStack(spacing: 6) {
+                            SectionHeading(title: displayTitle(for: summary), detail: recordSubtitle(summary))
+                            Button {
+                                renamingRecordID = summary.id
+                                recordRenameDraft = summary.record.title ?? displayTitle(for: summary)
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("重命名此条记录")
+                            .speechRailPointerCursor()
+                        }
+                    }
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                     if kind == .captions {
                         Picker("显示模式", selection: $libraryDisplayMode) {
@@ -1141,6 +1508,11 @@ public struct SessionLibraryView: View {
 
                 Divider()
 
+                if !displayLines.isEmpty {
+                    detailSpeakerAndFilterBar(for: summary)
+                    Divider()
+                }
+
                 if detailLoad.isLoading {
                     ProgressView("正在打开记录…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1158,11 +1530,24 @@ public struct SessionLibraryView: View {
                         .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                } else if filteredDisplayLines.isEmpty {
+                    VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text("没有匹配的段落")
+                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        Button("重置筛选条件") {
+                            detailSearchText = ""
+                            selectedSpeakerFilter = nil
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            ForEach(displayLines) { line in
-                                lineRow(line)
+                            ForEach(filteredDisplayLines) { line in
+                                lineRow(line, summary: summary)
                             }
                             if !recoveryLines.isEmpty {
                                 TranscriptRecoveryMaterialSection(lines: recoveryLines)
@@ -1174,7 +1559,11 @@ public struct SessionLibraryView: View {
 
                 Divider()
 
-                Text("记录只保存在这台 Mac 上；原始音频不留存。")
+                Text(
+                    isSpeakerAttributionActive(for: summary)
+                        ? "记录只保存在这台 Mac 上；点击任意段落左侧说话人标签即可标记姓名或调整归属。"
+                        : "记录只保存在这台 Mac 上。"
+                )
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -1182,15 +1571,215 @@ public struct SessionLibraryView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .sheet(isPresented: $showsLiveSpeakerSheet) {
+            SpeakerLabelingSheet(
+                labeling: caption.labeling,
+                sessionID: caption.sessionID ?? selectedID,
+                transcriptRevision: UInt64(lines.count),
+                onClose: {
+                    showsLiveSpeakerSheet = false
+                    Task { await loadLines() }
+                }
+            )
+        }
     }
 
-    private func lineRow(_ line: TranscriptLine) -> some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text(speakerText(for: line))
-                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .frame(width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth, alignment: .leading)
-                .lineLimit(1)
+    /// 当前记录是否启用或包含说话人区分（决定是否展示说话人胶囊、左列占位与标注菜单）。
+    private func isSpeakerAttributionActive(for summary: SessionSummary) -> Bool {
+        if kind == .meeting { return true }
+        if preferences.captionsDiarizationEnabled { return true }
+        if manualSpeakerModeRecordIDs.contains(summary.id) { return true }
+        if summary.record.diarization == .active || summary.speakerCount > 0 { return true }
+        return !sessionSpeakerLabels.isEmpty
+    }
+
+    private var availableRecordListFilters: [RecordListFilter] {
+        let showMultiSpeaker = kind == .meeting
+            || preferences.captionsDiarizationEnabled
+            || summaries.contains(where: { $0.speakerCount > 1 })
+        return RecordListFilter.allCases.filter { filter in
+            filter != .multiSpeaker || showMultiSpeaker
+        }
+    }
+
+    /// 详情页顶部说话人管理/标注栏与段内搜索过滤栏（根据是否开启分人自适应呈现）。
+    @ViewBuilder
+    private func detailSpeakerAndFilterBar(for summary: SessionSummary) -> some View {
+        let speakerActive = isSpeakerAttributionActive(for: summary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                if speakerActive {
+                    // 1a. 开启分人或存在说话人时：说话人筛选与一键改名胶囊
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            Button {
+                                selectedSpeakerFilter = nil
+                            } label: {
+                                Text("全部 (\(displayLines.count))")
+                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                    .foregroundStyle(
+                                        selectedSpeakerFilter == nil
+                                            ? SpeechRailDesignTokens.Color.rail
+                                            : SpeechRailDesignTokens.Color.inkSecondary
+                                    )
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(
+                                        Capsule()
+                                            .fill(
+                                                selectedSpeakerFilter == nil
+                                                    ? SpeechRailDesignTokens.Color.rail.opacity(0.14)
+                                                    : Color.primary.opacity(0.05)
+                                            )
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .speechRailPointerCursor()
+
+                            ForEach(sessionSpeakerLabels, id: \.self) { label in
+                                let isSelected = selectedSpeakerFilter == label
+                                let name = speakerDisplayName(for: label)
+                                let count = displayLines.filter { $0.speakerLabel == label }.count
+                                HStack(spacing: 3) {
+                                    Button {
+                                        selectedSpeakerFilter = isSelected ? nil : label
+                                    } label: {
+                                        HStack(spacing: 3) {
+                                            Image(systemName: "person.fill")
+                                                .font(.system(size: 9))
+                                            Text("\(name) (\(count))")
+                                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Button {
+                                        editingSpeakerLabel = label
+                                        speakerRenameDraft = speakerNames[label] ?? ""
+                                    } label: {
+                                        Image(systemName: "pencil")
+                                            .font(.system(size: 9, weight: .semibold))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("重命名「\(name)」")
+                                }
+                                .foregroundStyle(
+                                    isSelected
+                                        ? SpeechRailDesignTokens.Color.rail
+                                        : SpeechRailDesignTokens.Color.ink
+                                )
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(
+                                    Capsule()
+                                        .fill(
+                                            isSelected
+                                                ? SpeechRailDesignTokens.Color.rail.opacity(0.16)
+                                                : Color.primary.opacity(0.05)
+                                        )
+                                )
+                                .speechRailPointerCursor()
+                            }
+                        }
+                    }
+                } else {
+                    // 1b. 未开启分人（纯享字幕态）：默认仅展示干净的段落计数，并提供按需手动标人入口
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text("共 \(displayLines.count) 段")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        Button {
+                            manualSpeakerModeRecordIDs.insert(summary.id)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "person.badge.plus")
+                                    .font(.system(size: 10))
+                                Text("手动标人")
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                            }
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.04), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("本场未开启自动说话人区分；点击可展开说话人列进行事后手动标记")
+                        .speechRailPointerCursor()
+                    }
+                }
+
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                // 2. 段内关键词过滤框
+                HStack(spacing: 4) {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    TextField(speakerActive ? "筛选本场正文或说话人…" : "筛选本场正文…", text: $detailSearchText)
+                        .textFieldStyle(.plain)
+                        .frame(width: 160)
+                    if !detailSearchText.isEmpty {
+                        Button {
+                            detailSearchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .speechRailSingleLineInput(.compact)
+            }
+
+            // 内联说话人重命名编辑器（含常用身份一键预设）
+            if let editingLabel = editingSpeakerLabel {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("标注「\(speakerDisplayName(for: editingLabel))」为：")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    TextField("输入姓名或称呼（如：张总、主持人）", text: $speakerRenameDraft)
+                        .textFieldStyle(.plain)
+                        .speechRailSingleLineInput(.compact)
+                        .frame(width: 190)
+                        .onSubmit {
+                            Task { await commitSpeakerRename(sessionID: summary.id, label: editingLabel, name: speakerRenameDraft) }
+                        }
+                    ForEach(["我", "主持人", "主讲人", "嘉宾"], id: \.self) { preset in
+                        Button(preset) {
+                            Task { await commitSpeakerRename(sessionID: summary.id, label: editingLabel, name: preset) }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                        .speechRailPointerCursor()
+                    }
+                    Button("保存") {
+                        Task { await commitSpeakerRename(sessionID: summary.id, label: editingLabel, name: speakerRenameDraft) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    Button("取消") {
+                        editingSpeakerLabel = nil
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, 8)
+        .background(SpeechRailDesignTokens.Color.recessedField.opacity(0.45))
+    }
+
+    private func lineRow(_ line: TranscriptLine, summary: SessionSummary) -> some View {
+        let speakerActive = isSpeakerAttributionActive(for: summary)
+        return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            if speakerActive {
+                speakerMenuBadge(for: line, summary: summary)
+                    .frame(width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth, alignment: .leading)
+            }
 
             Text(Self.timecode(line.tStart))
                 .font(SpeechRailDesignTokens.Typography.technical)
@@ -1210,6 +1799,94 @@ public struct SessionLibraryView: View {
                 Button("复制双语对照") {
                     copyBilingualLine(source: source, translation: translation)
                 }
+            }
+            if speakerActive {
+                Divider()
+                Menu("标记此段说话人") {
+                    speakerAssignmentMenuItems(for: line, summary: summary)
+                }
+                if let label = line.speakerLabel, !label.isEmpty {
+                    Button("重命名「\(speakerDisplayName(for: label))」…") {
+                        editingSpeakerLabel = label
+                        speakerRenameDraft = speakerNames[label] ?? ""
+                    }
+                }
+            }
+        }
+    }
+
+    /// 行首可交互说话人胶囊：支持直接点击切换本段归属或重命名该说话人。
+    private func speakerMenuBadge(for line: TranscriptLine, summary: SessionSummary) -> some View {
+        let hasLabel = (line.speakerLabel?.isEmpty == false)
+        return Menu {
+            Section("将此段归属给") {
+                speakerAssignmentMenuItems(for: line, summary: summary)
+            }
+            if let label = line.speakerLabel, !label.isEmpty {
+                Divider()
+                Section("全局修改「\(speakerDisplayName(for: label))」称呼") {
+                    ForEach(["我", "主持人", "主讲人", "嘉宾"], id: \.self) { preset in
+                        Button("改名为「\(preset)」") {
+                            Task { await commitSpeakerRename(sessionID: summary.id, label: label, name: preset) }
+                        }
+                    }
+                    Button("自定义姓名…") {
+                        editingSpeakerLabel = label
+                        speakerRenameDraft = speakerNames[label] ?? ""
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(speakerText(for: line))
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(
+                        hasLabel
+                            ? SpeechRailDesignTokens.Color.rail
+                            : SpeechRailDesignTokens.Color.inkSecondary
+                    )
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule()
+                    .fill(
+                        hasLabel
+                            ? SpeechRailDesignTokens.Color.rail.opacity(0.11)
+                            : Color.primary.opacity(0.04)
+                    )
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("点击标记此段说话人或修改说话人姓名")
+        .speechRailPointerCursor()
+    }
+
+    @ViewBuilder
+    private func speakerAssignmentMenuItems(for line: TranscriptLine, summary: SessionSummary) -> some View {
+        let candidateLabels = Array(Set(sessionSpeakerLabels + ["A", "B", "C", "D"])).sorted()
+        ForEach(candidateLabels, id: \.self) { label in
+            let display = speakerDisplayName(for: label)
+            Button {
+                Task { await assignParagraphSpeaker(for: line, to: label, sessionID: summary.id) }
+            } label: {
+                if line.speakerLabel == label {
+                    Label(display, systemImage: "checkmark")
+                } else {
+                    Text(display)
+                }
+            }
+        }
+        Divider()
+        ForEach(["我", "主持人", "主讲人", "嘉宾"], id: \.self) { preset in
+            Button("直接标为「\(preset)」") {
+                Task { await assignAndRenameSpeaker(for: line, presetName: preset, sessionID: summary.id) }
             }
         }
     }
@@ -1328,8 +2005,152 @@ public struct SessionLibraryView: View {
         case .user: return "你"
         case .assistant: return "助手"
         case .speaker:
-            guard let label = line.speakerLabel else { return "说话人" }
-            return speakerNames[label] ?? "说话人 \(label)"
+            guard let label = line.speakerLabel, !label.isEmpty else { return "说话人" }
+            return speakerDisplayName(for: label)
+        }
+    }
+
+    /// 当前选中记录中出现过的全部说话人标签（按首次出现顺序）。
+    private var sessionSpeakerLabels: [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for line in displayLines {
+            if let label = line.speakerLabel, !label.isEmpty, seen.insert(label).inserted {
+                result.append(label)
+            }
+        }
+        for key in speakerNames.keys.sorted() where !key.isEmpty && seen.insert(key).inserted {
+            result.append(key)
+        }
+        return result
+    }
+
+    private func speakerDisplayName(for label: String) -> String {
+        if let name = speakerNames[label]?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        return SpeakerLabeling.chipText(label: label, displayName: nil)
+    }
+
+    /// 按详情页顶部的说话人胶囊与段内搜索词过滤后的展示行。
+    private var filteredDisplayLines: [TranscriptLine] {
+        let keyword = detailSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let speakerFilterActive = selectedSummary.map { isSpeakerAttributionActive(for: $0) } ?? false
+        return displayLines.filter { line in
+            if speakerFilterActive, let filterLabel = selectedSpeakerFilter, line.speakerLabel != filterLabel {
+                return false
+            }
+            guard !keyword.isEmpty else { return true }
+            let speakerMatch = speakerFilterActive && speakerText(for: line).localizedCaseInsensitiveContains(keyword)
+            let sourceMatch = line.text.localizedCaseInsensitiveContains(keyword)
+            let translationMatch = line.translatedText?.localizedCaseInsensitiveContains(keyword) ?? false
+            return speakerMatch || sourceMatch || translationMatch
+        }
+    }
+
+    /// 保存说话人改名（同时更新持久化记录与当前正在运行的字幕会话账本）。
+    private func commitSpeakerRename(sessionID: String, label: String, name: String) async {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            editingSpeakerLabel = nil
+            return
+        }
+        do {
+            try await session.renameSpeaker(sessionID: sessionID, label: label, name: trimmed)
+            if caption.sessionID == sessionID {
+                await caption.labeling.rename(label: label, to: trimmed)
+            }
+            editingSpeakerLabel = nil
+            operationNotice = "已将「说话人 \(label)」标记为「\(trimmed)」。"
+            await reload()
+        } catch {
+            operationError = "说话人改名失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 找出当前展示段落在底层 `lines` 中对应的连续同说话人行 ID（若同 `paragraphID` 已因换人拆成多段，只命中当前展示段所属的连续子组）。
+    private func paragraphMemberLineIDs(for displayLine: TranscriptLine) -> [String] {
+        guard let paragraphID = displayLine.paragraphID, !paragraphID.isEmpty,
+              let startIdx = lines.firstIndex(where: { $0.id == displayLine.id }) else {
+            return [displayLine.id]
+        }
+        var memberIDs: [String] = [displayLine.id]
+        var groupSpeaker = lines[startIdx].speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var idx = startIdx + 1
+        while idx < lines.count, lines[idx].paragraphID == paragraphID {
+            let nextSpeaker = lines[idx].speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasConflict = (groupSpeaker?.isEmpty == false)
+                && (nextSpeaker?.isEmpty == false)
+                && groupSpeaker != nextSpeaker
+            if hasConflict { break }
+            if (groupSpeaker?.isEmpty != false), let nextSpeaker, !nextSpeaker.isEmpty {
+                groupSpeaker = nextSpeaker
+            }
+            memberIDs.append(lines[idx].id)
+            idx += 1
+        }
+        return memberIDs
+    }
+
+    /// 将某一段落（含该展示段合并的底层正式行）归属给指定说话人标签。
+    private func assignParagraphSpeaker(for line: TranscriptLine, to label: String, sessionID: String) async {
+        let targetLineIDs = paragraphMemberLineIDs(for: line)
+        do {
+            for id in targetLineIDs {
+                _ = try await session.attachSpeakerLabel(lineID: id, label: label)
+            }
+            if caption.sessionID == sessionID {
+                await caption.labeling.split(lineIDs: targetLineIDs, to: label)
+            }
+            operationNotice = "已将该段标记为「\(speakerDisplayName(for: label))」。"
+            await reload()
+        } catch {
+            operationError = "标记说话人失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 一键将该段归属并直接命名为指定身份（如「我」「主持人」「主讲人」「嘉宾」）。
+    private func assignAndRenameSpeaker(for line: TranscriptLine, presetName: String, sessionID: String) async {
+        let existingLabel = speakerNames.first(where: { $0.value == presetName })?.key
+        let targetLabel = existingLabel ?? line.speakerLabel ?? nextUnusedSpeakerLabel()
+        let targetLineIDs = paragraphMemberLineIDs(for: line)
+        do {
+            for id in targetLineIDs {
+                _ = try await session.attachSpeakerLabel(lineID: id, label: targetLabel)
+            }
+            if caption.sessionID == sessionID {
+                await caption.labeling.split(lineIDs: targetLineIDs, to: targetLabel)
+            }
+            if speakerNames[targetLabel] != presetName {
+                try await session.renameSpeaker(sessionID: sessionID, label: targetLabel, name: presetName)
+                if caption.sessionID == sessionID {
+                    await caption.labeling.rename(label: targetLabel, to: presetName)
+                }
+            }
+            operationNotice = "已将该段标记为「\(presetName)」。"
+            await reload()
+        } catch {
+            operationError = "标记说话人失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func nextUnusedSpeakerLabel() -> String {
+        let used = Set(sessionSpeakerLabels)
+        for candidate in ["A", "B", "C", "D", "E", "F"] where !used.contains(candidate) {
+            return candidate
+        }
+        return "A"
+    }
+
+    private func saveRecordTitle(for summary: SessionSummary) async {
+        let trimmed = recordRenameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try await session.setSessionTitle(id: summary.id, title: trimmed.isEmpty ? nil : trimmed)
+            renamingRecordID = nil
+            operationNotice = "已更新记录标题。"
+            await reload()
+        } catch {
+            operationError = "重命名记录失败：\(error.localizedDescription)"
         }
     }
 
@@ -1341,15 +2162,25 @@ public struct SessionLibraryView: View {
     // MARK: - 数据
 
     private var filteredSummaries: [SessionSummary] {
+        let base: [SessionSummary]
+        switch recordFilter {
+        case .all:
+            base = summaries
+        case .multiSpeaker:
+            base = summaries.filter { $0.speakerCount > 1 }
+        case .active:
+            base = summaries.filter { $0.record.state == .recording || $0.record.state == .processing }
+        }
         // MC-49/MC-52：全文检索命中时按命中会话过滤，标题过滤作为回退。
         if !knowledgeHits.isEmpty {
             let hitIDs = Set(knowledgeHits.map(\.sessionID))
-            return summaries.filter { hitIDs.contains($0.id) }
+            return base.filter { hitIDs.contains($0.id) }
         }
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return summaries }
-        return summaries.filter { summary in
+        guard !query.isEmpty else { return base }
+        return base.filter { summary in
             displayTitle(for: summary).localizedCaseInsensitiveContains(query)
+                || recordSubtitle(summary).localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -1385,12 +2216,18 @@ public struct SessionLibraryView: View {
         if let title = summary.record.title, !title.isEmpty { return title }
         let date = summary.record.startedAt
         let calendar = Calendar.current
+        let timeString: String
         if calendar.isDateInToday(date) {
-            return "今天 \(date.speechRailFormatted(.time))"
+            timeString = "今天 \(date.speechRailFormatted(.time))"
         } else if calendar.isDateInYesterday(date) {
-            return "昨天 \(date.speechRailFormatted(.time))"
+            timeString = "昨天 \(date.speechRailFormatted(.time))"
+        } else {
+            timeString = date.speechRailFormatted(.dateTime)
         }
-        return date.speechRailFormatted(.dateTime)
+        if kind == .captions, let appName = summary.record.targetAppName, !appName.isEmpty {
+            return "\(appName) · \(timeString)"
+        }
+        return timeString
     }
 
     private func recordSubtitle(_ summary: SessionSummary) -> String {
@@ -1440,7 +2277,13 @@ public struct SessionLibraryView: View {
             detail = nil
             return
         }
-        detail = nil
+        let isSwitchingRecord = detail?.review.record.id != selectedID
+        if isSwitchingRecord {
+            editingSpeakerLabel = nil
+            selectedSpeakerFilter = nil
+            detailSearchText = ""
+            detail = nil
+        }
         do {
             guard let snapshot = try await detailLoad.load(id: selectedID, operation: {
                 guard let snapshot = try await session.reviewSnapshot(sessionID: selectedID) else {
@@ -1459,25 +2302,28 @@ public struct SessionLibraryView: View {
 
     private func copyTranscript(of summary: SessionSummary) async {
         do {
-            let rows = try await session.lines(sessionID: summary.id)
+            let rawRows = try await session.lines(sessionID: summary.id)
+            let rows = kind == .captions ? SessionExporter.paragraphLines(rawRows) : rawRows
             let text = rows.map { row -> String in
-                let speaker = speakerText(for: row)
+                let hasExplicitSpeaker = (row.speakerLabel?.isEmpty == false) || kind != .captions
+                let prefix = hasExplicitSpeaker ? "\(speakerText(for: row))  " : ""
+                let indent = hasExplicitSpeaker ? "    " : ""
                 let source = row.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 let translation = row.translatedText?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let hasTranslation = hasDistinctMeaningfulTranslation(source: source, translation: translation)
                 switch (kind == .captions ? libraryDisplayMode : .bilingual) {
                 case .originalOnly:
-                    return "\(speaker)  \(source)"
+                    return "\(prefix)\(source)"
                 case .chineseOnly:
                     let content = (hasTranslation ? translation : nil) ?? source
-                    return "\(speaker)  \(content)"
+                    return "\(prefix)\(content)"
                 case .bilingual:
                     if hasTranslation, let translation {
-                        return "\(speaker)  \(translation)\n    \(source)"
+                        return "\(prefix)\(translation)\n\(indent)\(source)"
                     }
-                    return "\(speaker)  \(source)"
+                    return "\(prefix)\(source)"
                 }
-            }.joined(separator: "\n")
+            }.joined(separator: kind == .captions ? "\n\n" : "\n")
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             guard pasteboard.setString(text, forType: .string) else {

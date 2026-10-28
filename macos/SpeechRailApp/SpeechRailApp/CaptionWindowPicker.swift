@@ -307,6 +307,31 @@ public struct WindowPickerOverlayView: View {
             )
             .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
             .offset(x: SpeechRailDesignTokens.Spacing.sm, y: SpeechRailDesignTokens.Spacing.sm)
+
+            // 底部字幕带吸附落点预览剪影，直觉展示选中后字幕条将贴合的位置
+            if localFrame.width >= 260 && localFrame.height >= 160 {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Image(systemName: "captions.bubble.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        Text("点击此窗口 · 实时字幕带将智能吸附于底部")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .frame(width: min(max(localFrame.width - 48, 220), 520))
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(SpeechRailDesignTokens.Color.rail.opacity(0.45), lineWidth: 1)
+                    )
+                    .padding(.bottom, 18)
+                }
+                .frame(width: max(localFrame.width, 0), height: max(localFrame.height, 0))
+            }
         }
         .position(x: localFrame.midX, y: localFrame.midY)
         .allowsHitTesting(false)

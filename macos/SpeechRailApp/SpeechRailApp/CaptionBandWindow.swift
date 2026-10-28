@@ -55,6 +55,31 @@ public enum CaptionBandFontSize: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// 字幕带背景衬底对比度档位（适应白底网页、亮色课件或暗色视频等不同背景）。
+public enum CaptionBandBackgroundStyle: String, CaseIterable, Identifiable, Sendable {
+    case translucent
+    case standard
+    case highContrast
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .translucent: "通透毛玻璃"
+        case .standard: "标准深色衬底"
+        case .highContrast: "高对比深色"
+        }
+    }
+
+    var dimmerOpacity: Double {
+        switch self {
+        case .translucent: 0.0
+        case .standard: 0.24
+        case .highContrast: 0.56
+        }
+    }
+}
+
 /// 浮层当前该占多大。界面侧每次变化把这一份交给控制器，控制器只做"算出高度、动窗口"。
 ///
 /// **高度按"视觉行"算，不按"逻辑行"算**（`SESSIONS-SPEC` §6.3.1「内容撑高」）。
@@ -128,16 +153,27 @@ struct CaptionBandMetrics: Equatable {
     }
 
     /// 一行字幕里真正给文字用的宽度：两边各让 `captionLinePaddingH`；
-    /// 半句那一行还要给右边的「正在识别…」让位。
-    static func textAvailableWidth(contentWidth: CGFloat, isPartial: Bool) -> CGFloat {
+    /// 半句那一行还要给右边的「正在识别…」让位；开启分人时首行还要给左侧说话人胶囊让位。
+    static func textAvailableWidth(
+        contentWidth: CGFloat,
+        isPartial: Bool,
+        speakerBadgeText: String? = nil
+    ) -> CGFloat {
         let layout = SpeechRailDesignTokens.Layout.self
-        let base = contentWidth - 2 * layout.captionLinePaddingH
-        guard isPartial else { return max(base, 1) }
+        var available = contentWidth - 2 * layout.captionLinePaddingH
+        if let speakerBadgeText, !speakerBadgeText.isEmpty {
+            let badge = NSAttributedString(
+                string: speakerBadgeText,
+                attributes: [.font: NSFont.preferredFont(forTextStyle: .caption1)]
+            )
+            available -= ceil(badge.size().width) + 12 + SpeechRailDesignTokens.Spacing.xs
+        }
+        guard isPartial else { return max(available, 1) }
         let label = NSAttributedString(
             string: "正在识别…",
             attributes: [.font: NSFont.preferredFont(forTextStyle: .caption1)]
         )
-        return max(base - ceil(label.size().width) - SpeechRailDesignTokens.Spacing.xs, 1)
+        return max(available - ceil(label.size().width) - SpeechRailDesignTokens.Spacing.xs, 1)
     }
 
     /// 受阻行的高度：标题一行 + 说明若干行（说明会折行），右边还要给动作按钮留出位置。
@@ -165,19 +201,25 @@ struct CaptionBandMetrics: Equatable {
         blocked: CaptionSession.BlockReason?,
         fontSize: CaptionBandFontSize,
         isHovering: Bool,
-        contentWidth: CGFloat
+        contentWidth: CGFloat,
+        speakerBadgeResolver: ((String) -> String)? = nil
     ) -> CaptionBandMetrics {
         let layout = SpeechRailDesignTokens.Layout.self
         let width = contentWidth > 0 ? contentWidth : layout.captionBandDefaultWidth
         let limit = layout.captionBandMaximumLineCount
         var rows = 0
         for line in content.rows.reversed() where rows < limit {
+            let badgeText = line.speakerLabel.flatMap { label -> String? in
+                guard !label.isEmpty else { return nil }
+                return speakerBadgeResolver?(label)
+            }
             rows += visualRowCount(
                 for: line.primaryText,
                 fontSize: fontSize,
                 availableWidth: textAvailableWidth(
                     contentWidth: width,
-                    isPartial: line.isPartial || line.isTranslating
+                    isPartial: line.isPartial || line.isTranslating,
+                    speakerBadgeText: badgeText
                 )
             )
             if let secondary = line.secondaryText, !secondary.isEmpty {
@@ -359,6 +401,9 @@ public final class CaptionBandWindowController: NSObject {
                     // 换目标、切吸附/自由悬浮都要重挂跟踪器：只改 `placementMode` 不会自己跟。
                     self?.updateTrackingState()
                 },
+                onResetPosition: { [weak self] in
+                    self?.resetToDefaultScreenPosition()
+                },
                 onOpenActiveSession: { [weak self] in
                     self?.onOpenActiveSession()
                 },
@@ -419,6 +464,21 @@ public final class CaptionBandWindowController: NSObject {
             return
         }
         panel.setFrame(defaultFrame(for: screen, height: panel.frame.height), display: false)
+    }
+
+    /// 一键将字幕带重置回当前屏幕底部居中默认位置，并清除异常偏移记忆。
+    private func resetToDefaultScreenPosition() {
+        guard let panel else { return }
+        let screen = panel.screen ?? NSScreen.main ?? NSScreen.screens.first
+        guard let screen else { return }
+        defaults.removeObject(forKey: key(for: screen))
+        session.placementMode = .freeFloatingPinned
+        lastDockedOrigin = nil
+        tracker.stopTracking()
+        isApplyingTargetGeometry = true
+        panel.setFrame(defaultFrame(for: screen, height: panel.frame.height), display: true, animate: true)
+        isApplyingTargetGeometry = false
+        remember(panel)
     }
 
     private func defaultFrame(for screen: NSScreen, height: CGFloat) -> NSRect {
@@ -530,12 +590,16 @@ struct CaptionBandView: View {
     let onPinChange: (Bool) -> Void
     /// 目标或吸附状态变了：跟踪器要跟着重挂（换窗口、点「吸附回窗口」都在这里收口）。
     let onTrackingChange: () -> Void
+    /// 一键将字幕带重置回当前屏幕底部居中。
+    var onResetPosition: () -> Void = {}
     /// 受阻时那条「打开会议转录」的出口。浮层不认识路由表，出口由 App 接。
     let onOpenActiveSession: () -> Void
     let onClose: () -> Void
 
     @AppStorage(SpeechRailDesignTokens.CaptionBand.fontSizeDefaultsKey)
     private var fontSizeRaw = CaptionBandFontSize.standard.rawValue
+    @AppStorage("speechrail.captionBand.backgroundStyle")
+    private var backgroundStyleRaw = CaptionBandBackgroundStyle.standard.rawValue
     @AppStorage(SpeechRailDesignTokens.CaptionBand.pinnedDefaultsKey)
     private var isPinned = false
     @State private var isHovering = false
@@ -549,12 +613,18 @@ struct CaptionBandView: View {
     @State private var copyNoticeID = UUID()
     @State private var isCopyConfirmed = false
     @State private var copyConfirmationTask: Task<Void, Never>?
+    @State private var isLockedDragHintActive = false
+    @State private var lockedDragHintTask: Task<Void, Never>?
     @State private var failureAutoDismissTask: Task<Void, Never>?
     /// 自己量出来的内容宽度：宽度参与折行，所以高度得跟着它变。
     @State private var contentWidth: CGFloat = 0
 
     private var fontSize: CaptionBandFontSize {
         CaptionBandFontSize(rawValue: fontSizeRaw) ?? .standard
+    }
+
+    private var backgroundStyle: CaptionBandBackgroundStyle {
+        CaptionBandBackgroundStyle(rawValue: backgroundStyleRaw) ?? .standard
     }
 
     private var content: CaptionBandContent { session.bandContent }
@@ -569,7 +639,10 @@ struct CaptionBandView: View {
             blocked: session.blocked,
             fontSize: fontSize,
             isHovering: isHovering,
-            contentWidth: effectiveContentWidth
+            contentWidth: effectiveContentWidth,
+            speakerBadgeResolver: session.labeling.isEnabled
+                ? { session.labeling.displayText(for: $0) }
+                : nil
         )
     }
 
@@ -581,6 +654,8 @@ struct CaptionBandView: View {
             if let blocked = session.blocked {
                 blockedRow(blocked)
                 if !content.rows.isEmpty { linesScroll }
+            } else if content.rows.isEmpty {
+                emptyListeningStateRow
             } else {
                 linesScroll
             }
@@ -588,6 +663,17 @@ struct CaptionBandView: View {
         }
         .padding(.vertical, SpeechRailDesignTokens.Layout.captionBandPaddingV)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background {
+            if backgroundStyle.dimmerOpacity > 0 {
+                Color.black.opacity(backgroundStyle.dimmerOpacity)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .top) {
+            if !isHovering {
+                topEdgeGrabberPill
+            }
+        }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
             contentWidth = width
         }
@@ -667,47 +753,151 @@ struct CaptionBandView: View {
         .onChange(of: content) { _, _ in scrollToLatestIfFollowing() }
     }
 
-    private func lineRow(line: CaptionBandContent.Row) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-            HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                tieredText(
-                    line.primaryText,
-                    tiering: line.primaryTiering
-                        ?? line.sourceTiering.flatMap { $0.isSecondary ? nil : $0 },
-                    baseColor: line.isPartial
-                        ? SpeechRailDesignTokens.Color.inkSecondary
-                        : SpeechRailDesignTokens.Color.ink
-                )
-                    .font(fontSize.font)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if line.isTranslating {
-                    HStack(spacing: 3) {
-                        ProgressView()
-                            .controlSize(.mini)
-                        Text("翻译中")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                    }
-                } else if line.isPartial {
-                    Text("正在识别…")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                }
+    /// 尚未产出首句字幕时的聆听/准备中占位引导（对齐 macOS 实时字幕与主流同传工具体验，避免空白框让用户困惑）。
+    private var emptyListeningStateRow: some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            if session.phase == .preparing {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: session.phase == .paused ? "pause.circle.fill" : "waveform.badge.magnifyingglass")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(
+                        session.phase == .paused
+                            ? SpeechRailDesignTokens.Color.attention
+                            : SpeechRailDesignTokens.Color.rail
+                    )
+                    .symbolEffect(.pulse, isActive: session.phase == .running)
             }
-            if let secondary = line.secondaryText, !secondary.isEmpty {
-                tieredText(
-                    secondary,
-                    tiering: line.sourceTiering.flatMap { $0.isSecondary ? $0 : nil },
-                    baseColor: SpeechRailDesignTokens.Color.inkSecondary
-                )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(emptyListeningPrimaryText)
                     .font(SpeechRailDesignTokens.Typography.callout)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fontWeight(.medium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+                Text(emptyListeningSecondaryText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Layout.captionLinePaddingH)
+        .padding(.vertical, SpeechRailDesignTokens.Layout.captionLinePaddingV)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .overlay {
+            CaptionBandDragRegion(
+                isPinned: isPinned,
+                showsHandCursor: !isPinned,
+                onLockedDragAttempt: triggerLockedDragHint
+            )
+        }
+    }
+
+    private var emptyListeningPrimaryText: String {
+        switch session.phase {
+        case .preparing:
+            return "正在连接语音识别引擎…"
+        case .paused:
+            return "实时字幕已暂停 · 按 ⌘⇧L 或点击上方播放键继续"
+        case .ending:
+            return "正在收尾并保存字幕记录…"
+        case .running, .idle:
+            let targetName = session.audioTarget?.displayTitle ?? "麦克风"
+            return "正在聆听「\(targetName)」· 检测到语音后实时出字…"
+        }
+    }
+
+    private var emptyListeningSecondaryText: String {
+        let langText = "原音：\(sourceLanguageItemTitle(session.sourceLanguage))"
+        let transText = session.translationEnabled
+            ? "同传翻译：\(session.displayMode.title)"
+            : "同传翻译：未开启（可在上方工具栏或右下角开启双语对照）"
+        return "\(langText) · \(transText)"
+    }
+
+    private func lineRow(line: CaptionBandContent.Row) -> some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            if line.isPartial {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(SpeechRailDesignTokens.Color.rail.opacity(0.75))
+                    .frame(width: 3)
+                    .padding(.vertical, 3)
+            }
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    if session.labeling.isEnabled, let speakerLabel = line.speakerLabel, !speakerLabel.isEmpty {
+                        Text(session.labeling.displayText(for: speakerLabel))
+                            .font(SpeechRailDesignTokens.Typography.captionMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(SpeechRailDesignTokens.Color.rail.opacity(0.14), in: Capsule())
+                            .fixedSize()
+                    }
+                    tieredText(
+                        line.primaryText,
+                        tiering: line.primaryTiering
+                            ?? line.sourceTiering.flatMap { $0.isSecondary ? nil : $0 },
+                        baseColor: line.isPartial
+                            ? SpeechRailDesignTokens.Color.inkSecondary
+                            : SpeechRailDesignTokens.Color.ink
+                    )
+                        .font(fontSize.font)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if line.isTranslating {
+                        HStack(spacing: 3) {
+                            ProgressView()
+                                .controlSize(.mini)
+                            Text("翻译中")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        }
+                    } else if line.isPartial {
+                        Text("正在识别…")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    }
+                }
+                if let secondary = line.secondaryText, !secondary.isEmpty {
+                    tieredText(
+                        secondary,
+                        tiering: line.sourceTiering.flatMap { $0.isSecondary ? $0 : nil },
+                        baseColor: SpeechRailDesignTokens.Color.inkSecondary
+                    )
+                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Layout.captionLinePaddingH)
         .padding(.vertical, SpeechRailDesignTokens.Layout.captionLinePaddingV)
+        .contentShape(Rectangle())
+        .overlay {
+            CaptionBandDragRegion(
+                isPinned: isPinned,
+                showsHandCursor: !isPinned,
+                onLockedDragAttempt: triggerLockedDragHint
+            )
+        }
+        .contextMenu {
+            if let secondary = line.secondaryText, !secondary.isEmpty, secondary != line.primaryText {
+                Button("复制此段（双语）") {
+                    copyTextToPasteboard("\(line.primaryText)\n\(secondary)")
+                }
+                Button("仅复制译文") {
+                    copyTextToPasteboard(line.primaryText)
+                }
+                Button("仅复制原文") {
+                    copyTextToPasteboard(secondary)
+                }
+            } else {
+                Button("复制此段") {
+                    copyTextToPasteboard(line.primaryText)
+                }
+            }
+        }
     }
 
     /// 未定稿文本的视觉分层：稳定前缀用正文色，活跃尾部保持最浅一档（`spec §11.1`）。
@@ -750,12 +940,10 @@ struct CaptionBandView: View {
                 }
             }
             targetAppButton
+            sourceLanguageMenu
             translationMenu(isAvailable: translationAvailable)
-            if session.translationEnabled {
-                sourceLanguageMenu
-            }
             fontMenu
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+            toolbarDragGrip
             if session.audioTarget?.isApp == true {
                 iconButton(
                     systemImage: isDocked ? "dock.rectangle" : "macwindow.on.rectangle",
@@ -810,6 +998,52 @@ struct CaptionBandView: View {
         .accessibilityIdentifier("caption-band-toolbar")
     }
 
+    /// 未悬停时贴在字幕带顶边中央的微胶囊抓手指示条（不占布局高度，直觉提示此处为可拖拽浮层）。
+    private var topEdgeGrabberPill: some View {
+        Capsule(style: .continuous)
+            .fill(
+                isPinned
+                    ? SpeechRailDesignTokens.Color.attention.opacity(0.45)
+                    : SpeechRailDesignTokens.Color.inkTertiary.opacity(0.38)
+            )
+            .frame(width: 38, height: 4)
+            .padding(.top, 4)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    /// 工具栏中部显式拖拽手柄（未锁定时显示抓手与按住拖动提示 + 手型光标；锁定时一键点击解锁）。
+    @ViewBuilder
+    private var toolbarDragGrip: some View {
+        if isPinned {
+            Button {
+                isPinned = false
+                isLockedDragHintActive = false
+                onPinChange(false)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("位置已钉住 · 点击解锁拖动")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .lineLimit(1)
+                }
+                .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(CaptionBandChipButtonStyle(isActive: false))
+            .help("当前字幕条已锁定位置，点击即可解锁并自由拖动窗口")
+            .speechRailPointerCursor()
+        } else {
+            CaptionBandToolbarDragHandle(onLockedDragAttempt: triggerLockedDragHint)
+                .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.captionBandIconButtonSize)
+                .help("按住此处（或直接按住下方字幕区域）即可拖动字幕窗口位置")
+                .accessibilityLabel("拖动字幕窗口")
+        }
+    }
+
     private var targetAppButton: some View {
         Button {
             Task { await session.promptSelectTarget() }
@@ -837,6 +1071,16 @@ struct CaptionBandView: View {
         .speechRailPointerCursor()
     }
 
+    private func sourceLanguageItemTitle(_ lang: CaptionSourceLanguage) -> String {
+        switch lang {
+        case .auto: "自动识别原音"
+        case .english: "英语原音"
+        case .japanese: "日语原音"
+        case .korean: "韩语原音"
+        case .chinese: "中文原音（不翻译）"
+        }
+    }
+
     private var sourceLanguageMenu: some View {
         Menu {
             ForEach(CaptionSourceLanguage.allCases) { lang in
@@ -844,9 +1088,9 @@ struct CaptionBandView: View {
                     session.sourceLanguage = lang
                 } label: {
                     if session.sourceLanguage == lang {
-                        Label(lang.title, systemImage: "checkmark")
+                        Label(sourceLanguageItemTitle(lang), systemImage: "checkmark")
                     } else {
-                        Text(lang.title)
+                        Text(sourceLanguageItemTitle(lang))
                     }
                 }
             }
@@ -855,7 +1099,7 @@ struct CaptionBandView: View {
                 Image(systemName: "globe")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(session.sourceLanguage == .auto ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.rail)
-                Text(session.sourceLanguage.shortLabel)
+                Text("原音 \(session.sourceLanguage.shortLabel)")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 Image(systemName: "chevron.down")
@@ -869,8 +1113,8 @@ struct CaptionBandView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("当前源语言：\(session.sourceLanguage.title) · 「自动」适合中英混说，切换后立即更新翻译提示词并在下次重连同步识别语言")
-        .accessibilityLabel("源语言 \(session.sourceLanguage.title)")
+        .help("当前音频原音语种：\(sourceLanguageItemTitle(session.sourceLanguage)) · 选「中文原音」时直通不翻译；外语或中英混说请选「自动识别原音」或对应外语")
+        .accessibilityLabel("原音语种 \(session.sourceLanguage.title)")
         .speechRailPointerCursor()
     }
 
@@ -996,6 +1240,10 @@ struct CaptionBandView: View {
 
     private func enableTranslation(mode: CaptionDisplayMode) {
         guard session.isTranslationAvailable else { return }
+        // 若原音语种此前停留在「中文（不翻译）」，开启翻译时自动切回「自动识别」，否则外语会被当作中文跳过翻译。
+        if session.sourceLanguage == .chinese {
+            session.sourceLanguage = .auto
+        }
         // 先定排版、再打开开关：反过来会先用旧排版触发一次补翻。
         session.displayMode = mode
         session.translationEnabled = true
@@ -1003,16 +1251,38 @@ struct CaptionBandView: View {
 
     private var fontMenu: some View {
         Menu {
-            ForEach(CaptionBandFontSize.allCases) { size in
-                Button {
-                    fontSizeRaw = size.rawValue
-                } label: {
-                    if fontSize == size {
-                        Label(size.title, systemImage: "checkmark")
-                    } else {
-                        Text(size.title)
+            Section("字幕字号") {
+                ForEach(CaptionBandFontSize.allCases) { size in
+                    Button {
+                        fontSizeRaw = size.rawValue
+                    } label: {
+                        if fontSize == size {
+                            Label(size.title, systemImage: "checkmark")
+                        } else {
+                            Text(size.title)
+                        }
                     }
                 }
+            }
+            Divider()
+            Section("背景对比度") {
+                ForEach(CaptionBandBackgroundStyle.allCases) { style in
+                    Button {
+                        backgroundStyleRaw = style.rawValue
+                    } label: {
+                        if backgroundStyle == style {
+                            Label(style.title, systemImage: "checkmark")
+                        } else {
+                            Text(style.title)
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button {
+                onResetPosition()
+            } label: {
+                Label("回到屏幕底部居中", systemImage: "arrow.uturn.backward.square")
             }
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -1033,8 +1303,8 @@ struct CaptionBandView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("当前字幕字号：\(fontSize.title)（点击切换紧凑 / 标准 / 大字）")
-        .accessibilityLabel("字号 \(fontSize.title)")
+        .help("字幕外观与位置：当前字号「\(fontSize.title)」、衬底「\(backgroundStyle.title)」（点击可调整字号、背景对比度或居中归位）")
+        .accessibilityLabel("字号与外观 \(fontSize.title)")
         .speechRailPointerCursor()
     }
 
@@ -1067,11 +1337,22 @@ struct CaptionBandView: View {
             statusDot
             Text(session.transcriptionStatusText ?? footerHint)
                 .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .foregroundStyle(
+                    isLockedDragHintActive
+                        ? SpeechRailDesignTokens.Color.attention
+                        : SpeechRailDesignTokens.Color.inkTertiary
+                )
                 // 一行到底：页脚的高度是按一行算进窗口高度的，折行会把内容顶出窗口。
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .help(footerHelp)
+                .background {
+                    CaptionBandDragRegion(
+                        isPinned: isPinned,
+                        showsHandCursor: !isPinned,
+                        onLockedDragAttempt: triggerLockedDragHint
+                    )
+                }
             if session.lastFailure != nil && session.transcriptionStatusText == nil {
                 Button {
                     failureAutoDismissTask?.cancel()
@@ -1087,6 +1368,34 @@ struct CaptionBandView: View {
                 .speechRailPointerCursor()
             }
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                .contentShape(Rectangle())
+                .overlay {
+                    CaptionBandDragRegion(
+                        isPinned: isPinned,
+                        showsHandCursor: !isPinned,
+                        onLockedDragAttempt: triggerLockedDragHint
+                    )
+                }
+            if isPinned {
+                Button {
+                    isPinned = false
+                    isLockedDragHintActive = false
+                    onPinChange(false)
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "pin.slash.fill")
+                            .font(.system(size: 10, weight: .medium))
+                        Text("解锁移动")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                }
+                .buttonStyle(CaptionBandChipButtonStyle(isActive: false))
+                .help("字幕条位置已钉住，点击即可解锁拖动")
+                .speechRailPointerCursor()
+            }
             translationFooterControl
             if !session.saveRecoveryRecords.isEmpty {
                 Button("未保存文字") { showsSaveRecovery = true }
@@ -1152,11 +1461,13 @@ struct CaptionBandView: View {
 
     private var footerHint: String {
         if session.blocked != nil { return "" }
+        if isLockedDragHintActive { return "位置已钉住锁定 · 点击右侧「解锁移动」或工具栏图钉即可拖动" }
         if !session.saveRecoveryRecords.isEmpty { return "有文字尚未保存" }
-        if session.phase == .paused { return "已暂停 · ⌘⇧L 继续" }
+        if session.phase == .paused { return isPinned ? "已暂停 · 位置已钉住 · ⌘⇧L 继续" : "已暂停 · 按住任意位置可拖动 · ⌘⇧L 继续" }
         if session.phase == .ending { return "正在保存最后一句…" }
         if let failure = session.lastFailure { return failure }
-        return "⌘⇧L 暂停 · ✕ 结束并保存"
+        if isPinned { return "位置已钉住 · ⌘⇧L 暂停 · ✕ 结束并保存" }
+        return "按住字幕或手柄可拖动 · ⌘⇧L 暂停 · ✕ 结束"
     }
 
     /// 悬停提示：贴上去才需要看全文（页脚只放得下一行）。
@@ -1257,9 +1568,15 @@ struct CaptionBandView: View {
 
     private func copyCurrentSegment() {
         guard let text = session.currentSegmentText, !text.isEmpty else { return }
+        copyTextToPasteboard(text)
+    }
+
+    private func copyTextToPasteboard(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        guard pasteboard.setString(text, forType: .string) else {
+        guard pasteboard.setString(trimmed, forType: .string) else {
             copyFailure = "字幕暂时未能复制，请重试。"
             return
         }
@@ -1271,6 +1588,17 @@ struct CaptionBandView: View {
             try? await Task.sleep(for: .milliseconds(1200))
             guard !Task.isCancelled else { return }
             isCopyConfirmed = false
+        }
+    }
+
+    private func triggerLockedDragHint() {
+        guard isPinned else { return }
+        lockedDragHintTask?.cancel()
+        isLockedDragHintActive = true
+        lockedDragHintTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3.5))
+            guard !Task.isCancelled else { return }
+            isLockedDragHintActive = false
         }
     }
 
@@ -1547,5 +1875,168 @@ struct CaptionBandHoverChipModifier: ViewModifier {
         return isHovered
             ? SpeechRailDesignTokens.Surface.border
             : SpeechRailDesignTokens.Surface.border.opacity(0.5)
+    }
+}
+
+/// 工具栏中部显式拖拽抓手区：提供清晰的六点抓手图标、胶囊提示与手型光标反馈。
+private struct CaptionBandToolbarDragHandle: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovered = false
+    let onLockedDragAttempt: () -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "circle.grid.2x3.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(
+                    isHovered
+                        ? SpeechRailDesignTokens.Color.inkSecondary
+                        : SpeechRailDesignTokens.Color.inkTertiary
+                )
+            Text(isHovered ? "按住拖动窗口" : "按住拖动")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(
+                    isHovered
+                        ? SpeechRailDesignTokens.Color.inkSecondary
+                        : SpeechRailDesignTokens.Color.inkTertiary
+                )
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            Capsule(style: .continuous)
+                .fill(
+                    isHovered
+                        ? SpeechRailDesignTokens.Toolbar.Action.hoverFill
+                        : Color.primary.opacity(0.03)
+                )
+        }
+        .overlay {
+            Capsule(style: .continuous)
+                .strokeBorder(
+                    isHovered
+                        ? SpeechRailDesignTokens.Surface.border
+                        : SpeechRailDesignTokens.Surface.border.opacity(0.35),
+                    lineWidth: 0.75
+                )
+        }
+        .overlay {
+            CaptionBandDragRegion(
+                isPinned: false,
+                showsHandCursor: true,
+                onLockedDragAttempt: onLockedDragAttempt,
+                onHoverChange: { hovering in
+                    isHovered = hovering
+                }
+            )
+        }
+        .animation(
+            SpeechRailDesignTokens.Motion.resolved(SpeechRailDesignTokens.Motion.hoverFeedback, reduceMotion: reduceMotion),
+            value: isHovered
+        )
+    }
+}
+
+/// AppKit 原生窗口拖拽区域：在非锁定状态下直接触发 `window.performDrag(with:)` 并显示抓手光标（🖐️ / ✊），
+/// 同时透传滚轮滚动与右键上下文菜单事件；锁定状态下尝试拖拽时触发解锁提示。
+private struct CaptionBandDragRegion: NSViewRepresentable {
+    let isPinned: Bool
+    let showsHandCursor: Bool
+    let onLockedDragAttempt: () -> Void
+    var onHoverChange: ((Bool) -> Void)? = nil
+
+    func makeNSView(context: Context) -> CaptionBandDragNSView {
+        let view = CaptionBandDragNSView()
+        view.isPinned = isPinned
+        view.showsHandCursor = showsHandCursor
+        view.onLockedDragAttempt = onLockedDragAttempt
+        view.onHoverChange = onHoverChange
+        return view
+    }
+
+    func updateNSView(_ nsView: CaptionBandDragNSView, context: Context) {
+        nsView.isPinned = isPinned
+        nsView.showsHandCursor = showsHandCursor
+        nsView.onLockedDragAttempt = onLockedDragAttempt
+        nsView.onHoverChange = onHoverChange
+        nsView.window?.invalidateCursorRects(for: nsView)
+    }
+}
+
+final class CaptionBandDragNSView: NSView {
+    var isPinned = false
+    var showsHandCursor = true
+    var onLockedDragAttempt: (() -> Void)?
+    var onHoverChange: ((Bool) -> Void)?
+    private var trackingArea: NSTrackingArea?
+    private var isDraggingWindow = false
+
+    override var mouseDownCanMoveWindow: Bool {
+        !isPinned
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .cursorUpdate, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard showsHandCursor, !isPinned else { return }
+        addCursorRect(bounds, cursor: isDraggingWindow ? .closedHand : .openHand)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if showsHandCursor && !isPinned {
+            (isDraggingWindow ? NSCursor.closedHand : NSCursor.openHand).set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHoverChange?(true)
+        if showsHandCursor && !isPinned {
+            NSCursor.openHand.set()
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHoverChange?(false)
+        if !isDraggingWindow {
+            NSCursor.arrow.set()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard !isPinned else {
+            onLockedDragAttempt?()
+            return
+        }
+        isDraggingWindow = true
+        NSCursor.closedHand.set()
+        window?.performDrag(with: event)
+        isDraggingWindow = false
+        NSCursor.openHand.set()
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        nextResponder?.scrollWheel(with: event)
     }
 }

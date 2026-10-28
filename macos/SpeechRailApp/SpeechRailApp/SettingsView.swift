@@ -319,20 +319,6 @@ public struct SettingsView: View {
         }
     }
 
-    private var diarizationCaptionsBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.captionsDiarizationEnabled },
-            set: { preferences.captionsDiarizationEnabled = $0 }
-        )
-    }
-
-    private var diarizationMeetingBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.meetingDiarizationEnabled },
-            set: { preferences.meetingDiarizationEnabled = $0 }
-        )
-    }
-
     private var notifyBinding: Binding<Bool> {
         Binding(
             get: { preferences.notifyOnInterruption },

@@ -1,5 +1,20 @@
 # Changelog
 
+## [5.0.1] - 2026-10-27
+
+### Added
+
+- 实时转写服务在 `session.update` 生效和每次建立 ASR 会话时各记一条事件（`realtime_asr_language_configured` / `realtime_asr_language_applied`），只含语言码、任务与会话 ID，不含提示词与转写正文。把两条事件与客户端的 `session.updated` 回显对照，就能判断「原音语种」是在调用方、协议层还是 worker 处丢的。
+
+### Changed
+
+- 字幕开始校验 `session.updated` 回显的识别语种：与原音所选不一致或缺失时立即停下并说明原因，不再静默按另一种语言识别。该检查只在钉了语种时生效，自动识别不受影响。
+- 会话进行中切换原音语种时，识别侧自动重连以应用新语种，并清掉旧语种下的未定稿文字；不再要求暂停后继续。
+
+### Fixed
+
+- `scripts/macos_app_build.sh --test-unit` 改为走 SwiftPM：Xcode 的单测入口会先解析 test bundle，在 bundle 无法解析的主机（如 CoreSimulator 与 Xcode 版本不匹配）上直接报 `No test bundle product for testingSpecifier`，一条单测都跑不到；SwiftPM 编译同一目录下的全部测试文件，是更严格的那一份。
+
 ## [Unreleased]
 
 ### Changed

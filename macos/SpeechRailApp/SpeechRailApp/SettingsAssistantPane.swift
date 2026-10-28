@@ -281,26 +281,7 @@ struct SettingsAssistantPane: View {
                             .accessibilityIdentifier("caption-glossary-field")
                     }
                 }
-                settingsRowSeparator
-                settingsRow {
-                    Toggle(isOn: diarizationCaptionsBinding) {
-                        settingsRowLabel(
-                            "字幕显示说话人",
-                            caption: diarizationCaption(for: preferences.captionsDiarizationEnabled)
-                        )
-                    }
-                        .modifier(settingsRowControl())
-                }
-                settingsRowSeparator
-                settingsRow {
-                    Toggle(isOn: diarizationMeetingBinding) {
-                        settingsRowLabel(
-                            "会议显示说话人",
-                            caption: diarizationCaption(for: preferences.meetingDiarizationEnabled, isMeeting: true)
-                        )
-                    }
-                        .modifier(settingsRowControl())
-                }
+
                 settingsRowSeparator
                 settingsRow {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -461,19 +442,6 @@ struct SettingsAssistantPane: View {
         )
     }
 
-    private var diarizationCaptionsBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.captionsDiarizationEnabled },
-            set: { preferences.captionsDiarizationEnabled = $0 }
-        )
-    }
-
-    private var diarizationMeetingBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.meetingDiarizationEnabled },
-            set: { preferences.meetingDiarizationEnabled = $0 }
-        )
-    }
 
     /// 字幕翻译的总开关。与字幕带、字幕页共用同一个 `CaptionSession` 状态，避免三处各存一份。
     private var translationBinding: Binding<Bool> {
@@ -506,11 +474,6 @@ struct SettingsAssistantPane: View {
         model.creatorVoices.filter(\.available)
     }
 
-    private func diarizationCaption(for enabled: Bool, isMeeting: Bool = false) -> String {
-        return enabled
-            ? "已开启：最多区分 4 位发言人，使用匿名编号。" + (isMeeting ? "超额或不确定的发言保留为未识别。" : "")
-            : "默认关闭；最多区分 4 位发言人，打开后对新会话生效。"
-    }
 
     @ViewBuilder
     private func moduleConfigurationRows(for module: LLMModule) -> some View {

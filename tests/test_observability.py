@@ -7,8 +7,43 @@ from pathlib import Path
 import pytest
 
 from speechrail.domain.errors import BackendNotReadyError
-from speechrail.observability.logging import event
+from speechrail.observability.logging import event, language_code
 from speechrail.observability.metrics import Metrics
+
+
+def test_event_keeps_asr_language_and_task_but_drops_transcript_content(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logger = logging.getLogger("speechrail.test.language")
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        event(
+            logger,
+            "realtime_asr_language_configured",
+            session_id="sess_1",
+            language=language_code("en"),
+            task="caption",
+            prompt="private prompt",
+            keywords=["private keyword"],
+        )
+
+    record = caplog.records[-1].speechrail
+    assert record == {"session_id": "sess_1", "language": "en", "task": "caption"}
+    assert "private" not in str(record)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("en", "en"),
+        (" zh ", "zh"),
+        ("", "auto"),
+        (None, "auto"),
+        (123, "auto"),
+        ("x" * 64, "x" * 16),
+    ],
+)
+def test_language_code_is_bounded_and_falls_back_to_auto(raw: object, expected: str) -> None:
+    assert language_code(raw) == expected
 
 
 def test_observability_uses_low_cardinality_metadata_only(caplog: object) -> None:

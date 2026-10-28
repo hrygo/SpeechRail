@@ -104,6 +104,23 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         )
         XCTAssertEqual(h.clients.madeConfigurations.last?.scenePreset, .caption)
         XCTAssertEqual(h.session.translationMetrics.finalRequests, 0)
+
+        // 会话运行中途切换原音语种（例如从日语切到英语）：应立即清理旧语种未定稿，并自动重连 ASR 透传新语种 "en"
+        // 事件是异步消费的：先等到它真的写进 partialText，再断言切换时被清空。
+        try await h.emit(.partialSnapshot(
+            itemID: "item-ja",
+            revision: 1,
+            text: "哇，那 sounds 真的很好",
+            evidence: .init(stablePrefixCodepoints: 4)
+        ))
+        try await h.settle { $0.session.partialText == "哇，那 sounds 真的很好" }
+        h.session.sourceLanguage = .english
+        XCTAssertNil(h.session.partialText, "切换原音语种时应立即清空旧语种下的混杂未定稿识别文本")
+        try await h.settle {
+            $0.clients.madeConfigurations.count >= 2
+                && $0.clients.madeConfigurations.last?.language == "en"
+                && $0.session.phase == .running
+        }
     }
 
     func testCaptionSilenceOverrideReachesRealtimeConfigurationAndPersists() async throws {
@@ -2053,6 +2070,56 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         let saved = try await h.store.lines(sessionID: sessionID)
         XCTAssertEqual(saved.first(where: { $0.id == firstLineID })?.translatedText, "迟到但仍落库的译文")
         fake.finish("Second sentence stays in memory.")
+    }
+
+    func testParagraphExportSplitsOnConflictingSpeakerLabelsAndPropagatesLateSpeaker() {
+        let sharedParagraphID = "para-shared"
+        let line1 = TranscriptLine(
+            id: "l1",
+            sessionID: "s1",
+            ordinal: 1,
+            role: .speaker,
+            speakerLabel: nil,
+            text: "第一句上半段，",
+            source: .system,
+            status: .final,
+            tStart: 0.0,
+            tEnd: 1.2,
+            paragraphID: sharedParagraphID
+        )
+        let line2 = TranscriptLine(
+            id: "l2",
+            sessionID: "s1",
+            ordinal: 2,
+            role: .speaker,
+            speakerLabel: "A",
+            text: "第一句下半段。",
+            source: .system,
+            status: .final,
+            tStart: 1.3,
+            tEnd: 2.5,
+            paragraphID: sharedParagraphID
+        )
+        let line3 = TranscriptLine(
+            id: "l3",
+            sessionID: "s1",
+            ordinal: 3,
+            role: .speaker,
+            speakerLabel: "B",
+            text: "另一位说话人接话。",
+            source: .system,
+            status: .final,
+            tStart: 2.6,
+            tEnd: 3.8,
+            paragraphID: sharedParagraphID
+        )
+
+        let projected = SessionExporter.paragraphLines([line1, line2, line3])
+        XCTAssertEqual(projected.count, 2, "同段内发生明确换人（A -> B）时必须按说话人边界拆开，不能吞掉后一位说话人")
+        XCTAssertEqual(projected[0].speakerLabel, "A", "首行未标出说话人时应继承同段后续行到达的说话人标签")
+        XCTAssertEqual(projected[0].text, "第一句上半段第一句下半段。")
+        XCTAssertEqual(projected[1].speakerLabel, "B")
+        XCTAssertEqual(projected[1].text, "另一位说话人接话。")
     }
 
     private func makeLine(

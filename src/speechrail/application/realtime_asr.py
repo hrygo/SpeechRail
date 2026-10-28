@@ -52,6 +52,7 @@ from speechrail.domain.ports import (
     WindowAsrSession,
 )
 from speechrail.domain.transcript_cleanup import CollapseResult, collapse_repetitions
+from speechrail.observability.logging import event as log_event, language_code
 from speechrail.observability.metrics import Metrics
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.asr_debug_tap import AsrDebugTap
@@ -682,6 +683,14 @@ class RealtimeAsrOwner:
                 final_deadline_ms=requested_policy.effective_deadline_ms(
                     request_timeout_ms=int(self._settings.request_timeout_seconds * 1000)
                 ),
+            )
+            # 与 `realtime_asr_language_configured` 两相对照即可分清：调用方没发、
+            # 服务端没记，还是这里没把值交给 worker。只记语言码。
+            log_event(
+                logger,
+                "realtime_asr_language_applied",
+                session_id=self._session_id,
+                language=language_code(self._config.get("language")),
             )
             asr = self._asr_lane.create(
                 language=self._config.get("language"),

@@ -114,6 +114,7 @@ struct CaptionBandContent: Equatable, Sendable {
         let text: String
         let primaryText: String
         let secondaryText: String?
+        let speakerLabel: String?
         let sourceTiering: SourceTiering?
         /// 主行（通常是译文）的稳定前缀分层；终稿没有尾部，因此为 nil。
         let primaryTiering: SourceTiering?
@@ -125,6 +126,7 @@ struct CaptionBandContent: Equatable, Sendable {
             text: String,
             primaryText: String? = nil,
             secondaryText: String? = nil,
+            speakerLabel: String? = nil,
             sourceTiering: SourceTiering? = nil,
             primaryTiering: SourceTiering? = nil,
             isPartial: Bool,
@@ -134,6 +136,7 @@ struct CaptionBandContent: Equatable, Sendable {
             self.text = text
             self.primaryText = primaryText ?? text
             self.secondaryText = secondaryText
+            self.speakerLabel = speakerLabel
             self.sourceTiering = sourceTiering
             self.primaryTiering = primaryTiering
             self.isPartial = isPartial
@@ -191,11 +194,14 @@ struct CaptionBandContent: Equatable, Sendable {
             }
             let translating = paragraph.isTranslating
                 || paragraphLines.contains(where: \.isTranslating)
+            let resolvedSpeaker = paragraphLines.compactMap(\.speakerLabel).first(where: { !$0.isEmpty })
+                ?? paragraph.speakerLabel
             rows.append(Row(
                 id: .paragraph(paragraph.id),
                 text: primary,
                 primaryText: primary,
                 secondaryText: secondary,
+                speakerLabel: resolvedSpeaker,
                 isPartial: false,
                 isTranslating: displayMode != .originalOnly && translating
             ))
@@ -225,6 +231,7 @@ struct CaptionBandContent: Equatable, Sendable {
                 text: primary,
                 primaryText: primary,
                 secondaryText: secondary,
+                speakerLabel: line.speakerLabel,
                 isPartial: false,
                 isTranslating: displayMode != .originalOnly && line.isTranslating
             ))
@@ -619,6 +626,11 @@ public final class CaptionSession {
             if translationEnabled {
                 // 旧版本只存过「仅原文」：打开翻译时给一个能看见译文的排版。
                 if displayMode == .originalOnly { displayMode = .bilingual }
+                // 若原音语种此前被误选为「中文」（中文原音免翻译直通），主动打开翻译时自动回退为「自动识别」，避免外语不翻。
+                if sourceLanguage == .chinese {
+                    sourceLanguage = .auto
+                    return
+                }
                 retranslateUntranslatedFinalLinesIfNeeded()
                 if let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
                     scheduleCurrentPartialTranslation(for: text)
@@ -642,6 +654,10 @@ public final class CaptionSession {
                 partialTranslatedText = nil
                 lastPartialTranslation = nil
             } else {
+                if sourceLanguage == .chinese {
+                    sourceLanguage = .auto
+                    return
+                }
                 retranslateUntranslatedFinalLinesIfNeeded()
                 if let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
                     scheduleCurrentPartialTranslation(for: text)
@@ -682,21 +698,30 @@ public final class CaptionSession {
     /// 字幕音频源语种（自动识别 / 英语 / 日语 / 韩语 / 中文），持久化到 UserDefaults。
     ///
     /// 它是**识别**语言，不只是翻译设置：非自动档会随建连透传给 Realtime ASR。
-    /// 会话中途切换时，翻译侧立即按新语种补翻；识别侧从下一次建连（暂停后继续 /
-    /// 重新接上）生效，不在音频流中途切语言。
+    /// 会话进行中切换时，翻译侧立即按新语种补翻已定稿行，识别侧自动切换到新连接以应用新语种。
     public var sourceLanguage: CaptionSourceLanguage {
         didSet {
             defaults.set(sourceLanguage.rawValue, forKey: "speechrail.caption.sourceLanguage")
             guard oldValue != sourceLanguage else { return }
+            let needsASRReconnect = phase == .running && activeClientLanguage != sourceLanguage.asrLanguageCode
             if sourceLanguage == .chinese {
                 translationCoordinator.cancelPartial()
                 partialTranslatedText = nil
                 lastPartialTranslation = nil
             } else if translationEnabled {
                 retranslateUntranslatedFinalLinesIfNeeded()
-                if let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                if !needsASRReconnect,
+                   let text = partialText?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !text.isEmpty {
                     scheduleCurrentPartialTranslation(for: text)
                 }
+            }
+            if needsASRReconnect {
+                translationCoordinator.cancelPartial()
+                partialText = nil
+                partialTranslatedText = nil
+                lastPartialTranslation = nil
+                scheduleSourceLanguageReconnect()
             }
         }
     }
@@ -755,6 +780,7 @@ public final class CaptionSession {
 
     private var source: AudioChunkSource?
     private var client: (any CaptionRealtimeClient)?
+    private var activeClientLanguage: String?
     private var pump: Task<Void, Never>?
     private var uploadPump: Task<Void, Never>?
     private var sessionStartedAt: Date?
@@ -876,7 +902,9 @@ public final class CaptionSession {
         self.apiKey = apiKey
         self.defaults = defaults
         // 翻译默认关：旧版本没有这个键时 `bool` 返回 false，正好是「用户没主动打开」。
-        self.translationEnabled = defaults.bool(forKey: "speechrail.caption.translationEnabled")
+        // 保留成本地值：`sourceLanguage` 是 `@Published`，初始化期还不能经 `self` 读它。
+        let translationOn = defaults.bool(forKey: "speechrail.caption.translationEnabled")
+        self.translationEnabled = translationOn
         self.paragraphAssemblyEnabled = defaults.object(
             forKey: "speechrail.caption.paragraphAssemblyEnabled"
         ) as? Bool ?? true
@@ -896,7 +924,12 @@ public final class CaptionSession {
         }
         if let raw = defaults.string(forKey: "speechrail.caption.sourceLanguage"),
            let lang = CaptionSourceLanguage(rawValue: raw) {
-            self.sourceLanguage = lang
+            if translationOn && lang == .chinese {
+                self.sourceLanguage = .auto
+                defaults.set(CaptionSourceLanguage.auto.rawValue, forKey: "speechrail.caption.sourceLanguage")
+            } else {
+                self.sourceLanguage = lang
+            }
         } else {
             self.sourceLanguage = .auto
         }
@@ -1219,6 +1252,7 @@ public final class CaptionSession {
         }
         diarizationActive = diarizationEnabled
         self.client = client
+        self.activeClientLanguage = sourceLanguage.asrLanguageCode
 
         // 记录行在**采集真的起来之后**才建：麦克风没起来、服务连不上，都不该在记录库里
         // 留下一条什么都没有的会话（§5.3.1）。
@@ -1273,6 +1307,7 @@ public final class CaptionSession {
     /// 收起来——协调器决定"这次会话结束了"，浮层就不该继续挂在屏幕上。
     private var stopCaptureTask: Task<Void, Never>?
     private var pauseTask: Task<Void, Never>?
+    private var sourceLanguageReconnectTask: Task<Void, Never>?
     private var isClosingCaptureTransport = false
 
     public func stopCapture() async { await beginCaptureStop(preservingRecord: false).value }
@@ -1281,6 +1316,8 @@ public final class CaptionSession {
         if let stopCaptureTask { return stopCaptureTask }
         let task = Task { @MainActor in
             defer { self.stopCaptureTask = nil }
+            self.sourceLanguageReconnectTask?.cancel()
+            await self.sourceLanguageReconnectTask?.value
             await self.performStopCapture(preservingRecord: preservingRecord)
         }
         stopCaptureTask = task
@@ -1504,10 +1541,69 @@ public final class CaptionSession {
         }
         let task = Task { @MainActor in
             defer { self.pauseTask = nil }
+            self.sourceLanguageReconnectTask?.cancel()
+            await self.sourceLanguageReconnectTask?.value
             await self.performPause()
         }
         pauseTask = task
         await task.value
+    }
+
+    /// 当用户在工作台中切换「区分说话人」开关时调用：若当前正在运行，自动重连以启用或关闭分人协商。
+    public func notifyDiarizationPreferenceChanged() {
+        guard phase == .running else { return }
+        let desired = diarizationPreference()
+        guard diarizationActive != desired else { return }
+        scheduleSourceLanguageReconnect()
+    }
+
+    private func scheduleSourceLanguageReconnect() {
+        guard phase == .running, sourceLanguageReconnectTask == nil else { return }
+        sourceLanguageReconnectTask = Task { @MainActor [weak self] in
+            defer { self?.sourceLanguageReconnectTask = nil }
+            await self?.performSourceLanguageReconnect()
+        }
+    }
+
+    private func performSourceLanguageReconnect() async {
+        while phase == .running,
+              !isStoppingIntentionally,
+              stopCaptureTask == nil,
+              pauseTask == nil,
+              (activeClientLanguage != sourceLanguage.asrLanguageCode
+                  || (labeling.state != .unavailable && diarizationActive != diarizationPreference())),
+              !Task.isCancelled {
+            isStoppingIntentionally = true
+            await source?.stop()
+            source = nil
+            uploadPump?.cancel()
+            await uploadPump?.value
+            uploadPump = nil
+            if let client {
+                await client.close()
+            }
+            await pump?.value
+            pump = nil
+            client = nil
+            activeClientLanguage = nil
+            previewIdentity = nil
+            level = 0
+            flushOpenParagraph()
+            translationCoordinator.cancelPartial()
+            partialText = nil
+            partialTranslatedText = nil
+            lastPartialTranslation = nil
+            do {
+                try await restartPipeline()
+            } catch {
+                isStoppingIntentionally = false
+                blocked = Self.blockReason(for: error)
+                if phase == .running || phase == .preparing {
+                    phase = .paused
+                }
+                return
+            }
+        }
     }
 
     private func performPause() async {
@@ -1628,7 +1724,7 @@ public final class CaptionSession {
                 )
             )
         }
-        let diarizationRequested = diarizationActive
+        let diarizationRequested = labeling.state == .unavailable ? false : (diarizationActive || diarizationPreference())
         var diarizationEnabled = diarizationRequested
         var client = makeClient(diarizationEnabled: diarizationEnabled)
         var diarizationUnavailableNote: String?
@@ -1655,10 +1751,16 @@ public final class CaptionSession {
         }
         diarizationActive = diarizationEnabled
         self.client = client
+        self.activeClientLanguage = sourceLanguage.asrLanguageCode
         // Gap3：续接只重置 uid 坐标系，面板上已标出的标签/改名/计数保留。
         // 以前这里不动账本——uid 表残留旧连接的坐标，迟到修订可能串写。
         if let sessionID {
-            labeling.beginNewConnection(sessionID: sessionID)
+            if diarizationEnabled, !labeling.isEnabled {
+                labeling.begin(sessionID: sessionID, enabled: true)
+                await coordinator.updateSessionDiarization(id: sessionID, state: .active, note: nil)
+            } else {
+                labeling.beginNewConnection(sessionID: sessionID)
+            }
             if let diarizationUnavailableNote {
                 labeling.markUnavailable(note: diarizationUnavailableNote)
                 await coordinator.updateSessionDiarization(
@@ -1945,14 +2047,19 @@ public final class CaptionSession {
             }
             guard self.sessionID == recordID, self.previewIdentity == identity else { return }
             if savedTiming { self.timingQualityApplied.insert(lineID) }
+            var assignedSpeakerLabel: String?
             self.transcriptPresentation.update(id: lineID) { updated in
                 if confirmedLabels.contains(lineID) {
                     if let saved = owner.attributedLine(forLineID: lineID) {
                         updated.speakerLabel = saved.speakerLabel
                         updated.attributionUnits = saved.attributionUnits
                         updated.speakerLabelIsManual = saved.speakerLabelIsManual
+                        assignedSpeakerLabel = saved.speakerLabel
                     }
                 }
+            }
+            if let assignedSpeakerLabel, !assignedSpeakerLabel.isEmpty {
+                await self.reconcileParagraphSpeakerAttribution(lineID: lineID, speakerLabel: assignedSpeakerLabel)
             }
         }
         if accepted {
@@ -2155,6 +2262,118 @@ public final class CaptionSession {
         try? await coordinator.attachLineParagraphID(lineID: lineID, paragraphID: paragraphID)
     }
 
+    /// 异步到达的说话人归属（`speechrail.diarization.updated`）回填到已构建的 `CaptionParagraph`：
+    /// - 若段内尚无说话人或与当前说话人一致，直接补齐 `paragraph.speakerLabel`；
+    /// - 若多行合并段内出现了明确的换人（如前半段 A、后半段 B），按说话人边界拆开段落并更新 `paragraph_id`。
+    private func reconcileParagraphSpeakerAttribution(lineID: String, speakerLabel: String) async {
+        guard let pIndex = paragraphs.firstIndex(where: { $0.lineIDs.contains(lineID) }) else {
+            return
+        }
+        let paragraph = paragraphs[pIndex]
+        let linesByID = Dictionary(uniqueKeysWithValues: lines.map { ($0.id, $0) })
+        let paragraphLines = paragraph.lineIDs.compactMap { linesByID[$0] }
+        guard paragraphLines.count > 1 else {
+            paragraphs[pIndex].speakerLabel = speakerLabel
+            return
+        }
+
+        let distinctSpeakers = Set(paragraphLines.compactMap { $0.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        guard distinctSpeakers.count > 1 else {
+            paragraphs[pIndex].speakerLabel = speakerLabel
+            return
+        }
+
+        // 发生段内换人：按连续说话人重新切分该段落
+        let wasOpen = (openParagraphID == paragraph.id)
+        var groups: [[Line]] = []
+        var currentGroup: [Line] = []
+        var currentGroupSpeaker: String?
+
+        for line in paragraphLines {
+            let lineSpeaker = line.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedSpeaker = (lineSpeaker?.isEmpty == false) ? lineSpeaker : nil
+            if currentGroup.isEmpty {
+                currentGroup = [line]
+                currentGroupSpeaker = normalizedSpeaker
+            } else if let existing = currentGroupSpeaker, let incoming = normalizedSpeaker, existing != incoming {
+                groups.append(currentGroup)
+                currentGroup = [line]
+                currentGroupSpeaker = incoming
+            } else {
+                currentGroup.append(line)
+                if currentGroupSpeaker == nil { currentGroupSpeaker = normalizedSpeaker }
+            }
+        }
+        if !currentGroup.isEmpty {
+            groups.append(currentGroup)
+        }
+        guard groups.count > 1 else {
+            paragraphs[pIndex].speakerLabel = speakerLabel
+            return
+        }
+
+        var replacementParagraphs: [CaptionParagraph] = []
+        for (groupIdx, group) in groups.enumerated() {
+            guard var first = group.first else { continue }
+            if groupIdx == 0 {
+                // 首组曾挂着合并整段的旧译文，拆分后必须退回首行初始草稿，避免把包含后一位说话人的旧整段译文留在前半段。
+                first.translatedText = paragraph.initialDraftTranslation
+                let resetDraft = paragraph.initialDraftTranslation
+                transcriptPresentation.update(id: first.id) {
+                    $0.translatedText = resetDraft
+                }
+            }
+            let willTranslate = Self.shouldTranslate(
+                text: group.map(\.text).joined(separator: " "),
+                displayMode: effectiveDisplayMode,
+                preferredLanguage: sourceLanguage,
+                hasTranslationClient: makeTranslationClient?() != nil
+            )
+            var sub = CaptionParagraph(
+                line: first,
+                observedAt: paragraph.lastObservedAt,
+                isTranslating: willTranslate,
+                contextLines: groupIdx == 0 ? paragraph.contextLines : []
+            )
+            sub.speakerLabel = group.compactMap { $0.speakerLabel }.first(where: { !$0.isEmpty })
+            for nextLine in group.dropFirst() {
+                sub.append(nextLine, observedAt: paragraph.lastObservedAt)
+            }
+            replacementParagraphs.append(sub)
+        }
+
+        // 必须在任何 await 悬停点之前同步更新 paragraphs、openParagraphID 与行内存 paragraphID，防止并发定时器或新行读到半拆分状态。
+        paragraphs.replaceSubrange(pIndex...pIndex, with: replacementParagraphs)
+        for sub in replacementParagraphs {
+            for memberID in sub.lineIDs {
+                transcriptPresentation.update(id: memberID) { $0.paragraphID = sub.id }
+            }
+        }
+        if wasOpen, let lastSub = replacementParagraphs.last {
+            openParagraphID = lastSub.id
+            for closedSub in replacementParagraphs.dropLast() {
+                if let firstID = closedSub.lineIDs.first, closedSub.isTranslating {
+                    startParagraphTranslation(paragraphID: closedSub.id, firstLineID: firstID)
+                }
+            }
+            if let lastIdx = paragraphs.firstIndex(where: { $0.id == lastSub.id }) {
+                scheduleParagraphFlush(for: lastIdx)
+            }
+        } else {
+            for sub in replacementParagraphs {
+                if let firstID = sub.lineIDs.first, sub.isTranslating {
+                    startParagraphTranslation(paragraphID: sub.id, firstLineID: firstID)
+                }
+            }
+        }
+
+        for sub in replacementParagraphs {
+            for memberID in sub.lineIDs {
+                try? await coordinator.attachLineParagraphID(lineID: memberID, paragraphID: sub.id)
+            }
+        }
+    }
+
     private func scheduleParagraphFlush(for index: Int) {
         paragraphFlushTask?.cancel()
         guard paragraphs.indices.contains(index) else { return }
@@ -2216,6 +2435,7 @@ public final class CaptionSession {
     private func startParagraphTranslation(paragraphID: String, firstLineID: String) {
         guard let index = paragraphs.firstIndex(where: { $0.id == paragraphID }) else { return }
         let paragraph = paragraphs[index]
+        let expectedSourceText = paragraph.sourceText
         let isParagraph = paragraph.lineIDs.count > 1
         let capturedLineIDs = paragraph.lineIDs
         // 单行段落失败时可回退首行 Stage 1 草稿；多行合并段落的首行草稿仅覆盖第 1 行，
@@ -2230,7 +2450,7 @@ public final class CaptionSession {
 
         translationCoordinator.translateCompletedLine(
             lineID: paragraphID,
-            sourceText: paragraph.sourceText,
+            sourceText: expectedSourceText,
             contextLines: paragraph.contextLines,
             displayMode: effectiveDisplayMode,
             preferredLanguage: sourceLanguage,
@@ -2241,6 +2461,8 @@ public final class CaptionSession {
             onStreamingUpdate: { [weak self] id, partialTranslation in
                 guard let self else { return }
                 if let current = self.paragraphs.firstIndex(where: { $0.id == id }) {
+                    // 若该段在翻译途中因换人拆分或追加新句改变了 sourceText，丢弃旧请求的过期流式分片。
+                    guard self.paragraphs[current].sourceText == expectedSourceText else { return }
                     self.paragraphs[current].translatedText = partialTranslation
                     self.paragraphs[current].isTranslating = true
                 }
@@ -2252,6 +2474,10 @@ public final class CaptionSession {
             onFinished: { [weak self] id, finalTranslation, lang in
                 guard let self else { return }
                 let currentIdx = self.paragraphs.firstIndex(where: { $0.id == id })
+                if let currentIdx, self.paragraphs[currentIdx].sourceText != expectedSourceText {
+                    // 段落原文已变更（被拆分或续接），不将旧原文的译文覆盖到新段落上。
+                    return
+                }
                 let currentLineIDs = currentIdx.map { self.paragraphs[$0].lineIDs } ?? capturedLineIDs
                 let fallbackDraft: String?
                 if let currentIdx {
@@ -2422,6 +2648,12 @@ public final class CaptionSession {
             await enterInterrupted(.serviceBusy("已有另一个实时转写会话在用语音引擎。等它结束后重新接上。"))
         case "language_not_supported":
             await enterInterrupted(.serviceNotReady("这台 Mac 现在的模型不支持当前语言。"))
+        case "invalid_language_echo":
+            // 服务端握手回显的识别语种和「原音」所选不一致：这段字幕会按另一种语言识别，
+            // 继续采集只会攒下一份错语种的记录，所以按中断处理，给重新开始的出口。
+            await enterInterrupted(.serviceNotReady(
+                "语音服务没有按「原音」所选语种识别，字幕已停下。请重新开始；若反复出现，检查服务版本是否与 App 一致。"
+            ))
         default:
             // 契约里这些失败都**保持 session 可用**：记下来，不打断采集
             // （`voice_not_found` 那种属于助手/TTS，这一档收不到）。

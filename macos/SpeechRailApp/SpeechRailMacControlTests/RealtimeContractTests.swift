@@ -2329,6 +2329,79 @@ struct RealtimeSessionPolicyContractTests {
         #expect(code == "invalid_server_event")
         await client.close()
     }
+
+    @Test func clientRejectsSessionUpdatedThatEchoesADifferentLanguage() async {
+        let transport = TestRealtimeASRTransport(sessionUpdateEcho: .wrongLanguage)
+        let client = RealtimeASRClient(language: "en", apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        var didReject = false
+        do {
+            try await client.connect(using: transport)
+        } catch {
+            didReject = true
+        }
+        #expect(didReject, "A pinned language that comes back different must not configure the session")
+
+        guard let failure = await events.next() else {
+            Issue.record("The mismatched language echo must publish a protocol failure")
+            await client.close()
+            return
+        }
+        guard case .serverError(let code, _, _) = failure.payload else {
+            Issue.record("The mismatched language echo must become serverError")
+            await client.close()
+            return
+        }
+        #expect(code == "invalid_language_echo")
+        await client.close()
+    }
+
+    @Test func clientRejectsSessionUpdatedThatDropsTheLanguageEcho() async {
+        let transport = TestRealtimeASRTransport(sessionUpdateEcho: .missingLanguage)
+        let client = RealtimeASRClient(language: "zh", apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        var didReject = false
+        do {
+            try await client.connect(using: transport)
+        } catch {
+            didReject = true
+        }
+        #expect(didReject, "A pinned language the server does not echo cannot be trusted")
+
+        guard let failure = await events.next() else {
+            Issue.record("The missing language echo must publish a protocol failure")
+            await client.close()
+            return
+        }
+        guard case .serverError(let code, _, _) = failure.payload else {
+            Issue.record("The missing language echo must become serverError")
+            await client.close()
+            return
+        }
+        #expect(code == "invalid_language_echo")
+        await client.close()
+    }
+
+    @Test func clientAcceptsSessionUpdatedThatEchoesTheRequestedLanguage() async throws {
+        let transport = TestRealtimeASRTransport()
+        let client = RealtimeASRClient(language: "en", apiKey: "")
+        var events = await client.events().makeAsyncIterator()
+
+        try await client.connect(using: transport)
+        guard let configured = await events.next() else {
+            Issue.record("A matching language echo must configure the session")
+            await client.close()
+            return
+        }
+        guard case .configured = configured.payload else {
+            Issue.record("A matching language echo must emit configured, got \(configured.payload)")
+            await client.close()
+            return
+        }
+        await client.close()
+    }
 }
 
 private actor TestRealtimeASRTransport: RealtimeASRTransport {
@@ -2340,6 +2413,10 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
         case wrongPreviewInterval
         case invalidEffectiveBudget
         case missingASRPolicy
+        /// Echo a different transcription language than the client just requested.
+        case wrongLanguage
+        /// Echo everything except `audio.input.transcription.language`.
+        case missingLanguage
     }
 
     private var frames: [RealtimeASRSocketFrame] = []
@@ -2366,7 +2443,18 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
         }
         let requestSession = payload["session"] as? [String: Any] ?? [:]
         let requestSpeechRail = requestSession["speechrail"] as? [String: Any] ?? [:]
+        let requestAudio = requestSession["audio"] as? [String: Any] ?? [:]
+        let requestInput = requestAudio["input"] as? [String: Any] ?? [:]
+        let requestTranscription = requestInput["transcription"] as? [String: Any] ?? [:]
         let requestedPolicy = requestSpeechRail["asr"] as? [String: Any] ?? [:]
+        // A faithful echo republishes the transcription object it accepted, including
+        // the language the caller pinned. Auto mode sends no language, so none comes back.
+        var echoedTranscription: [String: Any] = [
+            "model": requestTranscription["model"] ?? "speechrail/qwen3-asr-1.7b"
+        ]
+        if let requestedLanguage = requestTranscription["language"] as? String {
+            echoedTranscription["language"] = requestedLanguage
+        }
         var echoedPolicy: [String: Any] = [
             "preview_interval_ms": requestedPolicy["preview_interval_ms"] ?? 1_000,
             "max_segment_ms": requestedPolicy["max_segment_ms"] ?? 20_000,
@@ -2385,6 +2473,12 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
             echoedSpeechRail["asr"] = echoedPolicy
         case .some(.missingASRPolicy):
             echoedSpeechRail = ["task": "conversation"]
+        case .some(.wrongLanguage):
+            echoedTranscription["language"] = requestTranscription["language"] as? String == "zh"
+                ? "en"
+                : "zh"
+        case .some(.missingLanguage):
+            echoedTranscription["language"] = nil
         case .none:
             break
         }
@@ -2393,6 +2487,7 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
                 jsonText([
                     "type": "session.updated",
                     "session": [
+                        "audio": ["input": ["transcription": echoedTranscription]],
                         "speechrail": echoedSpeechRail
                     ]
                 ])
