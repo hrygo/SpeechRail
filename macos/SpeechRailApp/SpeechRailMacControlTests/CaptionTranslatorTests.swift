@@ -690,7 +690,10 @@ final class CaptionTranslatorTests: XCTestCase {
         )
         XCTAssertTrue(coordinator.isTranslatingPartial)
 
-        try? await Task.sleep(nanoseconds: 60_000_000)
+        let deadline = Date().addingTimeInterval(1.0)
+        while coordinator.isTranslatingPartial && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertFalse(
             coordinator.isTranslatingPartial,
             "Stage 1 请求失败后必须复位 isTranslatingPartial，避免底部预览行永久卡在“翻译中”"
@@ -794,7 +797,10 @@ final class CaptionTranslatorTests: XCTestCase {
             displayMode: .bilingual,
             onUpdate: { _ in }
         )
-        try? await Task.sleep(nanoseconds: 60_000_000)
+        let scheduleDeadline = Date().addingTimeInterval(1.0)
+        while fake.callCount == 0 && Date() < scheduleDeadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
 
         fake.streamDeltas = []
         fake.failure = TranslationFailure()

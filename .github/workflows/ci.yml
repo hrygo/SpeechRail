@@ -288,7 +288,7 @@ jobs:
         run: python3 scripts/ci_build_cache.py restore --manifest macos/SpeechRailApp/.build/ci-inputs.json macos/SpeechRailApp
 
       - name: Run Swift package tests
-        run: swift test --package-path macos/SpeechRailApp
+        run: swift test --package-path macos/SpeechRailApp --parallel
 
       - name: Verify independent LLM support compilation
         run: python3 scripts/check_llm_support_boundary.py
