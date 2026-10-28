@@ -424,6 +424,18 @@ public actor AudiobookRevisionController {
                })
             {
                 readyChapterIDs.append(chapter.id)
+            } else if chapterAllReusable,
+                      !plannedFragments.isEmpty,
+                      !chapter.isSkipped,
+                      chapter.currentChapterRevisionID == nil,
+                      (try? await store.chapterRevisions(for: bookID, chapterID: chapter.id))?.isEmpty == true,
+                      (try? await promoteInitialChapterIfComplete(
+                          bookID: bookID,
+                          chapterID: chapter.id,
+                          updateBookProductionState: true
+                      )) != nil
+            {
+                readyChapterIDs.append(chapter.id)
             } else {
                 incompleteChapterIDs.append(chapter.id)
                 if chapterAllReusable, !plannedFragments.isEmpty, chapter.currentChapterRevisionID != nil {

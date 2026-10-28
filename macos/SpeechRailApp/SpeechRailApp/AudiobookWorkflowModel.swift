@@ -767,7 +767,7 @@ public final class AudiobookWorkflowModel {
               let selectedChapter = chapters.first(where: { $0.id == selectedChapterID }),
               selectedChapter.bookID == book.id,
               !selectedChapter.isSkipped,
-              selectedChapter.currentChapterRevisionID != nil,
+              (selectedChapter.currentChapterRevisionID != nil || !(chapterCandidatesByFragmentID[fragmentID] ?? []).isEmpty),
               let fragment = chapterFragments.first(where: { $0.id == fragmentID }),
               fragment.bookID == book.id,
               fragment.chapterID == selectedChapterID,
@@ -3356,7 +3356,9 @@ public final class AudiobookWorkflowModel {
                 errorMessage = AudiobookProductionError.chapterBlockedByUnknownSpeakers(chapterID: chapterID).errorDescription
             } else if chapters.first(where: { $0.id == chapterID })?.isSkipped == true {
                 errorMessage = "本章已跳过，先恢复本章后才能重录。"
-            } else if chapters.first(where: { $0.id == chapterID })?.currentChapterRevisionID == nil {
+            } else if chapters.first(where: { $0.id == chapterID })?.currentChapterRevisionID == nil
+                && (chapterCandidatesByFragmentID[fragmentID] ?? []).isEmpty
+            {
                 errorMessage = "请先完成本章首次制作，再重录单段。"
             } else {
                 errorMessage = "当前章节还未准备好重录，请先完成角色确认和声音试听。"
@@ -3373,7 +3375,11 @@ public final class AudiobookWorkflowModel {
         showPersistentBanner("新候选已准备好。请逐段试听并选择“采用此候选”；当前音频和历史版本保留。")
     }
 
-    public func prepareRegeneration(fragmentID: UUID? = nil) async {
+    public func prepareRegeneration(
+        fragmentID: UUID? = nil,
+        initialFragmentIDs: Set<UUID>? = nil,
+        preferredChapterID: UUID? = nil
+    ) async {
         guard let store, let book = selectedBook, !isProductionBusy, !isAnalyzing,
               !isEditingChapterLayout, !isPreparingRegeneration else { return }
         guard isAuditionConfirmedForSelectedBook else {
@@ -3410,17 +3416,56 @@ public final class AudiobookWorkflowModel {
             }
             try await store.validateWorkingSource(snapshot)
             guard selectedBook?.id == book.id, !isProductionBusy, !isAnalyzing, !isEditingChapterLayout else { return }
-            if let fragmentID, !fragments[selectedChapterID ?? first.id, default: []].contains(where: { $0.id == fragmentID }) {
+            let targetChapterID = eligible.first { $0.id == (preferredChapterID ?? selectedChapterID) }?.id ?? first.id
+            if let fragmentID, !fragments[targetChapterID, default: []].contains(where: { $0.id == fragmentID }) {
                 throw AudiobookProductionError.taskScopeChanged
+            }
+            let resolvedInitialFragments: Set<UUID>?
+            if let initialFragmentIDs, !initialFragmentIDs.isEmpty {
+                let allAvailableIDs = Set(fragments.values.flatMap { $0.map(\.id) })
+                let validSubset = initialFragmentIDs.intersection(allAvailableIDs)
+                resolvedInitialFragments = validSubset.isEmpty ? nil : validSubset
+            } else {
+                resolvedInitialFragments = fragmentID.map { [$0] }
             }
             regenerationDraft = .init(bookID: book.id, sourceID: snapshot.sourceID, chapters: eligible,
                 fragmentsByChapter: fragments,
-                defaultChapterID: eligible.first { $0.id == selectedChapterID }?.id ?? first.id,
+                defaultChapterID: targetChapterID,
                 fragmentExcerpts: excerpts, blockedChapterReasons: blocked,
-                initialFragmentIDs: fragmentID.map { [$0] })
+                initialFragmentIDs: resolvedInitialFragments)
         } catch {
             if selectedBook?.id == book.id { errorMessage = error.localizedDescription }
         }
+    }
+
+    /// 针对「尚未就绪 / 校验未通过 / 待更新」片段一键打开重新制作确认面板并预选对应片段，避免卡在「只补缺失」或「更新待更新」校验拦截中。
+    public func prepareRegenerationForRedoFragments(chapterID: UUID? = nil) async {
+        guard let plan = resumePlan, !plan.redoFragmentIDs.isEmpty else {
+            await prepareRegeneration()
+            return
+        }
+        let redoSet = Set(plan.redoFragmentIDs)
+        var preferredChapter = chapterID ?? selectedChapterID
+        if let store, let bookID = selectedBook?.id,
+           let allFragments = try? await store.fragments(for: bookID)
+        {
+            let redoFragments = allFragments.filter { redoSet.contains($0.id) }
+            if let current = preferredChapter,
+               !redoFragments.contains(where: { $0.chapterID == current }),
+               let firstRedoChapter = chapters.first(where: { ch in redoFragments.contains { $0.chapterID == ch.id } })
+            {
+                preferredChapter = firstRedoChapter.id
+                selectedChapterID = firstRedoChapter.id
+            }
+            if let chapterID {
+                let chapterRedoIDs = Set(redoFragments.filter { $0.chapterID == chapterID }.map(\.id))
+                if !chapterRedoIDs.isEmpty {
+                    await prepareRegeneration(initialFragmentIDs: chapterRedoIDs, preferredChapterID: chapterID)
+                    return
+                }
+            }
+        }
+        await prepareRegeneration(initialFragmentIDs: redoSet, preferredChapterID: preferredChapter)
     }
 
     public func confirmRegeneration(draft: AudiobookRegenerationDraft, chapterIDs: Set<UUID>, fragmentIDs: Set<UUID>? = nil) {
@@ -3483,7 +3528,20 @@ public final class AudiobookWorkflowModel {
             workbenchTab = .production
             surfaceMode = .workspace
         } catch {
-            if selectedBook?.id == book.id { errorMessage = error.localizedDescription }
+            if selectedBook?.id == book.id {
+                errorMessage = error.localizedDescription
+                if case let AudiobookProductionError.savedAudioNeedsVerification(fragmentID) = error,
+                   let store,
+                   let allFragments = try? await store.fragments(for: book.id),
+                   let targetFragment = allFragments.first(where: { $0.id == fragmentID })
+                {
+                    workbenchTab = .production
+                    if selectedChapterID != targetFragment.chapterID {
+                        selectedChapterID = targetFragment.chapterID
+                    }
+                    selectedFragmentID = fragmentID
+                }
+            }
         }
     }
 

@@ -53,7 +53,11 @@ public struct AudiobookWorkshopView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .operationFeedback([
-                OperationFeedback(workflow.errorMessage, id: workflow.errorNoticeID.uuidString,
+                OperationFeedback(
+                    workflow.productionDraft == nil && workflow.regenerationDraft == nil && workflow.productionResumeDraft == nil
+                        ? workflow.errorMessage
+                        : nil,
+                    id: workflow.errorNoticeID.uuidString,
                     onDismiss: {
                         if workflow.errorMessage == workflow.productionProgress?.lastErrorMessage {
                             acknowledgedProductionErrorID = productionErrorID
