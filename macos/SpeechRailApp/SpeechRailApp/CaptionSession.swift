@@ -650,8 +650,11 @@ public final class CaptionSession {
             defaults.set(translationEnabled, forKey: "speechrail.caption.translationEnabled")
             guard oldValue != translationEnabled else { return }
             if translationEnabled {
-                // 旧版本只存过「仅原文」：打开翻译时给一个能看见译文的排版。
-                if displayMode == .originalOnly { displayMode = .bilingual }
+                // 旧版本只存过「仅原文」：打开翻译时给一个能看见译文的排版（赋值会触发 displayMode.didSet 执行补翻并自动返回）。
+                if displayMode == .originalOnly {
+                    displayMode = .bilingual
+                    return
+                }
                 // 若原音语种此前被误选为「中文」（中文原音免翻译直通），主动打开翻译时自动回退为「自动识别」，避免外语不翻。
                 if sourceLanguage == .chinese {
                     sourceLanguage = .auto
