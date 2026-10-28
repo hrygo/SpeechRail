@@ -1117,10 +1117,10 @@ final class CaptionTranslatorTests: XCTestCase {
             onUpdate: { latestUpdate = $0 }
         )
         // 连续顺延增长不重置定时器：若总耗时达 105ms 且 runner 负载较轻，可能在 t=80ms 醒来执行了 t=30ms 的快照，
-        // 或在 t=80ms 调度到主线程时消费了 t=60ms 的最新快照。
-        // 等待在途请求彻底完成（最多等 400ms）以稳定断言最终至少发起过 1 次请求且拿到最终译文。
-        let deadline = Date().addingTimeInterval(0.4)
-        while fake.callCount == 0 && Date() < deadline {
+        // 或在 t=80ms 调度到主线程时消费了 t=60ms 的最新快照。后续顺延增量会在初次流完成后顺畅衔接。
+        // 轮询等待直到最终请求完成（最多等 1.0s），以稳定断言最终至少发起过 1 次请求且拿到最终译文。
+        let deadline = Date().addingTimeInterval(1.0)
+        while (fake.lastSourceText != "We are testing realtime, caption stability" || latestUpdate != "顺延预览译文") && Date() < deadline {
             try? await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertGreaterThanOrEqual(fake.callCount, 1, "连续顺延增长不应被无休止重置定时器造成饥饿")
