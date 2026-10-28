@@ -1025,4 +1025,152 @@ final class CaptionTranslatorTests: XCTestCase {
         XCTAssertEqual(evictedFallback, "第二句保底草稿", "被淘汰的旧排队项必须回调 onFinished 清理状态并保留保底草稿")
         coordinator.cancelAll()
     }
+
+    func testStabilizedStreamingDisplayHoldsPriorDraftPrefixAndSwitchesAfterRewriteOrCompletion() async {
+        // 1. 流式前缀与旧草稿一致时，保持旧草稿不缩回
+        XCTAssertEqual(
+            CaptionTranslationCoordinator.stabilizedStreamingDisplay(
+                accumulated: "我们",
+                priorDisplayed: "我们正在测试实时字幕防抖"
+            ),
+            "我们正在测试实时字幕防抖"
+        )
+        // 2. 流式改写但尚不足 3 个字符时，短暂保持旧草稿避免单字闪烁
+        XCTAssertEqual(
+            CaptionTranslationCoordinator.stabilizedStreamingDisplay(
+                accumulated: "大家",
+                priorDisplayed: "我们正在测试实时字幕防抖"
+            ),
+            "我们正在测试实时字幕防抖"
+        )
+        // 3. 流式改写已满 3 个字符时，立即切换到新译文
+        XCTAssertEqual(
+            CaptionTranslationCoordinator.stabilizedStreamingDisplay(
+                accumulated: "大家正在看",
+                priorDisplayed: "我们正在测试实时字幕防抖"
+            ),
+            "大家正在看"
+        )
+        // 4. Stage 2 流式精翻端到端验证：前两个增量属于草稿前缀时不退回短词，流结束落定完整译文
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["预算", "已经", "批准，下周启动"]
+        let coordinator = CaptionTranslationCoordinator(makeClient: { fake })
+        var streamedUpdates: [String] = []
+        var finalOutput: String?
+        let exp = expectation(description: "Stage 2 stabilized streaming")
+
+        coordinator.translateCompletedLine(
+            lineID: "line-stream-guard",
+            sourceText: "The budget is approved and starts next week",
+            contextLines: [],
+            displayMode: .bilingual,
+            priorDraftHint: "预算已经批准",
+            onStreamingUpdate: { _, partial in
+                streamedUpdates.append(partial)
+            },
+            onFinished: { _, final, _ in
+                finalOutput = final
+                exp.fulfill()
+            }
+        )
+
+        await fulfillment(of: [exp], timeout: 1.0)
+        XCTAssertEqual(
+            streamedUpdates,
+            ["预算已经批准", "预算已经批准", "预算已经批准，下周启动"],
+            "流式增量还在重复草稿前缀时不得缩回短词引起闪烁"
+        )
+        XCTAssertEqual(finalOutput, "预算已经批准，下周启动")
+    }
+
+    func testPartialTranslationDoesNotStarveDuringContinuousDebounceGrowth() async {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["顺延预览译文"]
+        let coordinator = CaptionTranslationCoordinator(
+            partialDebounce: .milliseconds(80),
+            minimumPartialDeltaChars: 5,
+            makeClient: { fake }
+        )
+
+        var latestUpdate: String?
+        // t=0ms：触发首次防抖（80ms）
+        coordinator.schedulePartialTranslation(
+            sourceText: "We are testing",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { latestUpdate = $0 }
+        )
+        // t=30ms：同一句话顺延增长且带标点，更新待翻文本但不得重置防抖定时器
+        try? await Task.sleep(for: .milliseconds(30))
+        coordinator.schedulePartialTranslation(
+            sourceText: "We are testing realtime,",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { latestUpdate = $0 }
+        )
+        // t=60ms：再次顺延增长超过 minimumPartialDeltaChars
+        try? await Task.sleep(for: .milliseconds(30))
+        coordinator.schedulePartialTranslation(
+            sourceText: "We are testing realtime, caption stability",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { latestUpdate = $0 }
+        )
+        // 再等 45ms（总计约 105ms，若在 t=60ms 被重置则需到 140ms 才会触发）
+        try? await Task.sleep(for: .milliseconds(45))
+        XCTAssertEqual(fake.callCount, 1, "连续顺延增长不应重置防抖定时器造成饥饿")
+        XCTAssertEqual(fake.lastSourceText, "We are testing realtime, caption stability")
+        XCTAssertEqual(latestUpdate, "顺延预览译文")
+    }
+
+    func testStabilizedDisplayPartialHoldsSingleFrameTailRollbackAndAcceptsConfirmedShrink() {
+        var heldOnce = false
+        let r1 = CaptionPartialStability.stabilizedDisplayPartial(
+            currentDisplayed: nil,
+            incoming: "今天我们来看看这个实时字幕",
+            sameItem: false,
+            alreadyHeldOnce: &heldOnce
+        )
+        XCTAssertEqual(r1, "今天我们来看看这个实时字幕")
+        XCTAssertFalse(heldOnce)
+
+        // 单帧尾部回退 2 个字：保持已上屏较长文本
+        let r2 = CaptionPartialStability.stabilizedDisplayPartial(
+            currentDisplayed: r1,
+            incoming: "今天我们来看看这个实时",
+            sameItem: true,
+            alreadyHeldOnce: &heldOnce
+        )
+        XCTAssertEqual(r2, "今天我们来看看这个实时字幕")
+        XCTAssertTrue(heldOnce)
+
+        // 下一帧恢复增长：顺滑推进并复位 heldOnce
+        let r3 = CaptionPartialStability.stabilizedDisplayPartial(
+            currentDisplayed: r2,
+            incoming: "今天我们来看看这个实时字幕模块",
+            sameItem: true,
+            alreadyHeldOnce: &heldOnce
+        )
+        XCTAssertEqual(r3, "今天我们来看看这个实时字幕模块")
+        XCTAssertFalse(heldOnce)
+
+        // 连续两帧回退：第一帧保持，第二帧确认采纳
+        let r4 = CaptionPartialStability.stabilizedDisplayPartial(
+            currentDisplayed: r3,
+            incoming: "今天我们来看看这个实时字幕",
+            sameItem: true,
+            alreadyHeldOnce: &heldOnce
+        )
+        XCTAssertEqual(r4, "今天我们来看看这个实时字幕模块")
+        XCTAssertTrue(heldOnce)
+
+        let r5 = CaptionPartialStability.stabilizedDisplayPartial(
+            currentDisplayed: r4,
+            incoming: "今天我们来看看这个实时字幕",
+            sameItem: true,
+            alreadyHeldOnce: &heldOnce
+        )
+        XCTAssertEqual(r5, "今天我们来看看这个实时字幕")
+        XCTAssertFalse(heldOnce)
+    }
 }

@@ -113,9 +113,32 @@ enum CaptionParagraphAssembler {
         if excess > 0 { kept.removeFirst(excess) }
         return kept
     }
-    static let closeGraceMilliseconds = 500
-    static let incompleteHoldMilliseconds = 900
+    static let completeSentenceGraceMilliseconds = 200
+    static let closeGraceMilliseconds = 320
+    static let incompleteHoldMilliseconds = 750
     static let mergeScoreThreshold = 2
+
+    /// 根据当前段落完整性与合并开关计算收口等待时长（毫秒）。
+    /// - 关闭段落合并或已满 `maximumLines` 行时，后续绝无可能继续并入，返回 `0` 立即收口并启动精翻；
+    /// - 强未完成结尾（连接词、介词、列表引导词）等待 `incompleteHoldMilliseconds`；
+    /// - 已带句末终结标点的完整句缩短为 `completeSentenceGraceMilliseconds`，兼顾极短跨句拼接与首字响应；
+    /// - 其余常规分句等待 `closeGraceMilliseconds`。
+    static func flushDelayMilliseconds(
+        for paragraph: CaptionParagraph,
+        assemblyEnabled: Bool
+    ) -> Int {
+        guard assemblyEnabled, paragraph.lineIDs.count < maximumLines else {
+            return 0
+        }
+        let text = paragraph.sourceText
+        if strongIncompleteEnding(text) {
+            return incompleteHoldMilliseconds
+        }
+        if endsWithTerminalPunctuation(text) {
+            return completeSentenceGraceMilliseconds
+        }
+        return closeGraceMilliseconds
+    }
 
     static func shouldMerge(
         _ paragraph: CaptionParagraph,

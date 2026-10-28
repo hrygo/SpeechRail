@@ -119,6 +119,59 @@ public enum CaptionPartialStability: Sendable {
         }
         return stable.count
     }
+
+    /// 单帧尾部回退容忍上限（字符数）。
+    public static let maximumTransientTailRollbackCharacters = 8
+
+    /// 过滤流式 ASR 因 `rollback_tokens` 窗口边界引起的单帧纯尾部缩短或句尾标点抖动。
+    ///
+    /// - 当同一 `itemID` 的新一帧快照只是已上屏文本的严格前缀（或仅相差末尾标点）、
+    ///   且缩短不超过 `maximumTransientTailRollbackCharacters`、且尚未连续被保持过时，
+    ///   保留上一帧的较长文本并把 `alreadyHeldOnce` 置为 `true`；
+    /// - 一旦下一帧恢复增长、发生实质性词义改写、或连续第二帧仍然较短，立即采纳新文本并复位。
+    public static func stabilizedDisplayPartial(
+        currentDisplayed: String?,
+        incoming: String?,
+        sameItem: Bool,
+        alreadyHeldOnce: inout Bool
+    ) -> String? {
+        guard sameItem,
+              let displayed = currentDisplayed,
+              let incoming,
+              !incoming.isEmpty
+        else {
+            alreadyHeldOnce = false
+            return incoming
+        }
+        let trimmedDisplayed = displayed.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedIncoming = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDisplayed.isEmpty, !trimmedIncoming.isEmpty else {
+            alreadyHeldOnce = false
+            return incoming
+        }
+        let coreDisplayed = CaptionParagraphAssembler.trimTrailingPunctuation(trimmedDisplayed)
+        let coreIncoming = CaptionParagraphAssembler.trimTrailingPunctuation(trimmedIncoming)
+        if coreDisplayed == coreIncoming,
+           trimmedDisplayed.count >= trimmedIncoming.count,
+           !alreadyHeldOnce {
+            alreadyHeldOnce = true
+            return displayed
+        }
+        guard trimmedIncoming.count < trimmedDisplayed.count else {
+            alreadyHeldOnce = false
+            return incoming
+        }
+        let shrinkCount = trimmedDisplayed.count - trimmedIncoming.count
+        if !alreadyHeldOnce,
+           shrinkCount <= maximumTransientTailRollbackCharacters,
+           !coreIncoming.isEmpty,
+           coreDisplayed.hasPrefix(coreIncoming) {
+            alreadyHeldOnce = true
+            return displayed
+        }
+        alreadyHeldOnce = false
+        return incoming
+    }
 }
 
 /// 双语平行上下文回合（Conversational SimulMT：同时携带源语言与已定稿中文译文以锁定专名与指代）。
@@ -528,8 +581,8 @@ public final class CaptionTranslationCoordinator {
     private var runningFinalLineIDs: Set<String> = []
 
     public init(
-        partialDebounce: Duration = .milliseconds(450),
-        minimumPartialDeltaChars: Int = 10,
+        partialDebounce: Duration = .milliseconds(250),
+        minimumPartialDeltaChars: Int = 6,
         maximumConcurrentFinalTranslations: Int = 2,
         maximumPendingFinalTranslations: Int = 8,
         makeClient: @escaping @MainActor () -> (any CaptionTranslationClient)?
@@ -630,6 +683,33 @@ public final class CaptionTranslationCoordinator {
         return String(common.dropLast(rollbackChars))
     }
 
+    /// 流式译文防缩回保护：当新一轮 Stage 1 预览或 Stage 2 精翻刚开始吐出前几个字符时，
+    /// 若屏幕已有同句较长草稿（`priorDisplayed`）：
+    /// - 若当前累加文本仍是旧草稿的前缀，继续保持旧草稿显示，消除「整句退回 1~2 个字再重新长出来」的闪烁；
+    /// - 若首词即发生改写，在累加满 3 个字符前仍短暂保持旧草稿，避免单字跳变（流结束时始终落定真实终稿）。
+    public static func stabilizedStreamingDisplay(
+        accumulated: String,
+        priorDisplayed: String?
+    ) -> String {
+        let current = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty else { return priorDisplayed ?? "" }
+        guard let priorRaw = priorDisplayed?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !priorRaw.isEmpty,
+              current.count < priorRaw.count
+        else {
+            return current
+        }
+        let corePrior = CaptionParagraphAssembler.trimTrailingPunctuation(priorRaw)
+        let coreCurrent = CaptionParagraphAssembler.trimTrailingPunctuation(current)
+        if priorRaw.hasPrefix(current) || (!coreCurrent.isEmpty && corePrior.hasPrefix(coreCurrent)) {
+            return priorRaw
+        }
+        if current.count < Swift.min(3, priorRaw.count) {
+            return priorRaw
+        }
+        return current
+    }
+
     /// Stage 1：当外语 partial 增长时，节流触发单飞预览翻译。
     public func schedulePartialTranslation(
         sourceText: String,
@@ -682,6 +762,18 @@ public final class CaptionTranslationCoordinator {
             }
         }
 
+        // 防抖期防重置饥饿：若防抖定时器已在等待，且新到达的 partial 仍是同一句话的顺延增长，
+        // 只刷新 pendingPartialSourceText（防抖醒来时会自动读取最新完整句子），绝不反复 cancel 重置定时器。
+        if isPartialDebouncing, !lastPartialSourceText.isEmpty {
+            let sharedPrefixCount = trimmed.commonPrefix(with: lastPartialSourceText).count
+            let isContinuation = trimmed.hasPrefix(lastPartialSourceText)
+                || sharedPrefixCount >= Swift.min(8, Swift.max(4, lastPartialSourceText.count - 3))
+            if isContinuation {
+                lastPartialSourceText = trimmed
+                return
+            }
+        }
+
         let charDelta = abs(trimmed.count - lastPartialSourceText.count)
         let endsWithClauseBoundary = trimmed.last.map { ",.;?!，。；？！、".contains($0) } ?? false
         guard charDelta >= minimumPartialDeltaChars || endsWithClauseBoundary else { return }
@@ -695,8 +787,12 @@ public final class CaptionTranslationCoordinator {
             return
         }
         lastPartialSourceText = initialSourceSnapshot
-        let debounce = partialDebounce
+        let isFirstPreviewForSentence = (lastPartialTranslation == nil && inFlightPartialTranslation == nil)
+        let debounce = isFirstPreviewForSentence
+            ? Swift.min(partialDebounce, .milliseconds(160))
+            : partialDebounce
         let priorDraft = stabilizedDraftPrefix ?? lastPartialTranslation
+        let priorDisplayed = lastPartialTranslation ?? inFlightPartialTranslation
         let preferredLanguage = pendingPartialPreferredLanguage
         let instructions = Self.systemInstructions(
             for: preferredLanguage,
@@ -706,7 +802,7 @@ public final class CaptionTranslationCoordinator {
         partialTask?.cancel()
         isPartialDebouncing = true
         isPartialRequestInFlight = false
-        isTranslatingPartial = (lastPartialTranslation == nil && inFlightPartialTranslation == nil)
+        isTranslatingPartial = isFirstPreviewForSentence
         partialTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: debounce)
@@ -742,7 +838,11 @@ public final class CaptionTranslationCoordinator {
                         }
                         self.isTranslatingPartial = false
                         self.inFlightPartialTranslation = cleaned
-                        self.latestPartialOnUpdate?(cleaned)
+                        let displayed = Self.stabilizedStreamingDisplay(
+                            accumulated: cleaned,
+                            priorDisplayed: priorDisplayed
+                        )
+                        self.latestPartialOnUpdate?(displayed)
                     }
                 }
                 self.isPartialRequestInFlight = false
@@ -763,6 +863,7 @@ public final class CaptionTranslationCoordinator {
                     }
                     self.lastPartialTranslation = finalPartial
                     self.inFlightPartialTranslation = finalPartial
+                    self.latestPartialOnUpdate?(finalPartial)
                 }
                 // 若在流式请求期间，源文本又继续增长跨过了阈值，自动衔接下一轮 Stage 1 预览
                 let newestPending = self.pendingPartialSourceText
@@ -958,7 +1059,11 @@ public final class CaptionTranslationCoordinator {
                             firstDelta = value
                             metrics.finalFirstDelta.record(milliseconds: value)
                         }
-                        request.onStreamingUpdate(request.lineID, cleaned)
+                        let displayed = Self.stabilizedStreamingDisplay(
+                            accumulated: cleaned,
+                            priorDisplayed: request.fallbackDraft
+                        )
+                        request.onStreamingUpdate(request.lineID, displayed)
                     }
                 }
                 let finalCleaned = Self.cleanSubtitleOutput(accumulated)

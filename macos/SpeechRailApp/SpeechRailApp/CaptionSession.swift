@@ -480,6 +480,8 @@ public final class CaptionSession {
     public private(set) var blocked: BlockReason?
     /// 本次会话已定稿的行（内存镜像；权威在库里，这里只给浮层与导出用）。
     public let transcriptPresentation = TranscriptPresentation<Line>()
+    /// 已落盘（SQLite 写入完成）的字幕修订号；供记录库页面低频监听，避免流式译文逐字增量触发高频查库。
+    public private(set) var persistedTranscriptRevision: UInt64 = 0
     public private(set) var lines: [Line] {
         get { transcriptPresentation.rows }
         set { transcriptPresentation.reset(newValue) }
@@ -488,6 +490,8 @@ public final class CaptionSession {
     private(set) var paragraphs: [CaptionParagraph] = []
     @ObservationIgnored private var openParagraphID: String?
     @ObservationIgnored private var paragraphFlushTask: Task<Void, Never>?
+    @ObservationIgnored private var displayedPartialItemID: String?
+    @ObservationIgnored private var partialTailRollbackHeldOnce = false
     /// Test/UI observation only; no persistence semantic.
     var hasOpenParagraph: Bool { openParagraphID != nil }
     /// 未定稿的增量累加结果。`nil` 表示这一轮还没开始出字。
@@ -501,6 +505,8 @@ public final class CaptionSession {
                 // 注意：此处不调用 `translationCoordinator.cancelPartial()`，因为 `.completed` 先将
                 // `partialText` 置 `nil`，随后在 `didSaveTranscript` 中才调用 `translateCompletedLine`
                 // 读取协调器内的 `stabilizedDraftPrefix` 与 `lastPartialTranslation`。
+                displayedPartialItemID = nil
+                partialTailRollbackHeldOnce = false
                 partialTranslatedText = nil
                 isTranslatingPartial = false
                 return
@@ -508,6 +514,26 @@ public final class CaptionSession {
             if oldValue != partialText {
                 scheduleCurrentPartialTranslation(for: text)
             }
+        }
+    }
+
+    private func applyStabilizedPartial(from visiblePartial: String?, itemID: String) {
+        guard let visiblePartial, !visiblePartial.isEmpty else {
+            displayedPartialItemID = nil
+            partialTailRollbackHeldOnce = false
+            partialText = nil
+            return
+        }
+        let sameItem = (displayedPartialItemID == itemID)
+        let stabilized = CaptionPartialStability.stabilizedDisplayPartial(
+            currentDisplayed: partialText,
+            incoming: visiblePartial,
+            sameItem: sameItem,
+            alreadyHeldOnce: &partialTailRollbackHeldOnce
+        )
+        displayedPartialItemID = itemID
+        if partialText != stabilized {
+            partialText = stabilized
         }
     }
 
@@ -1831,7 +1857,9 @@ public final class CaptionSession {
     ) async {
         guard isCurrent(identity) else { return }
         let recordID = sessionID
-        level = chunk.level
+        if abs(level - chunk.level) >= 0.01 || (chunk.level == 0 && level != 0) {
+            level = chunk.level
+        }
         do {
             try await client.append(chunk.pcm)
         } catch {
@@ -1880,7 +1908,7 @@ public final class CaptionSession {
                 delta: delta,
                 eventID: envelope.metadata.eventID
             )
-            partialText = previewLedger.visiblePartial
+            applyStabilizedPartial(from: previewLedger.visiblePartial, itemID: itemID)
         case .partialSnapshot(let itemID, let revision, let text, _):
             guard windowCapture == nil else { return }
             _ = previewLedger.acceptSnapshot(
@@ -1890,7 +1918,7 @@ public final class CaptionSession {
                 text: text,
                 eventID: envelope.metadata.eventID
             )
-            partialText = previewLedger.visiblePartial
+            applyStabilizedPartial(from: previewLedger.visiblePartial, itemID: itemID)
         case .segmentClosed(let itemID, let sampleSpan, let reason, let commitEventID):
             guard windowCapture == nil else { return }
             guard let closeReason = TranscriptPreviewLedger.SegmentCloseReason(
@@ -2184,27 +2212,38 @@ public final class CaptionSession {
 
             lineByItem[itemIdentity] = (lineID: lineID, ordinal: ordinal)
             currentOrdinal = max(currentOrdinal, ordinal)
-            let line = Line(
+            var line = Line(
                 id: lineID, ordinal: ordinal, text: sourceText,
                 start: command.tStart, end: command.tEnd, speakerLabel: command.speakerLabel,
                 translatedText: initialDraftTranslation,
                 isTranslating: willTranslate
             )
-            transcriptPresentation.apply(line)
+            // 必须在任何 await 悬停点之前同步完成段落归并与行入表，防止 SwiftUI 在挂起间隙观察到
+            // 尚未归入 paragraphs 的孤立 .final(line.id) 行而引起浮层高度闪烁跳变。
+            let paragraphID = registerParagraphLineInMemory(
+                &line,
+                contextLines: contextLines,
+                willTranslate: willTranslate,
+                observedAt: command.observedAt
+            )
+            persistedTranscriptRevision &+= 1
             if let initialDraftTranslation, !initialDraftTranslation.isEmpty {
-                try? await coordinator.attachLineTranslation(
+                _ = try? await coordinator.attachLineTranslation(
                     lineID: lineID,
                     translatedText: initialDraftTranslation,
                     sourceLanguage: nil
                 )
             }
-
-            await registerParagraphLine(
-                line,
-                contextLines: contextLines,
-                willTranslate: willTranslate,
-                observedAt: command.observedAt
-            )
+            _ = try? await coordinator.attachLineParagraphID(lineID: lineID, paragraphID: paragraphID)
+            persistedTranscriptRevision &+= 1
+            if openParagraphID == paragraphID,
+               let idx = paragraphs.firstIndex(where: { $0.id == paragraphID }),
+               CaptionParagraphAssembler.flushDelayMilliseconds(
+                   for: paragraphs[idx],
+                   assemblyEnabled: paragraphAssemblyEnabled
+               ) <= 0 {
+                flushOpenParagraph()
+            }
         }
         guard let payload = pendingAttributions.take(recordID: command.sessionID, identity: itemIdentity),
               command.formal else { return }
@@ -2216,12 +2255,12 @@ public final class CaptionSession {
 
     // MARK: - 语义段落
 
-    private func registerParagraphLine(
-        _ line: Line,
+    private func registerParagraphLineInMemory(
+        _ line: inout Line,
         contextLines: [String],
         willTranslate: Bool,
         observedAt: Date
-    ) async {
+    ) -> String {
         if let index = paragraphs.indices.last,
            paragraphs[index].id == openParagraphID,
            paragraphAssemblyEnabled,
@@ -2230,17 +2269,24 @@ public final class CaptionSession {
                 line,
                 observedAt: observedAt
            ) {
+            let paragraphID = paragraphs[index].id
+            line.paragraphID = paragraphID
+            transcriptPresentation.apply(line)
             paragraphs[index].append(line, observedAt: observedAt)
             paragraphs[index].isTranslating = paragraphs[index].isTranslating || willTranslate
-            await attachParagraphID(paragraphs[index].id, to: line.id)
             pruneParagraphs()
-            scheduleParagraphFlush(for: index)
-            return
+            if let currentIdx = paragraphs.firstIndex(where: { $0.id == paragraphID }) {
+                scheduleParagraphFlush(for: currentIdx, deferImmediateFlush: true)
+            }
+            return paragraphID
         }
 
         // 新行已经证明上一段结束：不再等宽限，立刻收口并翻译。
         flushOpenParagraph()
 
+        let paragraphID = line.id
+        line.paragraphID = paragraphID
+        transcriptPresentation.apply(line)
         var paragraph = CaptionParagraph(
             line: line,
             observedAt: observedAt,
@@ -2250,16 +2296,11 @@ public final class CaptionSession {
         paragraph.initialDraftTranslation = line.translatedText
         paragraphs.append(paragraph)
         openParagraphID = paragraph.id
-        await attachParagraphID(paragraph.id, to: line.id)
         pruneParagraphs()
-        scheduleParagraphFlush(for: paragraphs.count - 1)
-    }
-
-    /// Persist the paragraph projection alongside the formal line. The line remains
-    /// the source of truth; a failed marker write degrades to line-level export.
-    private func attachParagraphID(_ paragraphID: String, to lineID: String) async {
-        transcriptPresentation.update(id: lineID) { $0.paragraphID = paragraphID }
-        try? await coordinator.attachLineParagraphID(lineID: lineID, paragraphID: paragraphID)
+        if let currentIdx = paragraphs.firstIndex(where: { $0.id == paragraph.id }) {
+            scheduleParagraphFlush(for: currentIdx, deferImmediateFlush: true)
+        }
+        return paragraph.id
     }
 
     /// 异步到达的说话人归属（`speechrail.diarization.updated`）回填到已构建的 `CaptionParagraph`：
@@ -2374,13 +2415,21 @@ public final class CaptionSession {
         }
     }
 
-    private func scheduleParagraphFlush(for index: Int) {
+    private func scheduleParagraphFlush(for index: Int, deferImmediateFlush: Bool = false) {
         paragraphFlushTask?.cancel()
+        paragraphFlushTask = nil
         guard paragraphs.indices.contains(index) else { return }
         let id = paragraphs[index].id
-        let hold = CaptionParagraphAssembler.strongIncompleteEnding(paragraphs[index].sourceText)
-            ? CaptionParagraphAssembler.incompleteHoldMilliseconds
-            : CaptionParagraphAssembler.closeGraceMilliseconds
+        let hold = CaptionParagraphAssembler.flushDelayMilliseconds(
+            for: paragraphs[index],
+            assemblyEnabled: paragraphAssemblyEnabled
+        )
+        guard hold > 0 else {
+            if !deferImmediateFlush {
+                flushOpenParagraph()
+            }
+            return
+        }
         paragraphFlushTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(hold))
             guard !Task.isCancelled, let self, self.openParagraphID == id else { return }
@@ -2417,12 +2466,13 @@ public final class CaptionSession {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 for lineID in lineIDs {
-                    try? await self.coordinator.attachLineTranslation(
+                    _ = try? await self.coordinator.attachLineTranslation(
                         lineID: lineID,
                         translatedText: nil,
                         sourceLanguage: lang
                     )
                 }
+                self.persistedTranscriptRevision &+= 1
             }
             return
         }
@@ -2506,11 +2556,12 @@ public final class CaptionSession {
                     }
                 }
                 if resolved != nil || !lang.isEmpty {
-                    try? await self.coordinator.attachLineTranslation(
+                    _ = try? await self.coordinator.attachLineTranslation(
                         lineID: firstLineID,
                         translatedText: resolved,
                         sourceLanguage: lang.isEmpty ? nil : lang
                     )
+                    self.persistedTranscriptRevision &+= 1
                 }
             }
         )

@@ -2081,10 +2081,10 @@ final class CaptionSessionLifecycleTests: XCTestCase {
             role: .speaker,
             speakerLabel: nil,
             text: "第一句上半段，",
-            source: .system,
-            status: .final,
             tStart: 0.0,
             tEnd: 1.2,
+            source: .system,
+            status: .final,
             paragraphID: sharedParagraphID
         )
         let line2 = TranscriptLine(
@@ -2094,10 +2094,10 @@ final class CaptionSessionLifecycleTests: XCTestCase {
             role: .speaker,
             speakerLabel: "A",
             text: "第一句下半段。",
-            source: .system,
-            status: .final,
             tStart: 1.3,
             tEnd: 2.5,
+            source: .system,
+            status: .final,
             paragraphID: sharedParagraphID
         )
         let line3 = TranscriptLine(
@@ -2107,10 +2107,10 @@ final class CaptionSessionLifecycleTests: XCTestCase {
             role: .speaker,
             speakerLabel: "B",
             text: "另一位说话人接话。",
-            source: .system,
-            status: .final,
             tStart: 2.6,
             tEnd: 3.8,
+            source: .system,
+            status: .final,
             paragraphID: sharedParagraphID
         )
 
@@ -2120,6 +2120,60 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(projected[0].text, "第一句上半段第一句下半段。")
         XCTAssertEqual(projected[1].speakerLabel, "B")
         XCTAssertEqual(projected[1].text, "另一位说话人接话。")
+    }
+
+    func testParagraphAssemblerFlushDelayAdaptsToCompletenessAndAssemblyToggle() {
+        let now = Date()
+        let incomplete = CaptionParagraph(
+            line: makeLine("能让我看出一身鸡皮疙瘩，但。", start: 0, end: 1),
+            observedAt: now,
+            isTranslating: true
+        )
+        XCTAssertEqual(
+            CaptionParagraphAssembler.flushDelayMilliseconds(for: incomplete, assemblyEnabled: true),
+            CaptionParagraphAssembler.incompleteHoldMilliseconds
+        )
+        XCTAssertEqual(
+            CaptionParagraphAssembler.flushDelayMilliseconds(for: incomplete, assemblyEnabled: false),
+            0,
+            "关闭段落合并时必须 0ms 立即收口，不再白等宽限窗口"
+        )
+
+        var complete = CaptionParagraph(
+            line: makeLine("这是一句已经带句号的完整字幕。", start: 0, end: 1),
+            observedAt: now,
+            isTranslating: true
+        )
+        XCTAssertEqual(
+            CaptionParagraphAssembler.flushDelayMilliseconds(for: complete, assemblyEnabled: true),
+            CaptionParagraphAssembler.completeSentenceGraceMilliseconds
+        )
+
+        complete.append(makeLine("第二行，", start: 1.1, end: 2), observedAt: now)
+        complete.append(makeLine("第三行。", start: 2.1, end: 3), observedAt: now)
+        XCTAssertEqual(complete.lineIDs.count, CaptionParagraphAssembler.maximumLines)
+        XCTAssertEqual(
+            CaptionParagraphAssembler.flushDelayMilliseconds(for: complete, assemblyEnabled: true),
+            0,
+            "已达最大行数上限时无法再并入新行，应 0ms 立即收口"
+        )
+    }
+
+    func testPartialTailRollbackDoesNotFlickerCaptionBandWhileSingleFrameShrinks() async throws {
+        let h = try await makeHarness()
+        _ = try await start(h)
+
+        try await h.emit(.partialSnapshot(itemID: "item-jitter", revision: 1, text: "今天我们来看看这个实时字幕"))
+        try await h.settle { $0.session.partialText == "今天我们来看看这个实时字幕" }
+
+        // 单帧尾部回退 2 个字：界面应保持原显示不闪烁
+        try await h.emit(.partialSnapshot(itemID: "item-jitter", revision: 2, text: "今天我们来看看这个实时"))
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(h.session.partialText, "今天我们来看看这个实时字幕")
+
+        // 下一帧继续增长：正常推进到最新文本
+        try await h.emit(.partialSnapshot(itemID: "item-jitter", revision: 3, text: "今天我们来看看这个实时字幕模块"))
+        try await h.settle { $0.session.partialText == "今天我们来看看这个实时字幕模块" }
     }
 
     private func makeLine(

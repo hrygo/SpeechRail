@@ -124,6 +124,15 @@ struct CaptionBandMetrics: Equatable {
         return ceil(font.ascender - font.descender + font.leading)
     }
 
+    private struct RowCountCacheKey: Hashable {
+        let text: String
+        let styleRawValue: String
+        let quantizedWidth: Int
+    }
+
+    private nonisolated(unsafe) static var rowCountCache: [RowCountCacheKey: Int] = [:]
+    private static let rowCountCacheLock = NSLock()
+
     /// 一段字在给定宽度下会占几个视觉行。**用同一套字体的真实排版结果算**：
     /// 折行是这套高度计算里唯一没法靠"数逻辑行"得到的东西。
     static func visualRowCount(
@@ -133,15 +142,36 @@ struct CaptionBandMetrics: Equatable {
     ) -> Int {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, availableWidth > 0 else { return 1 }
+        let clampedWidth = max(availableWidth - 2, 1)
+        let cacheKey = RowCountCacheKey(
+            text: trimmed,
+            styleRawValue: style.rawValue,
+            quantizedWidth: Int((clampedWidth * 2).rounded())
+        )
+        rowCountCacheLock.lock()
+        if let cached = rowCountCache[cacheKey] {
+            rowCountCacheLock.unlock()
+            return cached
+        }
+        rowCountCacheLock.unlock()
+
         let font = NSFont.preferredFont(forTextStyle: style)
         let attributed = NSAttributedString(string: trimmed, attributes: [.font: font])
         // 宽度上留 2pt 余量：宁可多算一行把带子留高一点，也不要少算一行把字切掉。
         let bounds = attributed.boundingRect(
-            with: NSSize(width: max(availableWidth - 2, 1), height: .greatestFiniteMagnitude),
+            with: NSSize(width: clampedWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         )
         let line = max(1, lineHeight(for: style))
-        return max(1, Int(ceil(bounds.height / line)))
+        let rows = max(1, Int(ceil(bounds.height / line)))
+
+        rowCountCacheLock.lock()
+        if rowCountCache.count >= 96 {
+            rowCountCache.removeAll(keepingCapacity: true)
+        }
+        rowCountCache[cacheKey] = rows
+        rowCountCacheLock.unlock()
+        return rows
     }
 
     static func visualRowCount(
@@ -258,6 +288,8 @@ public final class CaptionBandWindowController: NSObject {
     private var isApplyingTargetGeometry = false
     /// 最近一次跟踪器真正落下的吸附原点：异步到达的 `windowDidMove` 靠它识别。
     private var lastDockedOrigin: NSPoint?
+    private var shrinkDebounceTask: Task<Void, Never>?
+    private static let shrinkHoldDuration: Duration = .milliseconds(380)
 
     private let onOpenActiveSession: () -> Void
 
@@ -291,6 +323,8 @@ public final class CaptionBandWindowController: NSObject {
     }
 
     public func hide() {
+        shrinkDebounceTask?.cancel()
+        shrinkDebounceTask = nil
         tracker.stopTracking()
         panel?.orderOut(nil)
     }
@@ -436,10 +470,37 @@ public final class CaptionBandWindowController: NSObject {
 
     /// 高度跟内容变，**底边不动**：窗口的 `origin.y` 就是底边的位置，
     /// 所以只要不碰它，长高就是往上长。
+    /// 生长或悬停工具条切换立即生效（0ms，不裁切文字）；仅在窗口可见且内容回缩时做 380ms 防抖，
+    /// 消除句间 partial 清空 → 下一句出字期间窗口顶边“一缩一弹”的跳动。
     private func applyMetrics(_ metrics: CaptionBandMetrics) {
+        let hoverChanged = (self.metrics.isHovering != metrics.isHovering)
+        let fontSizeChanged = (self.metrics.fontSize != metrics.fontSize)
         self.metrics = metrics
         guard let panel else { return }
         let height = CaptionBandMetrics.height(metrics)
+        let currentHeight = panel.frame.height
+        guard abs(currentHeight - height) > 0.5 else {
+            shrinkDebounceTask?.cancel()
+            shrinkDebounceTask = nil
+            return
+        }
+        if height > currentHeight || hoverChanged || fontSizeChanged || !panel.isVisible {
+            shrinkDebounceTask?.cancel()
+            shrinkDebounceTask = nil
+            applyPanelHeight(height, to: panel)
+        } else {
+            shrinkDebounceTask?.cancel()
+            shrinkDebounceTask = Task { @MainActor [weak self, weak panel] in
+                try? await Task.sleep(for: Self.shrinkHoldDuration)
+                guard !Task.isCancelled, let self, let panel else { return }
+                let latestHeight = CaptionBandMetrics.height(self.metrics)
+                guard latestHeight < panel.frame.height - 0.5 else { return }
+                self.applyPanelHeight(latestHeight, to: panel)
+            }
+        }
+    }
+
+    private func applyPanelHeight(_ height: CGFloat, to panel: NSPanel) {
         var frame = panel.frame
         guard abs(frame.height - height) > 0.5 else { return }
         frame.size.height = height
@@ -1476,34 +1537,8 @@ struct CaptionBandView: View {
         return failure
     }
 
-    /// 真实电平，不是自走的动画。形状对着稿的 `levelBars`：**14 根、中间高两端低**，
-    /// 条高**不**跟着电平动——读数靠颜色分辨（已到达 / 未到达），条高一动就变成动画了。
     private var levelBars: some View {
-        let layout = SpeechRailDesignTokens.Layout.self
-        let count = layout.captionBandLevelBarCount
-        let ratio = min(max(session.level, 0), 1)
-        let lit = Int((Double(count) * ratio).rounded())
-        return HStack(alignment: .bottom, spacing: layout.captionBandLevelBarSpacing) {
-            ForEach(0..<count, id: \.self) { index in
-                let shape = count > 1 ? sin(.pi * Double(index) / Double(count - 1)) : 1
-                let height = max(
-                    layout.captionBandLevelBarWidth,
-                    (layout.captionBandLevelBarHeight * (0.35 + 0.65 * shape)).rounded()
-                )
-                RoundedRectangle(
-                    cornerRadius: layout.captionBandLevelBarCornerRadius,
-                    style: .continuous
-                )
-                .fill(
-                    index < lit
-                        ? SpeechRailDesignTokens.Color.rail
-                        : SpeechRailDesignTokens.Color.inkTertiary.opacity(0.3)
-                )
-                .frame(width: layout.captionBandLevelBarWidth, height: height)
-            }
-        }
-        .frame(height: layout.captionBandLevelBarHeight, alignment: .bottom)
-        .accessibilityLabel("输入电平")
+        CaptionBandLevelBarsView(session: session)
     }
 
     /// 受阻：**同一条带子**换成一句话 + 一个出口，最后一句字幕仍然留在上面（可读、可复制）。
@@ -1622,6 +1657,40 @@ struct CaptionBandView: View {
 }
 
 // MARK: - 浮层按钮与胶囊微交互样式
+
+/// 独立子视图承载 14 根输入电平柱，使 `@Observable` 的 `session.level` 高频更新仅重绘电平条自身，
+/// 不触发整个 `CaptionBandView.body` 与 `CaptionBandMetrics` 文本排版重算。
+private struct CaptionBandLevelBarsView: View {
+    let session: CaptionSession
+
+    var body: some View {
+        let layout = SpeechRailDesignTokens.Layout.self
+        let count = layout.captionBandLevelBarCount
+        let ratio = min(max(session.level, 0), 1)
+        let lit = Int((Double(count) * ratio).rounded())
+        HStack(alignment: .bottom, spacing: layout.captionBandLevelBarSpacing) {
+            ForEach(0..<count, id: \.self) { index in
+                let shape = count > 1 ? sin(.pi * Double(index) / Double(count - 1)) : 1
+                let height = max(
+                    layout.captionBandLevelBarWidth,
+                    (layout.captionBandLevelBarHeight * (0.35 + 0.65 * shape)).rounded()
+                )
+                RoundedRectangle(
+                    cornerRadius: layout.captionBandLevelBarCornerRadius,
+                    style: .continuous
+                )
+                .fill(
+                    index < lit
+                        ? SpeechRailDesignTokens.Color.rail
+                        : SpeechRailDesignTokens.Color.inkTertiary.opacity(0.3)
+                )
+                .frame(width: layout.captionBandLevelBarWidth, height: height)
+            }
+        }
+        .frame(height: layout.captionBandLevelBarHeight, alignment: .bottom)
+        .accessibilityLabel("输入电平")
+    }
+}
 
 enum CaptionBandIconButtonRole: Sendable, Equatable {
     case standard
