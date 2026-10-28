@@ -2085,7 +2085,7 @@ public actor LLMProvider {
 
                 // 若服务端接受了当前关闭思考字段（200 OK）但静默忽略（仍输出了 reasoning_content 或 <think>），
                 // 自动切换到下一个关闭思考方言供后续请求直接使用；若本次因思考耗尽预算导致无可见译文，立即重试。
-                let visibleAfterThinkStrip = CaptionTranslationCoordinator.cleanSubtitleOutput(accumulatedContent)
+                let visibleAfterThinkStrip = Self.cleanSubtitleContent(accumulatedContent)
                 if sawReasoningTokens {
                     if currentThinkingMode != nil, modeIndex + 1 < candidateModes.count {
                         modeIndex += 1
@@ -2199,7 +2199,46 @@ public actor LLMProvider {
               let message = first["message"] as? [String: Any],
               let content = message["content"] as? String
         else { return "" }
-        return CaptionTranslationCoordinator.cleanSubtitleOutput(content)
+        return Self.cleanSubtitleContent(content)
+    }
+
+    /// 剥离推理模型可能附带的思考块与引导前缀，确保仅输出简练字幕正文。
+    nonisolated public static func cleanSubtitleContent(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let openRange = text.range(of: "<think>", options: .caseInsensitive) {
+            if let closeRange = text.range(
+                of: "</think>",
+                options: .caseInsensitive,
+                range: openRange.upperBound..<text.endIndex
+            ) {
+                text.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
+                text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                text = String(text[..<openRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                break
+            }
+        }
+        for prefix in [
+            "【当前句（请仅将此句译为简练中文字幕）】",
+            "【当前句】",
+            "【译文】",
+            "译文：",
+            "翻译：",
+            "中文：",
+            "字幕：",
+            "Translation:",
+            "Chinese:"
+        ] {
+            if text.hasPrefix(prefix) {
+                text = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        if (text.hasPrefix("\"") && text.hasSuffix("\"") && text.count >= 2) ||
+           (text.hasPrefix("“") && text.hasSuffix("”") && text.count >= 2) ||
+           (text.hasPrefix("「") && text.hasSuffix("」") && text.count >= 2) {
+            text = String(text.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
     }
 
     /// 一次性补全（内心 OS 与纪要都用它）。`store=false`：不用服务端会话状态。

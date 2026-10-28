@@ -1172,45 +1172,8 @@ public final class CaptionTranslationCoordinator {
     }
 
     nonisolated public static func cleanSubtitleOutput(_ raw: String) -> String {
-        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 剥离推理模型可能附带的 <think>...</think> 思考块；流式未闭合时暂不输出思考内容
-        while let openRange = text.range(of: "<think>", options: .caseInsensitive) {
-            if let closeRange = text.range(
-                of: "</think>",
-                options: .caseInsensitive,
-                range: openRange.upperBound..<text.endIndex
-            ) {
-                text.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
-                text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            } else {
-                text = String(text[..<openRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-                break
-            }
-        }
-        for prefix in [
-            "【当前句（请仅将此句译为简练中文字幕）】",
-            "【当前句】",
-            "【译文】",
-            "译文：",
-            "翻译：",
-            "译文:",
-            "翻译:"
-        ] {
-            if text.hasPrefix(prefix) {
-                text = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-        if text.count >= 2 {
-            let pairs: [(Character, Character)] = [("\"", "\""), ("“", "”"), ("「", "」")]
-            for (openQuote, closeQuote) in pairs where text.first == openQuote && text.last == closeQuote {
-                let inner = String(text.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !inner.isEmpty, !inner.contains(openQuote), !inner.contains(closeQuote) {
-                    text = inner
-                    break
-                }
-            }
-        }
-        return mergeNewlines(text)
+        let cleaned = LLMProvider.cleanSubtitleContent(raw)
+        return mergeNewlines(cleaned)
     }
 
     nonisolated private static func isCJKOrPunctuation(_ character: Character) -> Bool {
