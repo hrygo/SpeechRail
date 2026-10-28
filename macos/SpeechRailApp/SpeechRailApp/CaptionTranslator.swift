@@ -769,7 +769,6 @@ public final class CaptionTranslationCoordinator {
             let isContinuation = trimmed.hasPrefix(lastPartialSourceText)
                 || sharedPrefixCount >= Swift.min(8, Swift.max(4, lastPartialSourceText.count - 3))
             if isContinuation {
-                lastPartialSourceText = trimmed
                 return
             }
         }
