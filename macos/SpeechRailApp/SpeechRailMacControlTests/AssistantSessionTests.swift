@@ -1676,7 +1676,7 @@ final class AssistantSessionTests: XCTestCase {
         let sessionID = try XCTUnwrap(harness.session.sessionID)
         await harness.clients()[0].emit(.configured)
         await harness.clients()[0].emit(.closed(code: 1006))
-        await waitUntil({ harness.session.blocked != nil })
+        await waitUntil({ harness.session.blocked != nil && harness.coordinator.phase == .interrupted })
         XCTAssertEqual(harness.coordinator.phase, .interrupted)
 
         // 这一次重连会失败：麦克风起不来。
@@ -1737,7 +1737,7 @@ final class AssistantSessionTests: XCTestCase {
         XCTAssertTrue(harness.session.isMuted)
 
         await harness.clients()[0].emit(.closed(code: 1006))
-        await waitUntil({ harness.session.blocked != nil }, message: "静音状态下的断线没有被处理")
+        await waitUntil({ harness.session.blocked != nil && harness.coordinator.phase == .interrupted }, message: "静音状态下的断线没有被处理")
 
         XCTAssertEqual(harness.audio.stopCount, 1, "静音状态下的断线也必须释放设备")
         XCTAssertTrue(harness.session.hasActiveConversation, "断线之后这一场还在，只是语音掉了")
@@ -1755,7 +1755,7 @@ final class AssistantSessionTests: XCTestCase {
         await harness.clients()[0].emit(.configured)
         harness.session.toggleMute()
         await harness.clients()[0].emit(.closed(code: 1006))
-        await waitUntil({ harness.session.blocked != nil })
+        await waitUntil({ harness.session.blocked != nil && harness.coordinator.phase == .interrupted })
 
         await harness.session.retry()
         XCTAssertTrue(harness.session.isMuted, "同一场重连必须保留静音")

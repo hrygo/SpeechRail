@@ -156,40 +156,35 @@ public struct ControlCenterView: View {
 
     @ViewBuilder
     private func sessionConfirmationSheet(_ confirmation: SessionCoordinator.Confirmation) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text(confirmation.title)
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-            Text(confirmation.message)
-                .font(SpeechRailDesignTokens.Typography.callout)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .frame(maxWidth: 380, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Button(confirmation.confirmTitle) {
-                    if skipsSwitchConfirmation, confirmation.allowsDoNotAskAgain {
-                        session.rememberDoNotAskAgain()
-                    }
-                    Task { await session.confirmPending() }
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-
-                Button("取消", role: .cancel) {
-                    session.cancelPending()
-                }
-                .keyboardShortcut(.cancelAction)
-
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-
-                if confirmation.allowsDoNotAskAgain {
-                    Toggle("以后不再询问", isOn: $skipsSwitchConfirmation)
-                        .toggleStyle(.checkbox)
-                }
+        SpeechRailSheetScaffold(
+            title: confirmation.title,
+            subtitle: confirmation.message,
+            showsDividers: false,
+            onClose: { session.cancelPending() }
+        ) {
+            if confirmation.allowsDoNotAskAgain {
+                Toggle("以后不再询问", isOn: $skipsSwitchConfirmation)
+                    .toggleStyle(.checkbox)
+                    .font(SpeechRailDesignTokens.Typography.callout)
             }
+        } footer: {
+            Spacer(minLength: 0)
+            Button("取消") {
+                session.cancelPending()
+            }
+            .speechRailButton(.secondary)
+            .keyboardShortcut(.cancelAction)
+
+            Button(confirmation.confirmTitle) {
+                if skipsSwitchConfirmation, confirmation.allowsDoNotAskAgain {
+                    session.rememberDoNotAskAgain()
+                }
+                Task { await session.confirmPending() }
+            }
+            .speechRailButton(.primary)
+            .keyboardShortcut(.defaultAction)
         }
-        .padding(SpeechRailDesignTokens.Spacing.gutter)
-        .frame(minWidth: 440, alignment: .leading)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth, alignment: .leading)
         .onAppear { skipsSwitchConfirmation = false }
     }
 

@@ -39,35 +39,37 @@ struct MinutesReviewView: View {
     /// 补一段用户自己的话。**先说清会发生什么**：另存一版、标成「你补充」、
     /// **不给它安转录来源**——不能当成会上说过的话。
     private var supplementSheet: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text("补充一段说明")
-                .font(.headline)
-            Text("这段会作为「你补充」另存为一版。它没有转录来源，所以不会挂引用——不能当成会上说过的话。")
-                .font(.callout)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+        SpeechRailSheetScaffold(
+            title: "补充一段说明",
+            subtitle: "这段会作为「你补充」另存为一版。它没有转录来源，所以不会挂引用——不能当成会上说过的话。",
+            showsDividers: false,
+            onClose: { supplementSheetPresented = false }
+        ) {
             TextEditor(text: $supplementDraft)
-                .font(.body)
+                .font(SpeechRailDesignTokens.Typography.body)
                 .frame(minHeight: SpeechRailDesignTokens.Layout.personaEditorMinimumHeight)
                 .accessibilityLabel("补充说明正文")
-            HStack {
-                Spacer()
-                Button("取消", role: .cancel) { supplementSheetPresented = false }
-                    .keyboardShortcut(.cancelAction)
-                Button("补充") {
-                    Task { if await model.supplement(supplementDraft) { supplementSheetPresented = false } }
+                .overlay {
+                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                        .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
                 }
-                .disabled(
-                    supplementDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || model.isSaving
-                )
-                .keyboardShortcut(.defaultAction)
+        } footer: {
+            Spacer(minLength: 0)
+            Button("取消") { supplementSheetPresented = false }
+                .speechRailButton(.secondary)
+                .keyboardShortcut(.cancelAction)
+            Button("补充") {
+                Task { if await model.supplement(supplementDraft) { supplementSheetPresented = false } }
             }
+            .speechRailButton(.primary)
+            .disabled(
+                supplementDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || model.isSaving
+            )
+            .keyboardShortcut(.defaultAction)
         }
-        .padding(SpeechRailDesignTokens.Layout.contentPadding)
         .frame(
-            minWidth: SpeechRailDesignTokens.Layout.Sheet.compactWidth,
-            minHeight: SpeechRailDesignTokens.Layout.Sheet.compactMinimumHeight,
+            width: SpeechRailDesignTokens.Layout.Sheet.regularWidth,
             alignment: .leading
         )
     }

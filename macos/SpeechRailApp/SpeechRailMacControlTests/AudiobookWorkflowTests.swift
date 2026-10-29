@@ -3987,4 +3987,91 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertEqual(loudness["true_peak_db"] as? Double, -1.5)
         XCTAssertEqual(loudness["loudness_range"] as? Double, 11)
     }
+
+    func testCompleteUnpromotedChaptersAutoPromoteAndUnverifiedFragmentsCanBeRegenerated() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let (workflow, _) = makeWorkflow(store: store)
+        let imported = try await importBook(
+            into: workflow,
+            fileName: "panghuang_recovery.txt",
+            text: """
+            第一章 示众
+            巡警站在街口。
+
+            第二章 长明灯
+            灯火微弱地摇晃着。
+            """
+        )
+        try await markBookReadyForProduction(imported.bookID, workflow: workflow, store: store)
+        XCTAssertEqual(imported.chapterIDs.count, 2)
+        let firstChapterID = imported.chapterIDs[0]
+        let secondChapterID = imported.chapterIDs[1]
+
+        // 先对两章执行正式制作，再模拟第一章所有片段均已通过核验但章节尚未发布（currentChapterRevisionID == nil），
+        // 第二章存在已落盘但校验未通过（isReceiptVerified == false）的候选。
+        workflow.makeConfirmedChapters(chapterIDs: imported.chapterIDs)
+        await waitForProductionToFinish(workflow)
+
+        // 获取第二章首个候选（模拟瞬时回执未完成导致的校验未通过）
+        let secondChapterCandidates = try await store.candidates(for: imported.bookID)
+            .filter { $0.chapterID == secondChapterID }
+        let targetCandidate = try XCTUnwrap(secondChapterCandidates.first)
+
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(tempRoot.appendingPathComponent("library.sqlite3").path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        XCTAssertEqual(
+            sqlite3_exec(
+                database,
+                """
+                UPDATE chapters SET current_chapter_revision_id = NULL, previous_chapter_revision_id = NULL WHERE book_id = '\(imported.bookID.uuidString)';
+                DELETE FROM chapter_revisions WHERE book_id = '\(imported.bookID.uuidString)';
+                UPDATE render_candidates SET is_receipt_verified = 0 WHERE id = '\(targetCandidate.id.uuidString)';
+                """,
+                nil, nil, nil
+            ),
+            SQLITE_OK
+        )
+
+        // 删除历史章节修订目录
+        let rootURL = await store.rootURL
+        let revisionsDir = rootURL
+            .appendingPathComponent("books", isDirectory: true)
+            .appendingPathComponent(imported.bookID.uuidString, isDirectory: true)
+            .appendingPathComponent("revisions", isDirectory: true)
+        try? FileManager.default.removeItem(at: revisionsDir)
+
+        // 重新打开作品：第一章片段全部已校验通过，应当被自动晋升为「已成片」；第二章包含 1 段尚未就绪
+        await workflow.openBook(imported.bookID)
+        let chaptersAfterOpen = workflow.chapters
+        let firstChapterAfterOpen = try XCTUnwrap(chaptersAfterOpen.first(where: { $0.id == firstChapterID }))
+        let secondChapterAfterOpen = try XCTUnwrap(chaptersAfterOpen.first(where: { $0.id == secondChapterID }))
+
+        XCTAssertNotNil(firstChapterAfterOpen.currentChapterRevisionID, "全部片段已核验通过的章节应在恢复/打开时自动晋升为已成片")
+        XCTAssertEqual(workflow.chapterReadinessByID[firstChapterID], .chapterAudioReady)
+        XCTAssertNil(secondChapterAfterOpen.currentChapterRevisionID)
+        XCTAssertEqual(workflow.resumePlan?.redoFragmentIDs, [targetCandidate.fragmentID])
+
+        // 切换到第二章：即使该章尚未生成正式章节版本，已有保存候选的片段也必须允许单段重录，且可一键预选未就绪片段重新制作
+        workflow.selectedChapterID = secondChapterID
+        for _ in 0..<50 {
+            if !workflow.isLoadingChapterDetails && !workflow.chapterFragments.isEmpty { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(workflow.canRegenerateFragment(targetCandidate.fragmentID), "存在未通过核验候选的未成片章节必须允许单段重录")
+
+        await workflow.prepareRegenerationForRedoFragments()
+        let regenDraft = try XCTUnwrap(workflow.regenerationDraft)
+        XCTAssertEqual(regenDraft.initialFragmentIDs, [targetCandidate.fragmentID])
+
+        workflow.confirmRegeneration(
+            draft: regenDraft,
+            chapterIDs: [secondChapterID],
+            fragmentIDs: [targetCandidate.fragmentID]
+        )
+        await waitForProductionToFinish(workflow)
+
+        let finalChapters = try await store.chapters(for: imported.bookID)
+        XCTAssertTrue(finalChapters.allSatisfy { $0.currentChapterRevisionID != nil }, "修复最后一段未就绪音频后，该章节应自动晋升为已成片")
+    }
 }

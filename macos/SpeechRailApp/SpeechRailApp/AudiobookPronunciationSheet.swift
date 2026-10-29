@@ -18,7 +18,12 @@ struct AudiobookPronunciationSheet: View {
             footer
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .frame(minWidth: 720, idealWidth: 780, minHeight: 460, idealHeight: 560)
+        .frame(
+            minWidth: SpeechRailDesignTokens.Layout.Sheet.prominentWidth,
+            idealWidth: SpeechRailDesignTokens.Layout.Sheet.prominentWidth,
+            minHeight: SpeechRailDesignTokens.Layout.Sheet.formMinimumHeight,
+            idealHeight: SpeechRailDesignTokens.Layout.Sheet.regularHeight
+        )
         .operationFeedback([OperationFeedback(controller.errorMessage, onDismiss: controller.clearError)])
         .confirmationDialog(
             "清除本书的全部发音规则？",
@@ -35,22 +40,15 @@ struct AudiobookPronunciationSheet: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("发音规则")
-                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                Text("按书生效")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                Spacer()
-                if controller.isLoading {
-                    ProgressView().controlSize(.small)
-                }
+        SpeechRailSheetHeader(
+            title: "发音规则",
+            badge: "按书生效",
+            subtitle: "用于多音字、人名地名、英文缩写等需要固定读法的词。规则只影响之后重新制作的片段；已采用的音频不会被自动改写。",
+            onClose: onDismiss
+        ) {
+            if controller.isLoading {
+                ProgressView().controlSize(.small)
             }
-            Text("用于多音字、人名地名、英文缩写等需要固定读法的词。规则只影响之后重新制作的片段；已采用的音频不会被自动改写。")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

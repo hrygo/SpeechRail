@@ -245,8 +245,6 @@ public struct AssistantView: View {
             reviewLoad.reset()
         }
         .sheet(isPresented: $isCreatingPersona) { personaSheet }
-        .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
-        .sheet(isPresented: $isShowingConfigHelp) { configurationHelpSheet }
         .sheet(isPresented: $isRenamingRecord) { renameRecordSheet }
         .operationFeedback([
             OperationFeedback(isRenamingRecord ? nil : recordOperationError, onDismiss: { recordOperationError = nil }),
@@ -501,6 +499,9 @@ public struct AssistantView: View {
                 // 想去设置页的人（那里有「检查连接」）仍有一条安静的路。
                 Button("了解如何配置") { isShowingConfigHelp = true }
                     .speechRailButton(.secondary)
+                    .popover(isPresented: $isShowingConfigHelp, arrowEdge: .bottom) {
+                        configurationHelpSheet
+                    }
                 Button("去设置里填") { openSettings() }
                     .speechRailButton(.quiet)
             case .llmUnreachable:
@@ -3030,6 +3031,9 @@ public struct AssistantView: View {
                     Button("检查麦克风音量…") { isCheckingInput = true }
                         .speechRailButton(.secondary)
                         .help("查看当前麦克风的实时音量反应")
+                        .popover(isPresented: $isCheckingInput, arrowEdge: .top) {
+                            InputLevelSheet()
+                        }
                 } else if state == .blocked {
                     Button("检查连接") { Task { await assistant.retry() } }
                         .speechRailButton(.secondary)
@@ -4390,34 +4394,16 @@ public struct AssistantView: View {
     }
 
     private var renameRecordSheet: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text("给这一条记录起个名字")
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-            Text("只在记录库里显示。留空就把名字去掉，回到按时间认它。")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            TextField("名字", text: $renameDraft)
-                .textFieldStyle(.plain)
-                .speechRailSingleLineInput(.regular)
-                .accessibilityLabel("记录名称")
-                .onSubmit { Task { await renameReviewedRecord() } }
-            HStack {
-                Spacer(minLength: 0)
-                Button("取消") { isRenamingRecord = false }
-                    .speechRailButton(.secondary)
-                    .keyboardShortcut(.cancelAction)
-                Button("保存") { Task { await renameReviewedRecord() } }
-                    .speechRailButton(.primary)
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(SpeechRailDesignTokens.Layout.cardInset)
-        .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth)
-        .onKeyPress(.escape) {
-            isRenamingRecord = false
-            return .handled
-        }
+        SpeechRailQuickInputSheet(
+            title: "给这一条记录起个名字",
+            subtitle: "只在记录库里显示。留空就把名字去掉，回到按时间认它。",
+            placeholder: "名字",
+            text: $renameDraft,
+            confirmTitle: "保存",
+            allowsEmpty: true,
+            onCancel: { isRenamingRecord = false },
+            onConfirm: { Task { await renameReviewedRecord() } }
+        )
         .operationFeedback([
             OperationFeedback(recordOperationError, onDismiss: { recordOperationError = nil })
         ])
@@ -4439,47 +4425,46 @@ public struct AssistantView: View {
         memories = (try? await session.memories(activeOnly: false)) ?? []
     }
 
-    // MARK: - 两个 sheet
+    // MARK: - 角色弹层与配置帮助 Popover
 
     private var personaSheet: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("新建自定义角色")
-                .font(SpeechRailDesignTokens.Typography.display)
-            Text("角色是它开口前读的第一段话：写清「怎么答」，不用写「知道什么」（那是记忆的事）。")
-                .font(SpeechRailDesignTokens.Typography.callout)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            TextField("名字（列表里显示这一行）", text: $personaDraft.title)
-                .textFieldStyle(.plain)
-                .speechRailSingleLineInput(.regular)
-                .accessibilityLabel("角色名称")
-            TextEditor(text: $personaDraft.body)
-                .font(SpeechRailDesignTokens.Typography.body)
-                .frame(minHeight: SpeechRailDesignTokens.Layout.personaEditorMinimumHeight)
-                .accessibilityLabel("角色设定正文")
-                .overlay {
-                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                        .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-                }
-            HStack {
-                Spacer(minLength: 0)
-                Button("取消") { isCreatingPersona = false }
-                    .speechRailButton(.secondary)
-                    .keyboardShortcut(.cancelAction)
-                Button("保存") {
-                    if preferences.addPersona(title: personaDraft.title, body: personaDraft.body) != nil {
-                        isCreatingPersona = false
+        SpeechRailSheetScaffold(
+            title: "新建自定义角色",
+            subtitle: "角色是它开口前读的第一段话：写清「怎么答」，不用写「知道什么」（那是记忆的事）。",
+            showsDividers: false,
+            onClose: { isCreatingPersona = false }
+        ) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                TextField("名字（列表里显示这一行）", text: $personaDraft.title)
+                    .textFieldStyle(.plain)
+                    .speechRailSingleLineInput(.regular)
+                    .accessibilityLabel("角色名称")
+                TextEditor(text: $personaDraft.body)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .frame(minHeight: SpeechRailDesignTokens.Layout.personaEditorMinimumHeight)
+                    .accessibilityLabel("角色设定正文")
+                    .overlay {
+                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                            .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
                     }
-                }
-                .speechRailButton(.primary)
-                .keyboardShortcut(.defaultAction)
-                .disabled(
-                    personaDraft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || personaDraft.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
             }
+        } footer: {
+            Spacer(minLength: 0)
+            Button("取消") { isCreatingPersona = false }
+                .speechRailButton(.secondary)
+                .keyboardShortcut(.cancelAction)
+            Button("保存") {
+                if preferences.addPersona(title: personaDraft.title, body: personaDraft.body) != nil {
+                    isCreatingPersona = false
+                }
+            }
+            .speechRailButton(.primary)
+            .keyboardShortcut(.defaultAction)
+            .disabled(
+                personaDraft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || personaDraft.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
         }
-        .padding(SpeechRailDesignTokens.Layout.cardInset)
         .frame(width: SpeechRailDesignTokens.Layout.Sheet.formWidth)
         .onKeyPress(.escape) {
             isCreatingPersona = false
@@ -4488,9 +4473,12 @@ public struct AssistantView: View {
     }
 
     private var configurationHelpSheet: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("怎么配对话模型")
-                .font(SpeechRailDesignTokens.Typography.display)
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SpeechRailSheetHeader(
+                title: "怎么配对话模型",
+                isCompact: true,
+                onClose: { isShowingConfigHelp = false }
+            )
             Text(
                 """
                 1. 打开「设置 · 会话」，填服务地址与模型名。
@@ -4504,13 +4492,18 @@ public struct AssistantView: View {
             .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer(minLength: 0)
+                Button("去设置里填") {
+                    isShowingConfigHelp = false
+                    openSettings()
+                }
+                .speechRailButton(.secondary)
                 Button("关闭") { isShowingConfigHelp = false }
                     .speechRailButton(.primary)
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(SpeechRailDesignTokens.Layout.cardInset)
-        .frame(width: SpeechRailDesignTokens.Layout.Sheet.formWidth)
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.popoverUtilityWidth)
         .onKeyPress(.escape) {
             isShowingConfigHelp = false
             return .handled
@@ -4580,13 +4573,13 @@ struct InputLevelSheet: View {
     @State private var task: Task<Void, Never>?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("检查输入电平")
-                .font(SpeechRailDesignTokens.Typography.display)
-            Text("对着麦克风说一句话。看完这一眼就关掉，它不会录音、也不留文件。")
-                .font(SpeechRailDesignTokens.Typography.callout)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SpeechRailSheetHeader(
+                title: "检查输入电平",
+                subtitle: "对着麦克风说一句话。看完这一眼就关掉，它不会录音、也不留文件。",
+                isCompact: true,
+                onClose: { dismiss() }
+            )
 
             if let failure {
                 Text(failure)
@@ -4608,6 +4601,7 @@ struct InputLevelSheet: View {
                     }
                 }
                 .frame(height: SpeechRailDesignTokens.Layout.inputLevelMeterHeight)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                 .accessibilityLabel("输入电平")
                 .accessibilityValue(SpeechRailDisplayFormat.percentage(Double(level)))
             }
@@ -4619,8 +4613,8 @@ struct InputLevelSheet: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(SpeechRailDesignTokens.Layout.cardInset)
-        .frame(width: SpeechRailDesignTokens.Layout.Sheet.regularWidth)
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.popoverUtilityWidth)
         .onKeyPress(.escape) {
             dismiss()
             return .handled

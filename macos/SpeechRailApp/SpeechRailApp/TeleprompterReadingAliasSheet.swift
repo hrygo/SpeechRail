@@ -62,31 +62,11 @@ public struct TeleprompterReadingAliasSheet: View {
     // MARK: - 头部说明
 
     private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text("读法标注")
-                    .font(SpeechRailDesignTokens.Typography.display)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-
-                Text("有些词识别器会稳定听错。登记你实际会念的说法，跟读时按它匹配，屏幕上的正文不变。")
-                    .font(SpeechRailDesignTokens.Typography.callout)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            }
-            Spacer()
-            Button {
-                dismiss()
-            } label: {
-                SpeechRailButtonIcon(.close, size: SpeechRailDesignTokens.Icon.buttonIconSize)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .frame(
-                        width: SpeechRailDesignTokens.Control.iconButtonSize,
-                        height: SpeechRailDesignTokens.Control.iconButtonSize
-                    )
-            }
-            .buttonStyle(.plain)
-            .speechRailPointerCursor()
-            .accessibilityLabel("关闭")
-        }
+        SpeechRailSheetHeader(
+            title: "读法标注",
+            subtitle: "有些词识别器会稳定听错。登记你实际会念的说法，跟读时按它匹配，屏幕上的正文不变。",
+            onClose: { dismiss() }
+        )
     }
 
     // MARK: - 段落选择

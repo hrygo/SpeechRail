@@ -293,11 +293,14 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 全 App 的操作成功、操作失败、导入导出结果、复制与保存回执使用 `OperationFeedback`，挂载到操作所属页面、Sheet、Popover 或独立舞台的完整宿主，通过 `View.operationFeedback(_:)` 呈现。反馈不参与主布局，不占列表行或正文空间；正文准备入口、任务进度、权限/能力门禁、业务结果与数据报告保留在正文。读取失败可保留简短不可用状态与常驻重试，具体错误通过浮层展示，不得将读取失败显示为“没有数据”。需要用户输入、授权或决定替换/删除的确认流程继续使用原生确认控件。
 
-常规宿主在顶部居中覆盖展示，复用 `Layout.Sheet.formWidth`、`Layout.Sheet.messageBodyMaximumHeight` 与 `.elevated` 表面。长正文独立滚动，关闭和重试/撤销等动作位于滚动区外；宿主高度不足正文上限时使用原生 Popover 承载（例如字幕带和收起的会中抽屉），不扩大宿主窗口或挤压正文。浮层没有整页遮罩，空白区域不设置命中背景或手势；错误建立关闭按钮焦点，Escape 收起当前反馈，不取消后台任务或修改业务数据。真实窗口焦点、点击与滚动验收须单独记录，离屏尺寸检查不等同于完整交互验收。
+`OperationFeedback` 按任务场景分为三档形态（`OperationFeedbackPresentation`）：
+1. **瞬态微胶囊 (`.hud`)**：用于已复制、已保存、已导出等无需后续动作的轻量回执（`Typography.hudIcon` / `hudTitle` / `hudMessage` + `Notice.transientDisplayDuration` 3.5 秒），不抢夺键盘焦点，指针悬停时自动暂停消失计时。
+2. **可交互浮动通知条 (`.snackbar`)**：用于带「撤销」「查看」等内联动作或非阻塞的操作摘要（如「已移入废纸篓 · 撤销」「作品操作结果」「音色创建结果」），最大宽度 `Layout.Sheet.snackbarMaximumWidth`（480pt），默认按 `Notice.actionableDisplayDuration`（5.5 秒）展示并支持悬停暂停，**不强制抢夺当前编辑区焦点**。
+3. **持久诊断与恢复告警卡 (`.alertCard`)**：专用于 `.critical` 错误或需要用户阅读长详情并确认/重试的阻塞性异常。常规宿主在顶部居中覆盖展示，复用 `Layout.Sheet.compactWidth`、`Layout.Sheet.messageBodyMaximumHeight` 与 `.elevated` 表面。长正文独立滚动，关闭和重试等动作位于滚动区外；宿主高度不足正文上限时使用原生 Popover 承载（例如字幕带和收起的会中抽屉），不扩大宿主窗口或挤压正文。错误卡自动为「知道了」建立焦点，Escape 一键收起当前反馈。真实窗口焦点、点击与滚动验收须单独记录，离屏尺寸检查不等同于完整交互验收。
 
-错误优先于普通结果，其余按调用方数组顺序逐条呈现。错误持续显示到手动关闭，成功是否按 `Notice.transientDisplayDuration`（4 秒）自动收起由调用处显式声明，不按文案关键词判断；带恢复动作的反馈由调用方选择持续显示。关闭只清除对应回执，先关闭旧回执再执行重试/撤销，避免把新失败一起清除。相同文案的新操作应提供新的 occurrence ID，以重新启动计时；自动关闭任务同时绑定事件 ID 与自动关闭语义，离开宿主或转为持续错误时取消旧任务。只读来源允许由宿主记住当前已关闭 ID，来源消失或宿主销毁时释放本地记忆。
+错误优先于普通结果，其余按调用方数组顺序逐条呈现。`.critical` 错误始终持续显示到手动关闭；`.neutral` 操作回执与摘要默认自动收起。关闭只清除对应回执，先关闭旧回执再执行重试/撤销，避免把新失败一起清除。相同文案的新操作应提供新的 occurrence ID，以重新启动计时；自动关闭任务同时绑定事件 ID、自动关闭语义与悬停状态，离开宿主或转为持续错误时取消旧任务。只读来源允许由宿主记住当前已关闭 ID，来源消失或宿主销毁时释放本地记忆。
 
-每个组件只实现适用的 default、hover、pressed、focus、disabled、selected、busy、error 状态。设置内联编辑的 `.small` 原生按钮、字幕带和提词舞台的紧凑控件保留各自空间合同，不强制套主窗口的高度。所有自定义动效遵守 Reduce Motion；系统强调色、Increase Contrast 和 Reduce Transparency 优先由原生控件与语义色处理。页面新增产品视觉数值时，先写入 `SpeechRailDesignTokens.swift`，再更新本文（例如 2026-10-17 提词器流线型减负新增 `Teleprompter.preparedBlockCompactMinHeight = 52`、`workbenchStageSettingsPopoverWidth = 320` 与 `privacyDisclosurePopoverWidth = 360`；2026-10-20 会议助手与会中私聊布局优化新增 `Layout.meetingSourceOptionsMaxHeight = 220`、`Layout.innerOSDraftAccentBarWidth = 3`，并将 `innerOSDrawerExpandedHeight` 与 `innerOSHistoryColumnWidth` 校准为 `240` 与 `236`）。
+每个组件只实现适用的 default、hover、pressed、focus、disabled、selected、busy、error 状态。设置内联编辑的 `.small` 原生按钮、字幕带和提词舞台的紧凑控件保留各自空间合同，不强制套主窗口的高度。所有自定义动效遵守 Reduce Motion；系统强调色、Increase Contrast 和 Reduce Transparency 优先由原生控件与语义色处理。页面新增产品视觉数值时，先写入 `SpeechRailDesignTokens.swift`，再更新本文（例如 2026-10-17 提词器流线型减负新增 `Teleprompter.preparedBlockCompactMinHeight = 52`、`workbenchStageSettingsPopoverWidth = 320` 与 `privacyDisclosurePopoverWidth = 360`；2026-10-20 会议助手与会中私聊布局优化新增 `Layout.meetingSourceOptionsMaxHeight = 220`、`Layout.innerOSDraftAccentBarWidth = 3`，并将 `innerOSDrawerExpandedHeight` 与 `innerOSHistoryColumnWidth` 校准为 `240` 与 `236`；2026-10-28 弹窗与浮层反馈分级治理新增 `Layout.Sheet.quickPromptWidth = 380`、`popoverUtilityWidth = 380`、`popoverUtilityMaxHeight = 380`、`snackbarMaximumWidth = 480`、`Typography.sheetTitle`、`Typography.hudIcon/hudTitle/hudMessage/hudAction` 与 `Notice.actionableDisplayDuration = 5.5s`）。
 
 ### 3.2.3 列表选择与读取反馈
 
@@ -331,7 +334,21 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 [Improving app responsiveness](https://developer.apple.com/documentation/xcode/improving-app-responsiveness)
 要求主线程只承担 UI 更新，其他工作异步执行；不能靠延迟高亮或增加动画掩盖阻塞。
 
-### 3.2.4 浮层边界、滚动与键盘退出
+### 3.2.4 浮层选型、边界、滚动与键盘退出
+
+按用户任务复杂度与是否依赖底层上下文，全 App 的弹窗与浮层统一归入四类交互形态：
+
+1. **上下文锚定 Popover (`.popover` / `Layout.Sheet.popoverUtilityWidth = 380pt`)**：
+   - 适用场景：微工具、短说明、或**必须边看底层工作台边操作**的轻量面板（如「检查输入电平」`InputLevelSheet`、「怎么配对话模型」`configurationHelpSheet`、会议与实时字幕中的「标注说话人」`SpeakerLabelingSheet`、音色选择 `AudiobookVoicePickerPopover`、提词舞台设置 `TeleprompterStageAppearancePopover`）。
+   - 禁止对此类不阻断主流程的微工具或需要对照实时转录的面板使用居中模态 `.sheet` 遮挡整个窗口。
+2. **统一单字段快速输入弹层 (`SpeechRailQuickInputSheet` / `Layout.Sheet.quickPromptWidth = 380pt`)**：
+   - 适用场景：单字段重命名、新建项目或标签编辑（如作品重命名、助手记录重命名、有声书章节重命名、会议知识库新建/重命名项目与编辑标签）。
+   - 打开即自动聚焦输入框（`@FocusState`），支持 `Return` 提交、`Escape` 取消，统一使用 `.speechRailSingleLineInput(.regular)`，不再混用系统 `.alert` 嵌 `TextField` 或散落手写小 Sheet。
+3. **标准模态工作单 (`SpeechRailSheetScaffold` + `SpeechRailSheetHeader`)**：
+   - 适用场景：多字段表单、核对清单、导入导出预检与重型返修工作台（宽度按 `compactWidth 420` / `regularWidth 460` / `formWidth 520` / `wideWidth 560` / `prominentWidth 720` 分档）。
+   - 统一使用 `SpeechRailSheetHeader`（标题 `Typography.sheetTitle` + 可选徽章 + 副标题 + 右上角关闭按钮）与底部固定动作栏（`.speechRailButton(.secondary)` / `.speechRailButton(.primary)`），不在 Sheet 内部嵌套 `NavigationStack` 制造双层窗口工具栏。
+4. **破坏性操作与状态确认 (`.confirmationDialog`)**：
+   - 适用场景：删除作品、删除音色、删除稿件、清除全部规则、结束会话等无需文本输入的二元决策，统一使用 `.confirmationDialog(..., titleVisibility: .visible)` 并标明 `.destructive` 与 `.cancel` 角色。唯一的同步 `NSAlert` 例外是紧随 `NSOpenPanel` / `NSSavePanel` 之后的路径覆盖确认。
 
 Popover、Sheet 与 Inspector 中的角色列表、分析依据、错误详情和批量结果都可能持续增长。
 内容增长不得撑出可用窗口、遮挡退出入口，或让界面失去可操作性。

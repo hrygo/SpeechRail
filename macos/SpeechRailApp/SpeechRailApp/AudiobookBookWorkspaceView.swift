@@ -252,15 +252,20 @@ public struct AudiobookBookWorkspaceView: View {
                         workflow.isPronunciationSheetPresented = false
                     }
                 } else {
-                    VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Text("发音规则暂不可用")
-                            .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                        Text("作品存储或语音服务尚未就绪，请稍后重试。")
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    SpeechRailSheetScaffold(
+                        title: "发音规则暂不可用",
+                        subtitle: "作品存储或语音服务尚未就绪，请稍后重试。",
+                        showsDividers: false,
+                        onClose: { workflow.isPronunciationSheetPresented = false }
+                    ) {
+                        EmptyView()
+                    } footer: {
+                        Spacer(minLength: 0)
                         Button("关闭") { workflow.isPronunciationSheetPresented = false }
-                            .speechRailButton(.secondary)
+                            .speechRailButton(.primary)
+                            .keyboardShortcut(.defaultAction)
                     }
-                    .padding(SpeechRailDesignTokens.Spacing.xl)
+                    .frame(width: SpeechRailDesignTokens.Layout.Sheet.quickPromptWidth)
                 }
             }
             .onChange(of: workflow.selectedBook?.id) { _, selectedBookID in
@@ -805,49 +810,29 @@ public struct AudiobookBookWorkspaceView: View {
     }
 
     private func chapterRenameSheet(for target: AudiobookChapterRenameTarget) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("重命名章节")
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-
-            Text("只更改「\(target.title)」的章节名称，原文、分析记录和已有音频都会保留。")
-                .font(SpeechRailDesignTokens.Typography.body)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-
-            TextField("章节名称", text: $chapterRenameDraft)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier("audiobook-chapter-rename-field")
-
-            HStack {
-                Spacer()
-                Button("取消") {
+        SpeechRailQuickInputSheet(
+            title: "重命名章节",
+            subtitle: "只更改「\(target.title)」的章节名称，原文、分析记录和已有音频都会保留。",
+            placeholder: "章节名称",
+            text: $chapterRenameDraft,
+            confirmTitle: "保存",
+            isConfirmDisabled: target.bookID != workflow.selectedBook?.id || !workflow.canRenameSelectedChapter,
+            fieldAccessibilityIdentifier: "audiobook-chapter-rename-field",
+            confirmAccessibilityIdentifier: "audiobook-chapter-rename-save",
+            onCancel: {
+                chapterRenameTarget = nil
+            },
+            onConfirm: {
+                guard target.bookID == workflow.selectedBook?.id else {
                     chapterRenameTarget = nil
+                    return
                 }
-                .speechRailButton(.secondary)
-                .keyboardShortcut(.cancelAction)
-
-                Button("保存") {
-                    guard target.bookID == workflow.selectedBook?.id else {
-                        chapterRenameTarget = nil
-                        return
-                    }
-                    let chapterID = target.chapterID
-                    let title = chapterRenameDraft
-                    chapterRenameTarget = nil
-                    Task { await workflow.renameChapter(chapterID: chapterID, title: title, expectedTitle: target.title) }
-                }
-                .speechRailButton(.primary)
-                .keyboardShortcut(.defaultAction)
-                .disabled(
-                    target.bookID != workflow.selectedBook?.id
-                        || !workflow.canRenameSelectedChapter
-                        || chapterRenameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
-                .accessibilityIdentifier("audiobook-chapter-rename-save")
+                let chapterID = target.chapterID
+                let title = chapterRenameDraft
+                chapterRenameTarget = nil
+                Task { await workflow.renameChapter(chapterID: chapterID, title: title, expectedTitle: target.title) }
             }
-        }
-        .padding(SpeechRailDesignTokens.Spacing.md)
-        .frame(minWidth: SpeechRailDesignTokens.Layout.Sheet.compactWidth)
+        )
     }
 
     // MARK: - Center Column: Shared Preparation / Production Canvas
@@ -1306,7 +1291,15 @@ public struct AudiobookBookWorkspaceView: View {
                         Text("此处为全书统计，包含缺失、待更新或校验未通过的音频。只补缺失会保留已有音频。")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .lineLimit(1)
                         Spacer()
+                        Button("重新制作未就绪（\(plan.redoFragmentIDs.count) 段）…", systemImage: "arrow.clockwise") {
+                            Task { await workflow.prepareRegenerationForRedoFragments() }
+                        }
+                        .speechRailButton(.secondary)
+                        .disabled(workflow.isProductionBusy || workflow.isPreparingRegeneration
+                            || workflow.isAnalyzing || workflow.isEditingChapterLayout)
+                        .accessibilityIdentifier("audiobook-regenerate-redo-fragments")
                     }
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                     .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
@@ -1395,7 +1388,9 @@ public struct AudiobookBookWorkspaceView: View {
                             }
                             .disabled(workflow.isProductionBusy || workflow.isPreparingRegeneration
                                 || workflow.isAnalyzing || workflow.isEditingChapterLayout
-                                || !workflow.chapters.contains { !$0.isSkipped && $0.currentChapterRevisionID != nil })
+                                || (!workflow.chapters.contains { !$0.isSkipped && $0.currentChapterRevisionID != nil }
+                                    && (workflow.resumePlan?.redoFragmentIDs.isEmpty ?? true)
+                                    && workflow.chapterCandidates.isEmpty))
                             Button("回退本章上一版本", systemImage: "arrow.uturn.backward") {
                                 Task { await workflow.undoChapterAdoption() }
                             }
@@ -3140,8 +3135,11 @@ private struct AudiobookProductionEmptySheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text(plan.intent == .missingOnly ? "没有缺失音频" : "没有待更新音频")
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+            SpeechRailSheetHeader(
+                title: plan.intent == .missingOnly ? "没有缺失音频" : "没有待更新音频",
+                isCompact: true,
+                onClose: { dismiss() }
+            )
             ScrollView {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                     if plan.preservedAudioCount > 0 {
@@ -3171,6 +3169,16 @@ private struct AudiobookProductionEmptySheet: View {
                     .speechRailButton(.secondary)
                     .disabled(workflow.isPreparingProduction || workflow.isProductionBusy || workflow.isAnalyzing || workflow.isEditingChapterLayout)
                     .accessibilityIdentifier("audiobook-production-view-outdated")
+
+                    Button("重新制作未就绪片段…") {
+                        Task { @MainActor in
+                            workflow.productionDraft = nil
+                            await workflow.prepareRegenerationForRedoFragments()
+                        }
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(workflow.isPreparingProduction || workflow.isPreparingRegeneration || workflow.isProductionBusy || workflow.isAnalyzing || workflow.isEditingChapterLayout)
+                    .accessibilityIdentifier("audiobook-production-regenerate-outdated")
                 }
                 Spacer()
                 Button("完成") { dismiss() }
@@ -3244,9 +3252,14 @@ private struct AudiobookRegenerationSheet: View {
 
     private var targetChapterIDs: Set<UUID> {
         switch scope {
-        case .fragments, .currentChapter: [draft.defaultChapterID]
-        case .chapters: chapterIDs
-        case .wholeBook: Set(draft.chapters.map(\.id))
+        case .fragments:
+            let matched = Set(draft.chapters.map(\.id).filter { chID in
+                draft.fragmentsByChapter[chID, default: []].contains { fragmentIDs.contains($0.id) }
+            })
+            return matched.isEmpty ? [draft.defaultChapterID] : matched
+        case .currentChapter: return [draft.defaultChapterID]
+        case .chapters: return chapterIDs
+        case .wholeBook: return Set(draft.chapters.map(\.id))
         }
     }
 
@@ -3333,8 +3346,17 @@ private struct AudiobookRegenerationSheet: View {
         case .chapters:
             ForEach(draft.chapters) { chapter in chapterChoice(chapter) }
         case .fragments:
-            ForEach(Array(draft.fragmentsByChapter[draft.defaultChapterID, default: []].enumerated()), id: \.element.id) { entry in
-                fragmentChoice(index: entry.offset, fragment: entry.element)
+            let displayedChapters = draft.chapters.filter { targetChapterIDs.contains($0.id) || $0.id == draft.defaultChapterID }
+            ForEach(displayedChapters) { chapter in
+                if displayedChapters.count > 1 {
+                    Text(chapter.title)
+                        .font(SpeechRailDesignTokens.Typography.caption.weight(.semibold))
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                }
+                ForEach(Array(draft.fragmentsByChapter[chapter.id, default: []].enumerated()), id: \.element.id) { entry in
+                    fragmentChoice(index: entry.offset, fragment: entry.element)
+                }
             }
         case .currentChapter:
             Text(draft.chapters.first { $0.id == draft.defaultChapterID }?.title ?? "当前章节")

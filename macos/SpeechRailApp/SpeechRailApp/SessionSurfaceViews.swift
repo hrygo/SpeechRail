@@ -852,6 +852,17 @@ public struct SessionLibraryView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .help("实时改名、合并或标记当前字幕会话中的说话人")
+                    .popover(isPresented: $showsLiveSpeakerSheet, arrowEdge: .bottom) {
+                        SpeakerLabelingSheet(
+                            labeling: caption.labeling,
+                            sessionID: caption.sessionID ?? selectedID,
+                            transcriptRevision: UInt64(lines.count),
+                            onClose: {
+                                showsLiveSpeakerSheet = false
+                                Task { await loadLines() }
+                            }
+                        )
+                    }
                 }
 
                 // 5. 运行态快捷控制（暂停/继续、结束）
@@ -1612,17 +1623,6 @@ public struct SessionLibraryView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .sheet(isPresented: $showsLiveSpeakerSheet) {
-            SpeakerLabelingSheet(
-                labeling: caption.labeling,
-                sessionID: caption.sessionID ?? selectedID,
-                transcriptRevision: UInt64(lines.count),
-                onClose: {
-                    showsLiveSpeakerSheet = false
-                    Task { await loadLines() }
-                }
-            )
-        }
     }
 
     /// 当前记录是否启用或包含说话人区分（决定是否展示说话人胶囊、左列占位与标注菜单）。

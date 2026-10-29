@@ -3915,33 +3915,20 @@ public struct WorksView: View {
     }
 
     private var renameSheet: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-            SectionHeading(
-                title: "重命名作品",
-                detail: "只修改显示名称；音频文件按标识命名，不会被移动或重写。"
-            )
-            TextField("作品名称", text: $renameText)
-                .textFieldStyle(.plain)
-                .speechRailSingleLineInput(.regular)
-                .accessibilityLabel("作品名称")
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Spacer(minLength: 0)
-                Button("取消") {
-                    renamingWork = nil
-                    isRenaming = false
-                }
-                .speechRailButton(.secondary)
-                .keyboardShortcut(.cancelAction)
-                Button("重命名") {
-                    commitRename()
-                }
-                .speechRailButton(.primary)
-                .keyboardShortcut(.defaultAction)
-                .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        SpeechRailQuickInputSheet(
+            title: "重命名作品",
+            subtitle: "只修改显示名称；音频文件按标识命名，不会被移动或重写。",
+            placeholder: "作品名称",
+            text: $renameText,
+            confirmTitle: "重命名",
+            onCancel: {
+                renamingWork = nil
+                isRenaming = false
+            },
+            onConfirm: {
+                commitRename()
             }
-        }
-        .padding(SpeechRailDesignTokens.Spacing.lg)
-        .frame(width: SpeechRailDesignTokens.Layout.Sheet.compactWidth, alignment: .leading)
+        )
         .operationFeedback([
             OperationFeedback(renameErrorMessage, title: "作品重命名未完成",
                               onDismiss: { renameErrorMessage = nil })

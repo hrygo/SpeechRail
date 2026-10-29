@@ -455,58 +455,61 @@ public struct SettingsView: View {
     /// 这一步只做了核对，库还没换，说成功就是撒谎。
     private func restoreReportSheet(_ report: RestoreReport) -> some View {
         let preview = report.preview
-        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text("这份备份核对结果")
-                .font(.headline)
-            Text("「\(report.bundleName)」· 备份来自 schema \(preview.sourceSchemaVersion)，当前库是 \(SessionStore.schemaVersion)。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                restoreFact("会议文档", preview.documentsReadable)
-                restoreFact("纪要版本", preview.versionsReadable)
-                restoreFact("行动项", preview.actionsReadable)
-                restoreFact("带原句的引用", preview.anchorsWithQuote)
-                restoreFact("采集会话", preview.restoredCounts.sessions)
-                restoreFact("转录行", preview.restoredCounts.lines)
-                HStack(alignment: .firstTextBaseline) {
-                    Text("引用完整性").font(.callout).foregroundStyle(.secondary)
-                    Spacer()
-                    Text(
-                        preview.references.isClean
-                            ? "通过"
-                            : "\(preview.references.problems.count) 处问题"
-                    )
-                    .font(.callout)
-                }
-            }
-
-            if !preview.problems.isEmpty {
+        return SpeechRailSheetScaffold(
+            title: "这份备份核对结果",
+            subtitle: "「\(report.bundleName)」· 备份来自 schema \(preview.sourceSchemaVersion)，当前库是 \(SessionStore.schemaVersion)。",
+            onClose: { restoreReport = nil }
+        ) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Text("发现的问题").font(.callout).fontWeight(.medium)
-                    ForEach(preview.problems, id: \.self) { problem in
-                        Text("· \(problem)").font(.caption).foregroundStyle(.secondary)
+                    restoreFact("会议文档", preview.documentsReadable)
+                    restoreFact("纪要版本", preview.versionsReadable)
+                    restoreFact("行动项", preview.actionsReadable)
+                    restoreFact("带原句的引用", preview.anchorsWithQuote)
+                    restoreFact("采集会话", preview.restoredCounts.sessions)
+                    restoreFact("转录行", preview.restoredCounts.lines)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("引用完整性")
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        Spacer()
+                        Text(
+                            preview.references.isClean
+                                ? "通过"
+                                : "\(preview.references.problems.count) 处问题"
+                        )
+                        .font(SpeechRailDesignTokens.Typography.callout)
                     }
                 }
-            }
 
-            Text(
-                preview.isRestorable
-                    ? "这份备份的内容是完整的。当前库没有被改动——真正切换需要你另行决定。"
-                    : "这份备份**不能**用来恢复：上面的问题没有解决之前，换库会丢东西。"
-            )
-            .font(.callout)
-            .foregroundStyle(preview.isRestorable ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.attention)
-            .fixedSize(horizontal: false, vertical: true)
+                if !preview.problems.isEmpty {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text("发现的问题")
+                            .font(SpeechRailDesignTokens.Typography.label)
+                        ForEach(preview.problems, id: \.self) { problem in
+                            Text("· \(problem)")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+                    }
+                }
 
-            HStack {
-                Spacer()
-                Button("好") { restoreReport = nil }
-                    .keyboardShortcut(.defaultAction)
+                Text(
+                    preview.isRestorable
+                        ? "这份备份的内容是完整的。当前库没有被改动——真正切换需要你另行决定。"
+                        : "这份备份**不能**用来恢复：上面的问题没有解决之前，换库会丢东西。"
+                )
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(preview.isRestorable ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.attention)
+                .fixedSize(horizontal: false, vertical: true)
             }
+        } footer: {
+            Spacer(minLength: 0)
+            Button("好") { restoreReport = nil }
+                .speechRailButton(.primary)
+                .keyboardShortcut(.defaultAction)
         }
-        .padding(SpeechRailDesignTokens.Layout.contentPadding)
-        .frame(minWidth: SpeechRailDesignTokens.Layout.Sheet.compactWidth, alignment: .leading)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.regularWidth, alignment: .leading)
     }
 
     private func restoreFact(_ label: String, _ value: Int) -> some View {

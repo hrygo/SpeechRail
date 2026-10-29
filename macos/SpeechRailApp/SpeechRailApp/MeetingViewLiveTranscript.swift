@@ -51,6 +51,15 @@ extension MeetingView {
                         }
                         .speechRailButton(.secondary)
                         .help("谁说了哪句：改显示名或合并；正文一个字不动")
+                        .popover(isPresented: $isLabelingSpeakers, arrowEdge: .bottom) {
+                            SpeakerLabelingSheet(
+                                labeling: meeting.labeling,
+                                sessionID: meeting.sessionID,
+                                transcriptRevision: meeting.transcriptPresentation.revision
+                            ) {
+                                isLabelingSpeakers = false
+                            }
+                        }
                     }
                 }
                 if meeting.phase == .interrupted, let at = meeting.interruptedElapsed {

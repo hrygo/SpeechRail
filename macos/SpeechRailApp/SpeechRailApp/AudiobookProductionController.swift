@@ -811,7 +811,7 @@ public actor AudiobookProductionController {
                 updateProgress(bookID) { $0.phase = .assemblingChapter }
                 let existingRevs = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
                 try checkRunIsActive(runGeneration)
-                if (regenerationScope == nil || regenerationScope == .chapters), existingRevs.isEmpty {
+                if existingRevs.isEmpty {
                     _ = try await revisionController.promoteInitialChapterIfComplete(
                         bookID: bookID,
                         chapterID: chapter.id,
@@ -825,6 +825,17 @@ public actor AudiobookProductionController {
         do {
             // Honor a pause during rendering or chapter publication before committing completion.
             try checkRunIsActive(runGeneration)
+            for candidateChapter in try await store.chapters(for: bookID) where !candidateChapter.isSkipped && candidateChapter.currentChapterRevisionID == nil {
+                try checkRunIsActive(runGeneration)
+                let existingRevs = try await store.chapterRevisions(for: bookID, chapterID: candidateChapter.id)
+                if existingRevs.isEmpty {
+                    _ = try? await revisionController.promoteInitialChapterIfComplete(
+                        bookID: bookID,
+                        chapterID: candidateChapter.id,
+                        updateBookProductionState: false
+                    )
+                }
+            }
             let updatedChapters = try await store.chapters(for: bookID).filter { !$0.isSkipped }
             try checkRunIsActive(runGeneration)
             let readyChaptersCount = updatedChapters.filter { $0.currentChapterRevisionID != nil }.count

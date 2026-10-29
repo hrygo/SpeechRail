@@ -3408,6 +3408,21 @@ public extension FocusedValues {
 
 // MARK: - Operation feedback overlays
 
+/// 浮层反馈的三类交互形态：按用户场景自动匹配，避免把普通回执或撤销条画成抢焦点的报错卡。
+enum OperationFeedbackPresentation: Sendable, Equatable {
+    /// Tier 1 — 瞬态微胶囊 (Passive Micro-HUD Capsule)：
+    /// 用于「已复制」「已保存」「已导出」等无需后续动作的轻量回执；悬停暂停倒计时，不抢焦点。
+    case hud
+    /// Tier 2 — 可交互浮动通知条 (Actionable Snackbar / Summary Pill-Bar)：
+    /// 用于带「撤销」「查看」等内联动作，或非阻塞的操作摘要（如「已移入废纸篓 · 撤销」「作品操作结果」）；
+    /// 单行或双行紧凑横条，不抢夺当前编辑区焦点，支持悬停暂停自动收起。
+    case snackbar
+    /// Tier 3 — 持久诊断与恢复告警卡 (Persistent Error / Recovery Card)：
+    /// 专用于 `.critical` 错误或需要用户阅读长详情并确认/重试的阻塞性异常；
+    /// 正文受界独立滚动，「知道了」自动获焦并支持 Escape 一键关闭。
+    case alertCard
+}
+
 /// An operation receipt belongs to its page or sheet, never to the content layout.
 struct OperationFeedback: Identifiable {
     let id: String
@@ -3415,22 +3430,62 @@ struct OperationFeedback: Identifiable {
     let tone: StatusTone
     let title: String
     let autoDismiss: Bool
+    let presentation: OperationFeedbackPresentation
     let onDismiss: (() -> Void)?
     let actionTitle: String?
     let action: (() -> Void)?
 
     init?(
-        _ message: String?, tone: StatusTone = .critical, title: String = "操作未完成",
-        id: String? = nil, autoDismiss: Bool = false, onDismiss: (() -> Void)? = nil,
-        actionTitle: String? = nil, action: (() -> Void)? = nil
+        _ message: String?,
+        tone: StatusTone = .critical,
+        title: String = "操作未完成",
+        id: String? = nil,
+        autoDismiss: Bool? = nil,
+        presentation: OperationFeedbackPresentation? = nil,
+        onDismiss: (() -> Void)? = nil,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
     ) {
         guard let message, !message.isEmpty else { return nil }
         self.message = message
         self.tone = tone
         self.title = title
         self.id = id ?? "\(title):\(message)"
-        // Errors and recovery actions must remain available until acknowledged.
-        self.autoDismiss = autoDismiss && tone != .critical
+
+        // Errors must remain available until acknowledged; neutral receipts auto-dismiss by default.
+        let resolvedAutoDismiss: Bool = switch tone {
+        case .critical:
+            false
+        case .neutral:
+            autoDismiss ?? true
+        case .healthy:
+            autoDismiss ?? (actionTitle == nil)
+        case .attention:
+            autoDismiss ?? false
+        }
+        self.autoDismiss = resolvedAutoDismiss
+
+        if let presentation {
+            self.presentation = tone == .critical ? .alertCard : presentation
+        } else {
+            switch tone {
+            case .critical:
+                self.presentation = .alertCard
+            case .attention:
+                if resolvedAutoDismiss || actionTitle != nil || (message.count <= 80 && !message.contains("\n")) {
+                    self.presentation = .snackbar
+                } else {
+                    self.presentation = .alertCard
+                }
+            case .healthy, .neutral:
+                let hasDistinctLongMessage = message != title && (message.count > 24 || message.contains("\n"))
+                if actionTitle != nil || hasDistinctLongMessage {
+                    self.presentation = .snackbar
+                } else {
+                    self.presentation = .hud
+                }
+            }
+        }
         self.onDismiss = onDismiss
         self.actionTitle = actionTitle
         self.action = action
@@ -3458,7 +3513,9 @@ private struct OperationFeedbackModifier: ViewModifier {
             GeometryReader { geometry in
                 if let visible {
                     Group {
-                        if !visible.autoDismiss && geometry.size.height < SpeechRailDesignTokens.Layout.Sheet.messageBodyMaximumHeight {
+                        if visible.presentation == .alertCard
+                            && geometry.size.height < SpeechRailDesignTokens.Layout.Sheet.messageBodyMaximumHeight
+                        {
                             // Non-dismissible critical cards on narrow/thin windows pop over to retain system space.
                             Color.clear.frame(width: 0, height: 0)
                                 .popover(isPresented: Binding(
@@ -3483,12 +3540,12 @@ private struct OperationFeedbackModifier: ViewModifier {
                         }
                     }
                     .id(visible.id)
-                    .padding(.top, visible.autoDismiss ? SpeechRailDesignTokens.Spacing.xs : SpeechRailDesignTokens.Spacing.sm)
+                    .padding(.top, visible.presentation == .hud ? SpeechRailDesignTokens.Spacing.xs : SpeechRailDesignTokens.Spacing.sm)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .transition(
                         .asymmetric(
                             insertion: .move(edge: .top).combined(with: .opacity),
-                            removal: .opacity.combined(with: .scale(scale: 0.95))
+                            removal: .opacity.combined(with: .scale(scale: SpeechRailDesignTokens.Notice.removalScale))
                         )
                     )
                 }
@@ -3512,32 +3569,47 @@ struct OperationFeedbackCard: View {
     let availableSize: CGSize
     let dismiss: () -> Void
     @FocusState private var isDismissFocused: Bool
+    @State private var isHovered = false
 
     var body: some View {
-        if feedback.autoDismiss {
+        switch feedback.presentation {
+        case .hud:
             transientCapsule
-        } else {
+        case .snackbar:
+            actionableSnackbar
+        case .alertCard:
             persistentAlertCard
         }
     }
 
-    // MARK: - 轻量 HUD 胶囊 (Toast / Capsule HUD)
+    private var autoDismissDuration: Duration {
+        switch feedback.presentation {
+        case .hud:
+            SpeechRailDesignTokens.Notice.transientDisplayDuration
+        case .snackbar:
+            SpeechRailDesignTokens.Notice.actionableDisplayDuration
+        case .alertCard:
+            SpeechRailDesignTokens.Notice.actionableDisplayDuration
+        }
+    }
+
+    // MARK: - Tier 1: 轻量 HUD 胶囊 (Passive Micro-HUD Capsule)
 
     private var transientCapsule: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             Image(systemName: feedback.tone.systemImage)
-                .font(.system(size: 13, weight: .semibold))
+                .font(SpeechRailDesignTokens.Typography.hudIcon)
                 .foregroundStyle(feedback.tone.color)
                 .accessibilityHidden(true)
 
             Text(feedback.title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(SpeechRailDesignTokens.Typography.hudTitle)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .lineLimit(1)
 
             if !feedback.message.isEmpty && feedback.message != feedback.title {
                 Text(feedback.message)
-                    .font(.system(size: 11, weight: .regular))
+                    .font(SpeechRailDesignTokens.Typography.hudMessage)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -3546,19 +3618,24 @@ struct OperationFeedbackCard: View {
             if let title = feedback.actionTitle, let action = feedback.action {
                 Button(title) { dismiss(); action() }
                     .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(SpeechRailDesignTokens.Typography.hudAction)
                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                     .padding(.leading, SpeechRailDesignTokens.Spacing.micro)
+                    .speechRailPointerCursor()
             }
 
             Button(action: dismiss) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary.opacity(0.8))
-                    .frame(width: 14, height: 14)
+                Image(systemName: SpeechRailDesignTokens.Icon.Symbol.close.rawValue)
+                    .font(SpeechRailDesignTokens.Typography.captionBold)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(
+                        width: SpeechRailDesignTokens.Notice.hudDismissFrame,
+                        height: SpeechRailDesignTokens.Notice.hudDismissFrame
+                    )
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .speechRailPointerCursor()
             .accessibilityLabel("关闭提示")
             .accessibilityIdentifier("operation-feedback-dismiss")
         }
@@ -3574,25 +3651,107 @@ struct OperationFeedbackCard: View {
         }
         .shadow(
             color: SpeechRailDesignTokens.Surface.elevatedShadow,
-            radius: 8,
-            y: 4
+            radius: SpeechRailDesignTokens.Notice.hudShadowRadius,
+            y: SpeechRailDesignTokens.Notice.hudShadowYOffset
         )
-        .contentShape(Capsule())
-        .onTapGesture {
-            dismiss()
-        }
+        .frame(maxWidth: max(0, availableSize.width - SpeechRailDesignTokens.Spacing.sm * 2))
+        .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("operation-feedback")
-        .task(id: "\(feedback.id):\(feedback.autoDismiss)") {
+        .task(id: "\(feedback.id):\(feedback.autoDismiss):\(isHovered)") {
+            guard feedback.autoDismiss, !isHovered else { return }
             do {
-                try await Task.sleep(for: SpeechRailDesignTokens.Notice.transientDisplayDuration)
+                try await Task.sleep(for: autoDismissDuration)
                 try Task.checkCancellation()
             } catch { return }
             dismiss()
         }
     }
 
-    // MARK: - 告警与错误处理卡 (Persistent Alert Card)
+    // MARK: - Tier 2: 可交互浮动通知条 (Actionable Snackbar / Summary Pill-Bar)
+
+    private var actionableSnackbar: some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Image(systemName: feedback.tone.systemImage)
+                .font(SpeechRailDesignTokens.Typography.noticeIcon)
+                .foregroundStyle(feedback.tone.color)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+                if !feedback.title.isEmpty && feedback.title != feedback.message {
+                    Text(feedback.title)
+                        .font(SpeechRailDesignTokens.Typography.hudTitle)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        .lineLimit(1)
+                }
+                Text(feedback.message)
+                    .font(
+                        feedback.title == feedback.message
+                            ? SpeechRailDesignTokens.Typography.hudTitle
+                            : SpeechRailDesignTokens.Typography.hudMessage
+                    )
+                    .foregroundStyle(
+                        feedback.title == feedback.message
+                            ? SpeechRailDesignTokens.Color.ink
+                            : SpeechRailDesignTokens.Color.inkSecondary
+                    )
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+            if let title = feedback.actionTitle, let action = feedback.action {
+                Button(title) {
+                    dismiss()
+                    action()
+                }
+                .speechRailButton(.secondary)
+                .controlSize(.small)
+            }
+
+            Button(action: dismiss) {
+                Image(systemName: SpeechRailDesignTokens.Icon.Symbol.close.rawValue)
+                    .font(SpeechRailDesignTokens.Typography.iconMicroSemibold)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(
+                        width: SpeechRailDesignTokens.Icon.dismissButtonFrame,
+                        height: SpeechRailDesignTokens.Icon.dismissButtonFrame
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .speechRailPointerCursor()
+            .accessibilityLabel("关闭提示")
+            .accessibilityIdentifier("operation-feedback-dismiss")
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .frame(
+            maxWidth: min(
+                SpeechRailDesignTokens.Layout.Sheet.snackbarMaximumWidth,
+                max(0, availableSize.width - SpeechRailDesignTokens.Spacing.sm * 2)
+            )
+        )
+        .speechRailSurface(.elevated)
+        .overlay {
+            SpeechRailDesignTokens.Corner.containerShape
+                .strokeBorder(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Spacing.hairline)
+        }
+        .onHover { isHovered = $0 }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("operation-feedback")
+        .task(id: "\(feedback.id):\(feedback.autoDismiss):\(isHovered)") {
+            guard feedback.autoDismiss, !isHovered else { return }
+            do {
+                try await Task.sleep(for: autoDismissDuration)
+                try Task.checkCancellation()
+            } catch { return }
+            dismiss()
+        }
+    }
+
+    // MARK: - Tier 3: 告警与错误处理卡 (Persistent Alert Card)
 
     private var persistentAlertCard: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -3606,11 +3765,11 @@ struct OperationFeedbackCard: View {
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
                 if let title = feedback.actionTitle, let action = feedback.action {
                     Button(title) { dismiss(); action() }
-                        .buttonStyle(.borderedProminent)
+                        .speechRailButton(.primary)
                         .controlSize(.small)
                 }
                 Button("知道了", action: dismiss)
-                    .buttonStyle(.bordered)
+                    .speechRailButton(.secondary)
                     .controlSize(.small)
                     .keyboardShortcut(.cancelAction)
                     .focused($isDismissFocused)
@@ -3633,6 +3792,15 @@ struct OperationFeedbackCard: View {
         .frame(maxWidth: min(SpeechRailDesignTokens.Layout.Sheet.compactWidth,
                              max(0, availableSize.width - SpeechRailDesignTokens.Spacing.sm * 2)))
         .speechRailSurface(.elevated)
+        .overlay {
+            SpeechRailDesignTokens.Corner.containerShape
+                .strokeBorder(
+                    feedback.tone == .critical
+                        ? SpeechRailDesignTokens.Color.critical.opacity(0.32)
+                        : SpeechRailDesignTokens.Surface.border,
+                    lineWidth: SpeechRailDesignTokens.Spacing.hairline
+                )
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("operation-feedback")
         .defaultFocus($isDismissFocused, true)
@@ -3647,5 +3815,234 @@ struct OperationFeedbackCard: View {
             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - 统一模态弹层与轻量输入组件 (Standardized Sheet & Popover Primitives)
+
+/// 统一的模态弹层与工具 Popover 头部：固定标题、可选徽章、副标题说明与右上角关闭按钮。
+struct SpeechRailSheetHeader<Accessory: View>: View {
+    let title: String
+    let badge: String?
+    let subtitle: String?
+    let isCompact: Bool
+    let onClose: (() -> Void)?
+    private let accessory: Accessory
+
+    init(
+        title: String,
+        badge: String? = nil,
+        subtitle: String? = nil,
+        isCompact: Bool = false,
+        onClose: (() -> Void)? = nil,
+        @ViewBuilder accessory: () -> Accessory = { EmptyView() }
+    ) {
+        self.title = title
+        self.badge = badge
+        self.subtitle = subtitle
+        self.isCompact = isCompact
+        self.onClose = onClose
+        self.accessory = accessory()
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text(title)
+                        .font(
+                            isCompact
+                                ? SpeechRailDesignTokens.Typography.sectionTitle
+                                : SpeechRailDesignTokens.Typography.sheetTitle
+                        )
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    if let badge, !badge.isEmpty {
+                        Text(badge)
+                            .font(SpeechRailDesignTokens.Typography.captionMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.compact)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
+                            .background(
+                                SpeechRailDesignTokens.Color.recessedField,
+                                in: Capsule(style: .continuous)
+                            )
+                    }
+                }
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+            accessory
+            if let onClose {
+                Button(action: onClose) {
+                    SpeechRailButtonIcon(.close, size: SpeechRailDesignTokens.Icon.buttonIconSize)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .frame(
+                            width: SpeechRailDesignTokens.Control.iconButtonSize,
+                            height: SpeechRailDesignTokens.Control.iconButtonSize
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .speechRailPointerCursor()
+                .accessibilityLabel("关闭")
+            }
+        }
+    }
+}
+
+/// 统一模态 Sheet 骨架：头部与底部动作栏固定在滚动区外，确保长内容不挤压核心操作且 Escape 始终可达。
+struct SpeechRailSheetScaffold<Accessory: View, Content: View, Footer: View>: View {
+    let title: String
+    let badge: String?
+    let subtitle: String?
+    let showsDividers: Bool
+    let onClose: (() -> Void)?
+    private let accessory: Accessory
+    private let content: Content
+    private let footer: Footer
+
+    init(
+        title: String,
+        badge: String? = nil,
+        subtitle: String? = nil,
+        showsDividers: Bool = true,
+        onClose: (() -> Void)? = nil,
+        @ViewBuilder accessory: () -> Accessory = { EmptyView() },
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder footer: () -> Footer
+    ) {
+        self.title = title
+        self.badge = badge
+        self.subtitle = subtitle
+        self.showsDividers = showsDividers
+        self.onClose = onClose
+        self.accessory = accessory()
+        self.content = content()
+        self.footer = footer()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            SpeechRailSheetHeader(
+                title: title,
+                badge: badge,
+                subtitle: subtitle,
+                onClose: onClose
+            ) {
+                accessory
+            }
+            if showsDividers {
+                Divider()
+            }
+            content
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            if showsDividers {
+                Divider()
+            }
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                footer
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.cardInset)
+        .onExitCommand {
+            onClose?()
+        }
+    }
+}
+
+/// 统一单字段快速输入弹层（重命名作品、重命名记录、重命名章节、新建/重命名项目、编辑标签）。
+/// 自动聚焦输入框，支持 Return 提交、Escape 取消，消除散落的自定义小 Sheet 与系统 Alert 输入框差异。
+struct SpeechRailQuickInputSheet: View {
+    let title: String
+    let subtitle: String?
+    let placeholder: String
+    @Binding var text: String
+    let confirmTitle: String
+    let allowsEmpty: Bool
+    let isConfirmDisabled: Bool
+    let fieldAccessibilityIdentifier: String?
+    let confirmAccessibilityIdentifier: String?
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    @FocusState private var isFieldFocused: Bool
+
+    init(
+        title: String,
+        subtitle: String? = nil,
+        placeholder: String,
+        text: Binding<String>,
+        confirmTitle: String = "保存",
+        allowsEmpty: Bool = false,
+        isConfirmDisabled: Bool = false,
+        fieldAccessibilityIdentifier: String? = nil,
+        confirmAccessibilityIdentifier: String? = nil,
+        onCancel: @escaping () -> Void,
+        onConfirm: @escaping () -> Void
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.placeholder = placeholder
+        self._text = text
+        self.confirmTitle = confirmTitle
+        self.allowsEmpty = allowsEmpty
+        self.isConfirmDisabled = isConfirmDisabled
+        self.fieldAccessibilityIdentifier = fieldAccessibilityIdentifier
+        self.confirmAccessibilityIdentifier = confirmAccessibilityIdentifier
+        self.onCancel = onCancel
+        self.onConfirm = onConfirm
+    }
+
+    private var canSubmit: Bool {
+        !isConfirmDisabled
+            && (allowsEmpty || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            SpeechRailSheetHeader(
+                title: title,
+                subtitle: subtitle,
+                isCompact: true,
+                onClose: onCancel
+            )
+
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .focused($isFieldFocused)
+                .speechRailSingleLineInput(.regular)
+                .speechRailFocusRing(isFieldFocused, in: SpeechRailDesignTokens.Corner.controlShape)
+                .accessibilityLabel(placeholder)
+                .accessibilityIdentifier(fieldAccessibilityIdentifier ?? "quick-input-field")
+                .onSubmit {
+                    if canSubmit { onConfirm() }
+                }
+
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Spacer(minLength: 0)
+                Button("取消", action: onCancel)
+                    .speechRailButton(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                Button(confirmTitle, action: onConfirm)
+                    .speechRailButton(.primary)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canSubmit)
+                    .accessibilityIdentifier(confirmAccessibilityIdentifier ?? "quick-input-confirm")
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.cardInset)
+        .frame(width: SpeechRailDesignTokens.Layout.Sheet.quickPromptWidth, alignment: .leading)
+        .onAppear {
+            isFieldFocused = true
+        }
+        .onKeyPress(.escape) {
+            onCancel()
+            return .handled
+        }
     }
 }

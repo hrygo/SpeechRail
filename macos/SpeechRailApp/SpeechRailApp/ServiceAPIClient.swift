@@ -292,22 +292,34 @@ public final class ServiceAPIClient: @unchecked Sendable {
             state: .unavailable,
             reason: response.receiptID == nil ? "receipt_not_negotiated" : "receipt_unavailable"
         )
-        if let receiptID = response.receiptID,
-           let receipt = try? await fetchReceipt(id: receiptID)
-        {
-            if receipt.receiptID == receiptID,
-               requestID.map({ $0 == receipt.requestID }) ?? true {
-                requestID = receipt.requestID
-                receiptStatus = receipt.status
-                receiptCompletedAt = receipt.completedAt
-                voiceRevision = receipt.voiceRevision
-                planID = receipt.planID
-                planSHA256 = receipt.planSHA256
-                pcmSHA256 = receipt.pcmSHA256
-                recipe = receipt.recipe
-                provenance = Self.provenance(for: receipt)
-            } else {
-                provenance = RenderProvenance(state: .unavailable, reason: "receipt_identity_mismatch")
+        if let receiptID = response.receiptID {
+            var fetchedReceipt: RenderReceipt?
+            for attempt in 0..<3 {
+                if let candidateReceipt = try? await fetchReceipt(id: receiptID) {
+                    fetchedReceipt = candidateReceipt
+                    if candidateReceipt.status == .completed || candidateReceipt.status == .error || candidateReceipt.status == .cancelled {
+                        break
+                    }
+                }
+                if attempt < 2 {
+                    try? await Task.sleep(for: .milliseconds(35))
+                }
+            }
+            if let receipt = fetchedReceipt {
+                if receipt.receiptID == receiptID,
+                   requestID.map({ $0 == receipt.requestID }) ?? true {
+                    requestID = receipt.requestID
+                    receiptStatus = receipt.status
+                    receiptCompletedAt = receipt.completedAt
+                    voiceRevision = receipt.voiceRevision
+                    planID = receipt.planID
+                    planSHA256 = receipt.planSHA256
+                    pcmSHA256 = receipt.pcmSHA256
+                    recipe = receipt.recipe
+                    provenance = Self.provenance(for: receipt)
+                } else {
+                    provenance = RenderProvenance(state: .unavailable, reason: "receipt_identity_mismatch")
+                }
             }
         }
         return SpeechRenderResult(
