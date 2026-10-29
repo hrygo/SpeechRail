@@ -4072,6 +4072,20 @@ final class AudiobookWorkflowTests: XCTestCase {
         await waitForProductionToFinish(workflow)
 
         let finalChapters = try await store.chapters(for: imported.bookID)
+        let promotedSecondRevID = try XCTUnwrap(finalChapters.first(where: { $0.id == secondChapterID })?.currentChapterRevisionID)
         XCTAssertTrue(finalChapters.allSatisfy { $0.currentChapterRevisionID != nil }, "修复最后一段未就绪音频后，该章节应自动晋升为已成片")
+
+        // 对已成片章节再次执行重新制作后，验证可一键批量采用本章最新候选（adoptAllChapterCandidates）
+        await workflow.prepareRegeneration(preferredChapterID: secondChapterID)
+        let chapterRegenDraft = try XCTUnwrap(workflow.regenerationDraft)
+        workflow.confirmRegeneration(draft: chapterRegenDraft, chapterIDs: [secondChapterID])
+        await waitForProductionToFinish(workflow)
+        XCTAssertEqual(workflow.resumePlan?.reviewChapterIDs, [secondChapterID])
+
+        await workflow.adoptAllChapterCandidates(chapterID: secondChapterID)
+        let adoptedChapters = try await store.chapters(for: imported.bookID)
+        let adoptedSecondRevID = try XCTUnwrap(adoptedChapters.first(where: { $0.id == secondChapterID })?.currentChapterRevisionID)
+        XCTAssertNotEqual(adoptedSecondRevID, promotedSecondRevID, "一键采用本章新候选后应发布新的章节版本")
+        XCTAssertTrue(workflow.resumePlan?.reviewChapterIDs.isEmpty == true)
     }
 }

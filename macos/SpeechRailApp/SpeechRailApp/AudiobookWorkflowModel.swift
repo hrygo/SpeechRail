@@ -41,9 +41,15 @@ public final class AudiobookWorkflowModel {
         }
     }
 
+    private struct AudiobookReadinessSnapshot: Sendable {
+        let readinessByID: [UUID: AudiobookChapterReadinessState]
+        let resumePlan: AudiobookResumePlan?
+        let chapters: [AudiobookChapter]?
+    }
+
     private let bookSelectionLoad = SpeechRailSelectionLoad<AudiobookBookWorkspaceSnapshot>()
     private let chapterSelectionLoad = SpeechRailSelectionLoad<AudiobookChapterDetailsSnapshot>()
-    private let readinessSelectionLoad = SpeechRailSelectionLoad<[UUID: AudiobookChapterReadinessState]>()
+    private let readinessSelectionLoad = SpeechRailSelectionLoad<AudiobookReadinessSnapshot>()
 
     public enum ShelfFilter: String, CaseIterable, Equatable, Sendable, Identifiable {
         case all
@@ -809,8 +815,9 @@ public final class AudiobookWorkflowModel {
         let included = chapters.filter { !$0.isSkipped }
         guard !included.isEmpty, !isProductionBusy else { return false }
         let ready = Set(resumePlan?.readyChapterIDs ?? [])
+        let review = Set(resumePlan?.reviewChapterIDs ?? [])
         return included.allSatisfy { chapter in
-            chapter.currentChapterRevisionID != nil && (resumePlan == nil || ready.contains(chapter.id))
+            chapter.currentChapterRevisionID != nil && (resumePlan == nil || ready.contains(chapter.id) || review.contains(chapter.id))
         }
     }
 
@@ -905,9 +912,9 @@ public final class AudiobookWorkflowModel {
         if book.productionState == .paused {
             return .resumeProduction
         }
+        if selectedBook?.id == book.id, !(resumePlan?.reviewChapterIDs.isEmpty ?? true) { return .reviewCandidates }
         if selectedBook?.id == book.id, isProductionComplete { return .continueListening }
         if selectedBook?.id == book.id, !pendingProductionChapters.isEmpty { return .makeConfirmedChapters }
-        if selectedBook?.id == book.id, !(resumePlan?.reviewChapterIDs.isEmpty ?? true) { return .reviewCandidates }
         if summary.totalChapterCount == 0 { return .makeConfirmedChapters }
         if summary.completedChapterCount < summary.totalChapterCount {
             return .makeConfirmedChapters
@@ -3954,18 +3961,53 @@ public final class AudiobookWorkflowModel {
         guard let bookID = selectedBook?.id,
               let chapterID = selectedChapterID,
               let chapter = chapters.first(where: { $0.id == chapterID }),
-              let expectedRevID = chapter.currentChapterRevisionID,
               let revisionController
         else { return }
         do {
-            try await revisionController.adopt(
-                bookID: bookID,
-                candidateID: candidateID,
-                expectedRevisionID: expectedRevID
-            )
+            if let expectedRevID = chapter.currentChapterRevisionID {
+                try await revisionController.adopt(
+                    bookID: bookID,
+                    candidateID: candidateID,
+                    expectedRevisionID: expectedRevID
+                )
+            } else {
+                _ = try await revisionController.promoteInitialChapterIfComplete(
+                    bookID: bookID,
+                    chapterID: chapterID,
+                    updateBookProductionState: true
+                )
+            }
             await openBook(bookID)
             await refreshShelf()
             bannerMessage = "已采用新候选音频并更新当前章节版本。"
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func adoptAllChapterCandidates(chapterID: UUID? = nil) async {
+        guard let bookID = selectedBook?.id,
+              let targetChapterID = chapterID ?? selectedChapterID,
+              let chapter = chapters.first(where: { $0.id == targetChapterID }),
+              let revisionController
+        else { return }
+        do {
+            if let expectedRevID = chapter.currentChapterRevisionID {
+                _ = try await revisionController.adoptChapterCandidates(
+                    bookID: bookID,
+                    chapterID: targetChapterID,
+                    expectedRevisionID: expectedRevID
+                )
+            } else {
+                _ = try await revisionController.promoteInitialChapterIfComplete(
+                    bookID: bookID,
+                    chapterID: targetChapterID,
+                    updateBookProductionState: true
+                )
+            }
+            await openBook(bookID)
+            await refreshShelf()
+            bannerMessage = "已采用本章最新候选音频并更新当前章节版本。"
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -4457,11 +4499,47 @@ public final class AudiobookWorkflowModel {
 
     private func refreshChapterReadinessMap(for bookID: UUID) async {
         guard let castController, selectedBook?.id == bookID else { return }
-        guard let map = try? await readinessSelectionLoad.load(
+        let revisionController = self.revisionController
+        let store = self.store
+        guard let loaded = try? await readinessSelectionLoad.load(
             id: bookID.uuidString,
-            operation: { try await castController.chapterReadinessMap(for: bookID) }
+            operation: { () -> AudiobookReadinessSnapshot in
+                var map = try await castController.chapterReadinessMap(for: bookID)
+                var latestResume: AudiobookResumePlan?
+                var updatedChapters: [AudiobookChapter]?
+                if let store, let revisionController,
+                   let book = try? await store.book(id: bookID),
+                   let currentChapters = try? await store.chapters(for: bookID)
+                {
+                    let started = book.productionState != .idle
+                        || currentChapters.contains { $0.currentChapterRevisionID != nil || $0.previousChapterRevisionID != nil }
+                    if started, let resume = try? await revisionController.resumePlan(bookID: bookID) {
+                        latestResume = resume
+                        let refreshedChapters = (try? await store.chapters(for: bookID)) ?? currentChapters
+                        updatedChapters = refreshedChapters
+                        let incompleteSet = Set(resume.incompleteChapterIDs)
+                        let reviewSet = Set(resume.reviewChapterIDs)
+                        for ch in refreshedChapters where !ch.isSkipped && ch.currentChapterRevisionID != nil {
+                            if incompleteSet.contains(ch.id), !reviewSet.contains(ch.id), map[ch.id] == .chapterAudioReady {
+                                map[ch.id] = .needsUpdate
+                            }
+                        }
+                    }
+                }
+                return AudiobookReadinessSnapshot(
+                    readinessByID: map,
+                    resumePlan: latestResume,
+                    chapters: updatedChapters
+                )
+            }
         ) else { return }
         guard selectedBook?.id == bookID else { return }
-        chapterReadinessByID = map
+        if let updatedChapters = loaded.chapters {
+            chapters = updatedChapters
+        }
+        if let latestResume = loaded.resumePlan {
+            resumePlan = latestResume
+        }
+        chapterReadinessByID = loaded.readinessByID
     }
 }

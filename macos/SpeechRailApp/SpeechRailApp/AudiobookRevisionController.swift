@@ -247,6 +247,98 @@ public actor AudiobookRevisionController {
         )
     }
 
+    /// 批量采用某章节所有片段的最新已核验候选（用于「更新待更新音频」或「整章重新制作」后一键切换章节版本）。
+    public func adoptChapterCandidates(
+        bookID: UUID,
+        chapterID: UUID,
+        expectedRevisionID: UUID
+    ) async throws -> Bool {
+        let chapters = try await store.chapters(for: bookID)
+        guard let chapter = chapters.first(where: { $0.id == chapterID }) else {
+            throw AudiobookStoreError.chapterNotFound(chapterID)
+        }
+        guard chapter.currentChapterRevisionID == expectedRevisionID else {
+            throw AudiobookRevisionError.expectedRevisionMismatch(
+                expected: expectedRevisionID,
+                actual: chapter.currentChapterRevisionID
+            )
+        }
+        let existingRevisions = try await store.chapterRevisions(for: bookID, chapterID: chapterID)
+        let currentRev = existingRevisions.first(where: { $0.id == expectedRevisionID })
+        let currentFragments = try await currentPlannedFragments(bookID: bookID, chapter: chapter, persist: false)
+        let candidates = try await store.candidates(for: bookID)
+
+        var newBindings: [AudiobookFragmentCandidateBinding] = []
+        var totalFrames: Int64 = 0
+        var missingFragments: [UUID] = []
+        var representativeCandidateID: UUID?
+
+        let prevCandidateByFragment = Dictionary(
+            uniqueKeysWithValues: (currentRev?.orderedBindings ?? []).map { ($0.fragmentID, $0.candidateID) }
+        )
+
+        for fragment in currentFragments {
+            let matching = candidates
+                .filter {
+                    $0.fragmentID == fragment.id
+                        && $0.dependencyDigest == fragment.dependencyDigest
+                        && $0.isReceiptVerified
+                }
+                .sorted { $0.createdAt > $1.createdAt }
+                .first
+            guard let validCandidate = matching,
+                  (try? await store.verifyCandidateAsset(validCandidate)) == true
+            else {
+                missingFragments.append(fragment.id)
+                continue
+            }
+            if prevCandidateByFragment[fragment.id] != validCandidate.id, representativeCandidateID == nil {
+                representativeCandidateID = validCandidate.id
+            }
+            newBindings.append(
+                AudiobookFragmentCandidateBinding(
+                    fragmentID: fragment.id,
+                    candidateID: validCandidate.id,
+                    sourceRange: fragment.sourceRange,
+                    dependencyDigest: fragment.dependencyDigest
+                )
+            )
+            totalFrames += validCandidate.frameCount
+        }
+
+        guard missingFragments.isEmpty else {
+            throw AudiobookRevisionError.incompleteChapterCoverage(
+                chapterID: chapter.id,
+                missingFragmentIDs: missingFragments
+            )
+        }
+
+        if let currentRev, currentRev.orderedBindings == newBindings {
+            return false
+        }
+
+        guard let adoptionCandidateID = representativeCandidateID ?? newBindings.first?.candidateID else {
+            return false
+        }
+
+        let nextNumber = (existingRevisions.map(\.revisionNumber).max() ?? 0) + 1
+        let newRevision = AudiobookChapterRevision(
+            bookID: bookID,
+            chapterID: chapter.id,
+            sourceID: chapter.sourceID,
+            revisionNumber: nextNumber,
+            orderedBindings: newBindings,
+            totalFrameCount: totalFrames,
+            sampleRate: policy.sampleRate
+        )
+        _ = try await store.publishChapterRevision(
+            newRevision,
+            publication: .adoption(candidateID: adoptionCandidateID, expectedRevisionID: expectedRevisionID),
+            policy: policy
+        )
+        return true
+    }
+
     public func undoAdoption(
         bookID: UUID,
         chapterID: UUID
@@ -392,8 +484,10 @@ public actor AudiobookRevisionController {
             }
 
             var chapterAllReusable = true
+            var latestValidCandidateByFragment: [UUID: AudiobookRenderCandidate] = [:]
             for fragment in plannedFragments {
-                let fragmentCandidates = candidatesByFragmentID[fragment.id] ?? []
+                let fragmentCandidates = (candidatesByFragmentID[fragment.id] ?? [])
+                    .sorted { $0.createdAt > $1.createdAt }
                 if let validCandidate = fragmentCandidates.first(where: {
                     $0.dependencyDigest == fragment.dependencyDigest
                         && $0.isReceiptVerified
@@ -402,6 +496,7 @@ public actor AudiobookRevisionController {
                    (try? await store.verifyCandidateAsset(validCandidate)) == true
                 {
                     reusableIDs.append(fragment.id)
+                    latestValidCandidateByFragment[fragment.id] = validCandidate
                 } else {
                     redoIDs.append(fragment.id)
                     chapterAllReusable = false
@@ -418,7 +513,9 @@ public actor AudiobookRevisionController {
                          binding.dependencyDigest == planned.dependencyDigest,
                          let cand = candidatesByID[binding.candidateID],
                          cand.isReceiptVerified,
-                         !recovery.damagedCandidateIDs.contains(cand.id)
+                         !recovery.damagedCandidateIDs.contains(cand.id),
+                         let latestCand = latestValidCandidateByFragment[planned.id],
+                         binding.candidateID == latestCand.id
                    else { return false }
                    return true
                })

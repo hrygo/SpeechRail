@@ -63,7 +63,14 @@ public struct AudiobookWorkshopView: View {
                             acknowledgedProductionErrorID = productionErrorID
                         }
                         workflow.errorMessage = nil
-                    }),
+                    },
+                    actionTitle: !(workflow.resumePlan?.redoFragmentIDs.isEmpty ?? true) ? "重新制作未就绪片段…" : nil,
+                    action: !(workflow.resumePlan?.redoFragmentIDs.isEmpty ?? true) ? {
+                        Task {
+                            workflow.errorMessage = nil
+                            await workflow.prepareRegenerationForRedoFragments()
+                        }
+                    } : nil),
                 OperationFeedback(workflow.errorMessage == nil
                     && acknowledgedProductionErrorID != productionErrorID
                     ? workflow.productionProgress?.lastErrorMessage : nil,
@@ -221,9 +228,14 @@ struct AudiobookImportPreviewSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            SectionHeading(
+            SpeechRailSheetHeader(
                 title: "整理段落与章节",
-                detail: "格式探测已完成。先核对整理后的段落和目录，确认后再进入角色分析。原始文件会完整保留，整理在本地完成。"
+                subtitle: "格式探测已完成。先核对整理后的段落和目录，确认后再进入角色分析。原始文件会完整保留，整理在本地完成。",
+                onClose: {
+                    workflow.isShowingImportSheet = false
+                    workflow.importPreview = nil
+                    workflow.importErrorMessage = nil
+                }
             )
 
 
@@ -414,9 +426,14 @@ struct AudiobookExportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            SectionHeading(
+            SpeechRailSheetHeader(
                 title: "导出有声书",
-                detail: "整本 M4B 包含章节轨与书名元数据；分章节 MP3 允许仅导出已完成的章节并附带遗漏说明清单。"
+                subtitle: "整本 M4B 包含章节轨与书名元数据；分章节 MP3 允许仅导出已完成的章节并附带遗漏说明清单。",
+                onClose: {
+                    workflow.isShowingExportSheet = false
+                    workflow.preparedExport = nil
+                    workflow.clearCompletedExport()
+                }
             )
 
 
@@ -954,9 +971,10 @@ struct AudiobookTrashSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            SectionHeading(
+            SpeechRailSheetHeader(
                 title: "有声书废纸篓",
-                detail: "移入废纸篓的项目保留完整正文与已生成音频，可随时恢复；不会影响原始 TXT 或外部已导出文件。"
+                subtitle: "移入废纸篓的项目保留完整正文与已生成音频，可随时恢复；不会影响原始 TXT 或外部已导出文件。",
+                onClose: { workflow.isShowingTrashSheet = false }
             )
 
             if workflow.trashedBooks.isEmpty {
@@ -1015,9 +1033,10 @@ struct AudiobookCastMergeSplitSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            SectionHeading(
+            SpeechRailSheetHeader(
                 title: "合并或拆分角色",
-                detail: "当同一个人物以不同称呼出现时可合并为一个角色；同名不同人时可将当前选中的段落拆分为独立角色。"
+                subtitle: "当同一个人物以不同称呼出现时可合并为一个角色；同名不同人时可将当前选中的段落拆分为独立角色。",
+                onClose: { workflow.isShowingCastMergeSheet = false }
             )
 
             CardSurface {
