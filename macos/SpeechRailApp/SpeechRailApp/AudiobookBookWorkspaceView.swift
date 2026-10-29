@@ -41,15 +41,32 @@ private struct AudiobookProductionProgressRail: View {
     let isBusy: Bool
     let isPausing: Bool
     let canResume: Bool
+    var unreadyFragmentCount: Int = 0
+    var reviewChapterCount: Int = 0
     let onPause: () -> Void
     let onResume: () -> Void
+    var onRegenerateUnready: (() -> Void)? = nil
+    var onReviewCandidates: (() -> Void)? = nil
+
+    private var resolvedTitle: String {
+        if isPausing && isBusy { return "正在暂停制作…" }
+        if !isBusy && progress.isComplete {
+            if unreadyFragmentCount > 0 {
+                return "上次任务已保存 · 仍有 \(unreadyFragmentCount) 段尚未就绪"
+            }
+            if reviewChapterCount > 0 {
+                return "新候选已保存 · 待试听采用"
+            }
+        }
+        return progress.statusTitle
+    }
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1, paused: !SessionActivityPolicy.shouldTick(active: isBusy, visible: visible, foreground: scenePhase == .active))) { context in
             CardSurface {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Text(isPausing && isBusy ? "正在暂停制作…" : progress.statusTitle)
+                        Text(resolvedTitle)
                             .font(SpeechRailDesignTokens.Typography.sectionTitle)
                         Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
                         Text("已用 \(SpeechRailDisplayFormat.duration(Double(progress.elapsedSeconds(at: context.date)), style: .elapsed))")
@@ -66,13 +83,21 @@ private struct AudiobookProductionProgressRail: View {
                                 .speechRailButton(.secondary)
                                 .disabled(!canResume)
                                 .accessibilityIdentifier("audiobook-production-resume")
+                        } else if unreadyFragmentCount > 0, let onRegenerateUnready {
+                            Button("重新制作未就绪（\(unreadyFragmentCount) 段）…", systemImage: "arrow.clockwise", action: onRegenerateUnready)
+                                .speechRailButton(.secondary)
+                                .accessibilityIdentifier("audiobook-production-rail-regenerate-unready")
+                        } else if reviewChapterCount > 0, let onReviewCandidates {
+                            Button("去试听并采用", systemImage: "headphones.circle", action: onReviewCandidates)
+                                .speechRailButton(.secondary)
+                                .accessibilityIdentifier("audiobook-production-rail-review")
                         }
                     }
                     if progress.totalFragments > 0 {
-                        ProgressView(value: SpeechRailDisplayFormat.progressValue(progress.fraction, isComplete: progress.isComplete))
+                        ProgressView(value: SpeechRailDisplayFormat.progressValue(progress.fraction, isComplete: progress.isComplete && unreadyFragmentCount == 0))
                             .tint(SpeechRailDesignTokens.Color.rail)
                             .accessibilityLabel("制作进度")
-                            .accessibilityValue("\(SpeechRailDisplayFormat.progress(progress.fraction, isComplete: progress.isComplete))，\(progress.savedFragmentsText)")
+                            .accessibilityValue("\(SpeechRailDisplayFormat.progress(progress.fraction, isComplete: progress.isComplete && unreadyFragmentCount == 0))，\(progress.savedFragmentsText)")
                     } else if isBusy {
                         ProgressView().controlSize(.small).accessibilityLabel(progress.statusTitle)
                     }
@@ -84,7 +109,7 @@ private struct AudiobookProductionProgressRail: View {
                         if progress.reusedFragments > 0 { Text("其中 \(progress.reusedFragments) 段已复用") }
                         Spacer(minLength: 0)
                         if progress.totalFragments > 0 {
-                            Text("\(SpeechRailDisplayFormat.progress(progress.fraction, isComplete: progress.isComplete))").monospacedDigit()
+                            Text("\(SpeechRailDisplayFormat.progress(progress.fraction, isComplete: progress.isComplete && unreadyFragmentCount == 0))").monospacedDigit()
                         }
                     }
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -98,6 +123,8 @@ private struct AudiobookProductionProgressRail: View {
                         detail("正在进行第 \(progress.retryAttempt) 次重试，已保存的声音不受影响。")
                     } else if isBusy {
                         detail("完成一段就保存，可随时暂停后继续。")
+                    } else if progress.verificationFailureFragmentID != nil || unreadyFragmentCount > 0 {
+                        detail("部分片段待更新或未通过校验，可直接点击右侧「重新制作未就绪」补齐并发布章节。")
                     }
                     if progress.isStalled(at: context.date), !isPausing {
                         StatusBanner(
@@ -183,7 +210,9 @@ public struct AudiobookBookWorkspaceView: View {
                 if workflow.isAnalyzing {
                     analysisProgressRail
                 }
-                if let progress = workflow.selectedBookProductionProgress {
+                if let progress = workflow.selectedBookProductionProgress,
+                   (!workflow.isProductionComplete || workflow.isProductionBusy || progress.verificationFailureFragmentID != nil)
+                {
                     AudiobookProductionProgressRail(
                         progress: progress,
                         chapterTitle: workflow.chapters.first(where: { $0.id == progress.currentChapterID })?.title,
@@ -191,8 +220,12 @@ public struct AudiobookBookWorkspaceView: View {
                         isPausing: workflow.isPausingProduction,
                         canResume: !workflow.isProductionBusy && !workflow.isEditingChapterLayout
                             && workflow.selectedBook?.productionState == .paused,
+                        unreadyFragmentCount: workflow.resumePlan?.redoFragmentIDs.count ?? 0,
+                        reviewChapterCount: workflow.resumePlan?.reviewChapterIDs.count ?? 0,
                         onPause: { Task { await workflow.pauseProduction() } },
-                        onResume: { Task { await workflow.prepareResumeProduction() } }
+                        onResume: { Task { await workflow.prepareResumeProduction() } },
+                        onRegenerateUnready: { Task { await workflow.prepareRegenerationForRedoFragments() } },
+                        onReviewCandidates: { workflow.reviewProductionCandidates() }
                     )
                 }
                 if workflow.isProductionComplete {
@@ -1348,6 +1381,13 @@ public struct AudiobookBookWorkspaceView: View {
                                 }
                                 .speechRailButton(.secondary)
                                 .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails || workflow.isEditingChapterLayout)
+
+                                Button("采用本章新候选", systemImage: "checkmark.circle") {
+                                    Task { await workflow.adoptAllChapterCandidates(chapterID: chID) }
+                                }
+                                .speechRailButton(.primary)
+                                .disabled(workflow.isProductionBusy || workflow.isLoadingChapterDetails || workflow.isEditingChapterLayout)
+                                .accessibilityIdentifier("audiobook-adopt-chapter-candidates")
                             } else if workflow.isChapterAudioCurrent(chID) {
                                 Button("收听本章", systemImage: "headphones") {
                                     Task { await workflow.startListening(chapterID: chID) }
@@ -1507,6 +1547,18 @@ public struct AudiobookBookWorkspaceView: View {
                     .speechRailButton(.quiet)
                 }
 
+                if let cand = matchingCandidate,
+                   workflow.chapters.first(where: { $0.id == fragment.chapterID })?.currentChapterRevisionID != nil,
+                   (workflow.resumePlan?.reviewChapterIDs.contains(fragment.chapterID) == true || candidates.count > 1)
+                {
+                    Button("采用此候选") {
+                        Task { await workflow.adoptCandidate(cand.id) }
+                    }
+                    .speechRailButton(.quiet)
+                    .disabled(workflow.isProductionBusy)
+                    .accessibilityIdentifier("audiobook-adopt-fragment-\(fragment.ordinal)")
+                }
+
                 Button {
                     workflow.selectedFragmentID = fragment.id
                     Task { await workflow.prepareRegeneration(fragmentID: fragment.id) }
@@ -1519,7 +1571,7 @@ public struct AudiobookBookWorkspaceView: View {
                 .speechRailButton(.quiet)
                 .disabled(!workflow.canRegenerateFragment(fragment.id))
                 .help(workflow.chapters.first(where: { $0.id == fragment.chapterID })?.currentChapterRevisionID == nil
-                      ? "请先完成本章首次制作，再重录单段。"
+                      ? (candidates.isEmpty ? "请先完成本章首次制作，再重录单段。" : "重新生成本段音频；本章全部片段就绪后将自动生成章节音频。")
                       : "只为本段生成一个新候选，不会替换当前章节版本；试听后可在候选列表中选择采用。")
                 .accessibilityIdentifier("audiobook-regenerate-fragment-\(fragment.ordinal)")
             }
@@ -1541,7 +1593,7 @@ public struct AudiobookBookWorkspaceView: View {
                                     .font(SpeechRailDesignTokens.Typography.caption)
                                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                                 if candidate.dependencyDigest == fragment.dependencyDigest {
-                                    StatusPill(tone: .healthy, label: "当前设定")
+                                    StatusPill(tone: candidate.isReceiptVerified ? .healthy : .attention, label: candidate.isReceiptVerified ? "当前设定" : "校验未通过")
                                 } else {
                                     StatusPill(tone: .neutral, label: "旧版设定")
                                 }
@@ -1553,7 +1605,7 @@ public struct AudiobookBookWorkspaceView: View {
                                 .accessibilityLabel("试听第 \(candidate.generation) 版")
 
                                 if candidate.dependencyDigest == fragment.dependencyDigest && candidate.isReceiptVerified {
-                                    Button("设为当前版本") {
+                                    Button("采用此候选") {
                                         Task { await workflow.adoptCandidate(candidate.id) }
                                     }
                                     .speechRailButton(.secondary)
@@ -2908,11 +2960,11 @@ private struct AudiobookChapterEditingSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("编辑章节")
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-            Text("保存后的内容将用于后续分析与配音。原始导入内容保留供参考。")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            SpeechRailSheetHeader(
+                title: "编辑章节",
+                subtitle: "保存后的内容将用于后续分析与配音。原始导入内容保留供参考。",
+                onClose: { requestClose() }
+            )
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text("章节标题")
                 TextField("章节标题", text: $workflow.chapterEditTitle)
@@ -3023,11 +3075,11 @@ private struct AudiobookProductionConfirmationSheet<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text(title).font(SpeechRailDesignTokens.Typography.sectionTitle)
-            Text(impact)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            SpeechRailSheetHeader(
+                title: title,
+                subtitle: impact,
+                onClose: { dismiss() }
+            )
             ScrollView {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
                     content
@@ -3274,11 +3326,11 @@ private struct AudiobookRegenerationSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("重新制作")
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-            Text(AudiobookProductionIntent.regenerate.impact)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            SpeechRailSheetHeader(
+                title: "重新制作",
+                subtitle: AudiobookProductionIntent.regenerate.impact,
+                onClose: { dismiss() }
+            )
             ScrollView {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
                     if workflow.selectedBook?.productionState == .paused {
