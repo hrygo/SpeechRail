@@ -4012,32 +4012,34 @@ final class AudiobookWorkflowTests: XCTestCase {
         workflow.makeConfirmedChapters(chapterIDs: imported.chapterIDs)
         await waitForProductionToFinish(workflow)
 
-        var storedChapters = try await store.chapters(for: imported.bookID)
-        for idx in storedChapters.indices {
-            storedChapters[idx].currentChapterRevisionID = nil
-            storedChapters[idx].previousChapterRevisionID = nil
-        }
-        try await store.saveChapters(bookID: imported.bookID, chapters: storedChapters)
+        // 获取第二章首个候选（模拟瞬时回执未完成导致的校验未通过）
+        let secondChapterCandidates = try await store.candidates(for: imported.bookID)
+            .filter { $0.chapterID == secondChapterID }
+        let targetCandidate = try XCTUnwrap(secondChapterCandidates.first)
 
-        // 删除历史章节修订并把第二章首个候选改为校验未通过（模拟瞬时回执未完成导致的僵局）
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(tempRoot.appendingPathComponent("library.sqlite3").path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        XCTAssertEqual(
+            sqlite3_exec(
+                database,
+                """
+                UPDATE chapters SET current_chapter_revision_id = NULL, previous_chapter_revision_id = NULL WHERE book_id = '\(imported.bookID.uuidString)';
+                DELETE FROM chapter_revisions WHERE book_id = '\(imported.bookID.uuidString)';
+                UPDATE render_candidates SET is_receipt_verified = 0 WHERE id = '\(targetCandidate.id.uuidString)';
+                """,
+                nil, nil, nil
+            ),
+            SQLITE_OK
+        )
+
+        // 删除历史章节修订目录
         let rootURL = await store.rootURL
         let revisionsDir = rootURL
             .appendingPathComponent("books", isDirectory: true)
             .appendingPathComponent(imported.bookID.uuidString, isDirectory: true)
             .appendingPathComponent("revisions", isDirectory: true)
         try? FileManager.default.removeItem(at: revisionsDir)
-
-        let secondChapterCandidates = try await store.candidates(for: imported.bookID)
-            .filter { $0.chapterID == secondChapterID }
-        let targetCandidate = try XCTUnwrap(secondChapterCandidates.first)
-        let wavURL = rootURL
-            .appendingPathComponent("books", isDirectory: true)
-            .appendingPathComponent(imported.bookID.uuidString, isDirectory: true)
-            .appendingPathComponent(targetCandidate.relativeAssetPath)
-        let wavData = try Data(contentsOf: wavURL)
-        var unverifiedCandidate = targetCandidate
-        unverifiedCandidate.isReceiptVerified = false
-        try await store.commitCandidate(unverifiedCandidate, wav: wavData)
 
         // 重新打开作品：第一章片段全部已校验通过，应当被自动晋升为「已成片」；第二章包含 1 段尚未就绪
         await workflow.openBook(imported.bookID)
@@ -4052,7 +4054,10 @@ final class AudiobookWorkflowTests: XCTestCase {
 
         // 切换到第二章：即使该章尚未生成正式章节版本，已有保存候选的片段也必须允许单段重录，且可一键预选未就绪片段重新制作
         workflow.selectedChapterID = secondChapterID
-        await workflow.reloadSelectedChapterDetails()
+        for _ in 0..<50 {
+            if !workflow.isLoadingChapterDetails && !workflow.chapterFragments.isEmpty { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
         XCTAssertTrue(workflow.canRegenerateFragment(targetCandidate.fragmentID), "存在未通过核验候选的未成片章节必须允许单段重录")
 
         await workflow.prepareRegenerationForRedoFragments()

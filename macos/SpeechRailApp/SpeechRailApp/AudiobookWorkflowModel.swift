@@ -4422,7 +4422,7 @@ public final class AudiobookWorkflowModel {
         }
     }
 
-    private func reloadSelectedChapterDetails(onlyIfChanged: Bool = false) async {
+    public func reloadSelectedChapterDetails(onlyIfChanged: Bool = false) async {
         guard let store, let bookID = selectedBook?.id, let chapterID = selectedChapterID else {
             chapterSelectionLoad.reset()
             applyChapterDetails(.empty)
