@@ -201,9 +201,6 @@ public enum SessionExporter {
                 }
                 merged.text = joinedExportText([merged.text, line.text])
                 if let end = line.tEnd { merged.tEnd = end }
-                if merged.translatedText?.isEmpty != false {
-                    merged.translatedText = line.translatedText
-                }
                 if merged.sourceLanguage == nil { merged.sourceLanguage = line.sourceLanguage }
                 if (merged.speakerLabel?.isEmpty != false), let rightSpeaker, !rightSpeaker.isEmpty {
                     merged.speakerLabel = rightSpeaker

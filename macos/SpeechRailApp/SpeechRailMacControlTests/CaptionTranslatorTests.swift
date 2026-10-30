@@ -1195,4 +1195,143 @@ final class CaptionTranslatorTests: XCTestCase {
         XCTAssertEqual(r5, "今天我们来看看这个实时字幕")
         XCTAssertFalse(heldOnce)
     }
+
+    func testConsumePartialDraftAndResetPreventsCrossSentenceBleedAndKeepsNextSentencePartialAliveWhenDelayedParagraphFlushes() async throws {
+        let gated = GatedTranslationClient()
+        var recordedPriorDrafts: [String: String?] = [:]
+        final class RecordingGatedClient: CaptionTranslationClient, @unchecked Sendable {
+            let base: GatedTranslationClient
+            var priorDraftBySource: [String: String?] = [:]
+            init(base: GatedTranslationClient) { self.base = base }
+            func translateStream(
+                sourceText: String,
+                contextLines: [String],
+                priorDraftTranslation: String?,
+                systemInstructions: String?
+            ) -> AsyncThrowingStream<String, any Error> {
+                priorDraftBySource[sourceText] = priorDraftTranslation
+                return base.translateStream(
+                    sourceText: sourceText,
+                    contextLines: contextLines,
+                    priorDraftTranslation: priorDraftTranslation,
+                    systemInstructions: systemInstructions
+                )
+            }
+            func translateStream(
+                sourceText: String,
+                contextLines: [String],
+                priorDraftTranslation: String?
+            ) -> AsyncThrowingStream<String, any Error> {
+                translateStream(
+                    sourceText: sourceText,
+                    contextLines: contextLines,
+                    priorDraftTranslation: priorDraftTranslation,
+                    systemInstructions: nil
+                )
+            }
+        }
+        let client = RecordingGatedClient(base: gated)
+        let coordinator = CaptionTranslationCoordinator(
+            partialDebounce: .milliseconds(20),
+            minimumPartialDeltaChars: 4,
+            makeClient: { client }
+        )
+
+        var updates: [String] = []
+        coordinator.schedulePartialTranslation(
+            sourceText: "First sentence ends here.",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { if let text = $0 { updates.append(text) } }
+        )
+        for _ in 0..<100 where !gated.started.contains("First sentence ends here.") {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        gated.yield("第一句到此结束。", to: "First sentence ends here.")
+        gated.finish("First sentence ends here.")
+        for _ in 0..<100 where updates.last != "第一句到此结束。" {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(updates.last, "第一句到此结束。")
+
+        // 句 1 定稿瞬间同步消费并清空 Stage 1 草稿状态（进入段落 200ms 宽限期）
+        let consumed = coordinator.consumePartialDraftAndReset(
+            forCompletedSource: "First sentence ends here."
+        )
+        XCTAssertEqual(consumed.draftText, "第一句到此结束。")
+
+        // 在句 1 段落宽限期内，句 2 开始说话并产出首包 1 个字符 "第"
+        var secondUpdates: [String] = []
+        coordinator.schedulePartialTranslation(
+            sourceText: "Second sentence starts now",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { if let text = $0 { secondUpdates.append(text) } }
+        )
+        for _ in 0..<100 where !gated.started.contains("Second sentence starts now") {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        recordedPriorDrafts = client.priorDraftBySource
+        XCTAssertNil(recordedPriorDrafts["Second sentence starts now"] ?? nil, "句 2 的 Stage 1 请求不得混入句 1 的旧草稿")
+
+        gated.yield("第", to: "Second sentence starts now")
+        for _ in 0..<100 where secondUpdates.isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(secondUpdates.last, "第", "句 2 首包 1 字到达时不得闪现句 1 的旧译文")
+        XCTAssertFalse(secondUpdates.contains("第一句到此结束。"))
+
+        // 句 1 段落宽限期到期触发 translateCompletedLine(cancelActivePartial: false)，不得误杀句 2 在途的 Stage 1 任务
+        var completedFinished = false
+        coordinator.translateCompletedLine(
+            lineID: "p1",
+            sourceText: "First sentence ends here.",
+            contextLines: [],
+            displayMode: .bilingual,
+            priorDraftHint: consumed.draftText,
+            explicitStabilizedPrefix: consumed.stabilizedPrefix,
+            cancelActivePartial: false,
+            onStreamingUpdate: { _, _ in },
+            onFinished: { _, _, _ in completedFinished = true }
+        )
+
+        // 句 2 的 Stage 1 任务继续流式吐字并正常更新
+        gated.yield("二句现在开始", to: "Second sentence starts now")
+        gated.finish("Second sentence starts now")
+        for _ in 0..<100 where secondUpdates.last != "第二句现在开始" {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(secondUpdates.last, "第二句现在开始", "前一段延迟启动 Stage 2 时不得取消新句在途的 Stage 1 预览")
+
+        gated.yield("第一句精翻完成。", to: "First sentence ends here.")
+        gated.finish("First sentence ends here.")
+        for _ in 0..<100 where !completedFinished {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(completedFinished)
+    }
+
+    func testConsumePartialDraftAndResetCancelsDebouncingPartialBeforeWastedRequest() async throws {
+        let fake = FakeTranslationClient()
+        let coordinator = CaptionTranslationCoordinator(
+            partialDebounce: .milliseconds(160),
+            minimumPartialDeltaChars: 4,
+            makeClient: { fake }
+        )
+
+        coordinator.schedulePartialTranslation(
+            sourceText: "Short utterance before commit",
+            contextLines: [],
+            displayMode: .bilingual,
+            onUpdate: { _ in }
+        )
+        // 在 160ms 防抖期内立即定稿消费并重置
+        try await Task.sleep(for: .milliseconds(20))
+        _ = coordinator.consumePartialDraftAndReset(
+            forCompletedSource: "Short utterance before commit."
+        )
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(coordinator.metrics.previewRequests, 0, "定稿后防抖期内的 Stage 1 预览必须被取消，不白发废请求")
+        XCTAssertEqual(fake.callCount, 0)
+    }
 }

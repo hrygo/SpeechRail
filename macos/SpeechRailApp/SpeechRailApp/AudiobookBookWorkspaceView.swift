@@ -282,19 +282,19 @@ public struct AudiobookBookWorkspaceView: View {
                    let bookID = workflow.selectedBook?.id
                 {
                     AudiobookPronunciationSheet(controller: controller, bookID: bookID) {
-                        workflow.isPronunciationSheetPresented = false
+                        workflow.dismissPronunciationRules()
                     }
                 } else {
                     SpeechRailSheetScaffold(
                         title: "发音规则暂不可用",
                         subtitle: "作品存储或语音服务尚未就绪，请稍后重试。",
                         showsDividers: false,
-                        onClose: { workflow.isPronunciationSheetPresented = false }
+                        onClose: { workflow.dismissPronunciationRules() }
                     ) {
                         EmptyView()
                     } footer: {
                         Spacer(minLength: 0)
-                        Button("关闭") { workflow.isPronunciationSheetPresented = false }
+                        Button("关闭") { workflow.dismissPronunciationRules() }
                             .speechRailButton(.primary)
                             .keyboardShortcut(.defaultAction)
                     }
@@ -1168,9 +1168,12 @@ public struct AudiobookBookWorkspaceView: View {
                             label: isFocusedUnknown ? "当前定位 · 待确认说话人" : "待确认说话人"
                         )
                     } else if let role = assignedRole, showsSpeakerLabel || isHovered || isSelected {
+                        let voiceDetail = workflow.voiceBindings[role.id] == nil
+                            ? "未配声"
+                            : workflow.voiceDisplayName(for: workflow.voiceBindings[role.id]?.voiceID, roleID: role.id)
                         AudiobookVoiceTag(
                             name: role.displayName,
-                            detail: workflow.voiceBindings[role.id]?.voiceID ?? "未配声"
+                            detail: voiceDetail
                         )
                     } else if annotation == nil {
                         StatusPill(tone: .neutral, label: "待分析")
@@ -1513,9 +1516,12 @@ public struct AudiobookBookWorkspaceView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
                 if showsRoleTag {
+                    let voiceDetail = workflow.voiceBindings[fragment.roleID] == nil
+                        ? "未绑定"
+                        : workflow.voiceDisplayName(for: workflow.voiceBindings[fragment.roleID]?.voiceID, roleID: fragment.roleID)
                     AudiobookVoiceTag(
                         name: role?.displayName ?? "角色",
-                        detail: workflow.voiceBindings[fragment.roleID]?.voiceID ?? "未绑定"
+                        detail: voiceDetail
                     )
                 }
 
@@ -2099,12 +2105,14 @@ public struct AudiobookBookWorkspaceView: View {
                         let boundDisplay: String = {
                             guard let b = binding else { return voiceIsOptional ? "无台词，无需配声（可选）" : "选择音色…" }
                             let baseName: String
-                            if let matched = allVoices.first(where: { $0.id == b.voiceID }) {
+                            if let displayName = workflow.voiceDisplayName(for: b.voiceID, roleID: role.id) {
+                                baseName = displayName
+                            } else if let matched = allVoices.first(where: { $0.id == b.voiceID }), !matched.name.isEmpty {
                                 baseName = matched.name
                             } else if let preset = Self.fallbackPresetChoices.first(where: { $0.id == b.voiceID }) {
                                 baseName = preset.name
                             } else {
-                                baseName = b.voiceID
+                                baseName = "已配声"
                             }
                             let speedSuffix = abs(b.allowedSpeed - 1.0) > 0.005
                                 ? " · " + SpeechRailDisplayFormat.playbackRate(b.allowedSpeed)
@@ -2538,7 +2546,10 @@ private struct AudiobookCastingReview: View {
                             }
                             if let audition = workflow.castingAudition {
                                 ForEach(Array(audition.items.enumerated()), id: \.offset) { index, item in
-                                    Button("试听 \(index + 1) · \(plan.snapshot.voices.first { $0.id == item.voiceID }?.name ?? "所选声音")") {
+                                    let vName = workflow.voiceDisplayName(for: item.voiceID, roleID: item.roleID)
+                                        ?? plan.snapshot.voices.first { $0.id == item.voiceID }?.name
+                                        ?? "所选声音"
+                                    Button("试听 \(index + 1) · \(vName)") {
                                         Task { await workflow.playCastingAudition(itemIndex: index) }
                                     }.speechRailButton(.secondary)
                                 }

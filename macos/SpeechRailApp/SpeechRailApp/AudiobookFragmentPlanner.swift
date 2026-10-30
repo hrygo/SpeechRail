@@ -192,21 +192,15 @@ public enum AudiobookFragmentPlanner {
             let localAssignmentDigest = AudiobookDigest.sha256Hex(Data(localAssignmentCanonical.utf8))
             let voiceBindingDigest = binding.bindingDigest
             let fragmentText = source.flatMap { try? $0.text(in: range) }
-            var dependencyComponents = [
-                "frag_dep_v3", AudiobookTextPreparation.version,
-                fragmentText.map { AudiobookDigest.sha256Hex(Data($0.utf8)) } ?? "source-unavailable",
-                "\(chapter.sourceID.uuidString)",
-                "\(range.lowerBound)-\(range.upperBound)",
-                localAssignmentDigest,
-                voiceBindingDigest,
-                policyDigest
-            ]
-            // 只有真正命中本片段的发音词条才进入摘要。没有词条命中时不追加任何字段，
-            // 保持旧片段的 dependencyDigest 不变；命中词条的内容或集合变化才使该片段待重做。
-            if let component = fragmentText.flatMap({ pronunciation?.dependencyComponent(in: $0) }) {
-                dependencyComponents.append("pron:\(component)")
-            }
-            let dependencyDigest = AudiobookDigest.sha256Hex(Data(dependencyComponents.joined(separator: "|").utf8))
+            let dependencyDigest = Self.dependencyDigest(
+                fragmentText: fragmentText,
+                sourceID: chapter.sourceID,
+                sourceRange: range,
+                localAssignmentDigest: localAssignmentDigest,
+                voiceDigest: voiceBindingDigest,
+                policyDigest: policyDigest,
+                pronunciation: pronunciation
+            )
 
             let fragmentID = deterministicFragmentID(
                 bookID: chapter.bookID,
@@ -232,6 +226,33 @@ public enum AudiobookFragmentPlanner {
         }
 
         return fragments
+    }
+
+    public static func dependencyDigest(
+        fragmentText: String?,
+        sourceID: UUID,
+        sourceRange: AudiobookSourceRange,
+        localAssignmentDigest: String,
+        voiceDigest: String,
+        policyDigest: String,
+        pronunciation: AudiobookPronunciationBinding? = nil
+    ) -> String {
+        var dependencyComponents = [
+            "frag_dep_v3",
+            AudiobookTextPreparation.version,
+            fragmentText.map { AudiobookDigest.sha256Hex(Data($0.utf8)) } ?? "source-unavailable",
+            sourceID.uuidString,
+            "\(sourceRange.lowerBound)-\(sourceRange.upperBound)",
+            localAssignmentDigest,
+            voiceDigest,
+            policyDigest
+        ]
+        // 只有真正命中本片段的发音词条才进入摘要。没有词条命中时不追加任何字段，
+        // 保持旧片段的 dependencyDigest 不变；命中词条的内容或集合变化才使该片段待重做。
+        if let component = fragmentText.flatMap({ pronunciation?.dependencyComponent(in: $0) }) {
+            dependencyComponents.append("pron:\(component)")
+        }
+        return AudiobookDigest.sha256Hex(Data(dependencyComponents.joined(separator: "|").utf8))
     }
 
     private static func deterministicFragmentID(

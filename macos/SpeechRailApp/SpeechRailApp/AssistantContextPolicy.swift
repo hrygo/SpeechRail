@@ -11,6 +11,7 @@ struct AssistantContextEntry: Equatable, Sendable {
 
     enum PlaybackStatus: Equatable, Sendable {
         case notRequested
+        case notPlayed
         case completed
         case incomplete
         case unknown
@@ -307,7 +308,7 @@ enum AssistantContextPolicy {
         }
 
         switch entry.playbackStatus {
-        case .some(.notRequested), .some(.completed), .none:
+        case .some(.notRequested), .some(.notPlayed), .some(.completed), .none:
             break
         case .some(.incomplete):
             facts.append("朗读未完成，已生成原文保留")

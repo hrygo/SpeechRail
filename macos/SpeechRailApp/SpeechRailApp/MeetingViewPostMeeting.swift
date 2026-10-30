@@ -412,7 +412,17 @@ extension MeetingView {
     func reloadPostMeeting() async {
         // 会后这一栏读的是**库里的行**，不是内存镜像：界面可能是从内存快照渲染的，
         // 而"重开 App 之后还在不在"只能由库回答（§11.2 的第二条）。
-        guard reviewRecord == nil, let id = meeting.sessionID else { return }
+        if let record = reviewRecord {
+            let loaded = (try? await session.lines(sessionID: record.id, includePartial: true)) ?? []
+            let loadedNames = (try? await session.speakerNames(sessionID: record.id)) ?? [:]
+            guard reviewRecord?.id == record.id else { return }
+            reviewLines = loaded.filter { $0.status == .final }
+            recoveryLines = loaded.filter { $0.status == .partial }
+            reviewSpeakerNames = loadedNames
+            reviewMinutes = try? await session.currentMinutes(sessionID: record.id)
+            return
+        }
+        guard let id = meeting.sessionID else { return }
         let loadedLines = (try? await session.lines(sessionID: id)) ?? []
         let loadedRecovery = (try? await session.lines(sessionID: id, includePartial: true))?
             .filter { $0.status == .partial } ?? []

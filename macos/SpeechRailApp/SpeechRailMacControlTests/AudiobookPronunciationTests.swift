@@ -350,4 +350,212 @@ final class AudiobookPronunciationTests: XCTestCase {
         XCTAssertEqual(sqlite3_step(versionStatement), SQLITE_ROW)
         XCTAssertEqual(sqlite3_column_int(versionStatement, 0), AudiobookStoreSchema.currentUserVersion)
     }
+
+    private static func makeDefaultCapabilities(modelRev: String = String(repeating: "a", count: 40)) -> EffectiveCapabilitySnapshot {
+        let model = ConfiguredModelIdentity(
+            assurance: .configuredCatalog,
+            runtimeRevision: modelRev,
+            catalogRevision: modelRev
+        )
+        let desc = SafeVoiceDescriptor(
+            voiceMode: "instruction",
+            locales: ["zh-CN"],
+            styleTags: [],
+            pitchBand: "unknown",
+            timbreFamily: "unknown",
+            baselinePace: "unknown",
+            sourceType: "instruction_profile",
+            metadataMethod: "declared_only"
+        )
+        let ops: [String: JSONValue] = [
+            "http_speech": JSONValue(.object([
+                "parameters": JSONValue(.object([
+                    "speed": JSONValue(.object([
+                        "status": JSONValue(.string("supported")),
+                        "minimum": JSONValue(.number(0.25)),
+                        "maximum": JSONValue(.number(4))
+                    ]))
+                ]))
+            ]))
+        ]
+        let voices = [
+            SafeVoiceEntry(
+                id: "v-1", name: "Voice 1", mode: "system", isSystem: true, isDefault: true,
+                available: true, availabilityReason: .available, voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                voiceIdentityAssurance: .contentAddressed, model: model, descriptors: desc, operations: ops, productionReady: true
+            ),
+            SafeVoiceEntry(
+                id: "v-2", name: "Voice 2", mode: "system", isSystem: true, isDefault: true,
+                available: true, availabilityReason: .available, voiceRevision: "vr_fedcba9876543210fedcba9876543210",
+                voiceIdentityAssurance: .contentAddressed, model: model, descriptors: desc, operations: ops, productionReady: true
+            )
+        ]
+        return EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "cat-1",
+            snapshotID: "snap-1",
+            profile: "quality",
+            models: ["tts": model, "tts_clone": model],
+            voices: voices,
+            operations: [:],
+            guarantees: [:]
+        )
+    }
+
+    func testRefreshBindingDependenciesPreservesPronunciationDigestComponent() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-pron-binding-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let modelRev = String(repeating: "a", count: 40)
+        let capabilities = Self.makeDefaultCapabilities(modelRev: modelRev)
+        let store = try AudiobookProjectStore(root: root)
+        let castController = AudiobookCastController(store: store, capabilityProvider: { capabilities })
+        let txtURL = root.appendingPathComponent("book.txt")
+        try Data("第一章 重庆\n他踏上旅途去重庆。\n".utf8).write(to: txtURL)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: txtURL, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let chapter = try await store.chapters(for: bookID)[0]
+
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        let narrator = try await store.characters(for: bookID)[0]
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
+        let anns = atoms.map { atom in
+            AudiobookAnnotation(
+                bookID: bookID,
+                chapterID: chapter.id,
+                windowID: UUID(),
+                atomID: atom.id,
+                sourceRange: atom.sourceRange,
+                assignment: .assigned(roleID: narrator.id)
+            )
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: anns)
+
+        let voice1 = AudiobookVoiceBinding(
+            roleID: narrator.id,
+            voiceID: "v-1",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            modelRevision: modelRev
+        )
+        let voice2 = AudiobookVoiceBinding(
+            roleID: narrator.id,
+            voiceID: "v-2",
+            voiceRevision: "vr_fedcba9876543210fedcba9876543210",
+            modelRevision: modelRev
+        )
+        try await castController.bindVoice(bookID: bookID, roleID: narrator.id, binding: voice1)
+
+        let pron = AudiobookPronunciationBinding(
+            setID: "ab-\(bookID.uuidString.lowercased())",
+            revision: "pr_1",
+            entries: [PronunciationEntry(id: "e1", surface: "重庆", spoken: "崇庆")]
+        )
+        try await store.savePronunciationBinding(pron, bookID: bookID)
+
+        let source = try await store.sourceIndex(for: bookID)
+        let bindings = try await store.voiceBindings(for: bookID)
+        let planned = try AudiobookFragmentPlanner.plan(
+            chapter: chapter,
+            annotations: anns,
+            bindings: bindings,
+            source: source,
+            atoms: atoms,
+            pronunciation: pron
+        )
+        try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: planned)
+
+        try await castController.bindVoice(bookID: bookID, roleID: narrator.id, binding: voice2)
+        try await castController.undoLastCastingChange(bookID: bookID)
+
+        let storedAfterUndo = try await store.fragments(for: bookID, chapterID: chapter.id)
+        XCTAssertEqual(
+            storedAfterUndo.map(\.dependencyDigest),
+            planned.map(\.dependencyDigest),
+            "换声再撤销后 refreshBindingDependencies 必须保留 pron: 分量，与 AudiobookFragmentPlanner.plan 一致"
+        )
+    }
+
+    func testSaveAndDeletePronunciationBindingRefreshesStoredFragmentDigests() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-pron-refresh-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let modelRev = String(repeating: "a", count: 40)
+        let capabilities = Self.makeDefaultCapabilities(modelRev: modelRev)
+        let store = try AudiobookProjectStore(root: root)
+        let castController = AudiobookCastController(store: store, capabilityProvider: { capabilities })
+        let txtURL = root.appendingPathComponent("book.txt")
+        try Data("第一章 重庆\n他踏上旅途去重庆。\n晴空万里。\n".utf8).write(to: txtURL)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: txtURL, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let chapter = try await store.chapters(for: bookID)[0]
+
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        let narrator = try await store.characters(for: bookID)[0]
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
+        let anns = atoms.map { atom in
+            AudiobookAnnotation(
+                bookID: bookID,
+                chapterID: chapter.id,
+                windowID: UUID(),
+                atomID: atom.id,
+                sourceRange: atom.sourceRange,
+                assignment: .assigned(roleID: narrator.id)
+            )
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: anns)
+        try await castController.bindVoice(
+            bookID: bookID,
+            roleID: narrator.id,
+            binding: AudiobookVoiceBinding(
+                roleID: narrator.id,
+                voiceID: "v-1",
+                voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                modelRevision: modelRev
+            )
+        )
+
+        let source = try await store.sourceIndex(for: bookID)
+        let bindings = try await store.voiceBindings(for: bookID)
+        let baseline = try AudiobookFragmentPlanner.plan(
+            chapter: chapter,
+            annotations: anns,
+            bindings: bindings,
+            source: source,
+            atoms: atoms,
+            pronunciation: nil
+        )
+        try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: baseline)
+
+        let pron = AudiobookPronunciationBinding(
+            setID: "ab-\(bookID.uuidString.lowercased())",
+            revision: "pr_1",
+            entries: [PronunciationEntry(id: "e1", surface: "重庆", spoken: "崇庆")]
+        )
+        try await store.savePronunciationBinding(pron, bookID: bookID)
+        let afterSave = try await store.fragments(for: bookID, chapterID: chapter.id)
+        let expectedWithPron = try AudiobookFragmentPlanner.plan(
+            chapter: chapter,
+            annotations: anns,
+            bindings: bindings,
+            source: source,
+            atoms: atoms,
+            pronunciation: pron
+        )
+        XCTAssertEqual(afterSave.map(\.dependencyDigest), expectedWithPron.map(\.dependencyDigest))
+        XCTAssertNotEqual(afterSave[0].dependencyDigest, baseline[0].dependencyDigest)
+
+        try await store.deletePronunciationBinding(bookID: bookID)
+        let afterDelete = try await store.fragments(for: bookID, chapterID: chapter.id)
+        XCTAssertEqual(afterDelete.map(\.dependencyDigest), baseline.map(\.dependencyDigest))
+    }
 }

@@ -292,6 +292,11 @@ public struct MeetingView: View {
             }
             Task { await reloadPostMeeting() }
         }
+        .onChange(of: meeting.transcriptPresentation.revision) { _, _ in
+            if meeting.phase == .archived || meeting.phase == .processing || reviewRecord != nil {
+                Task { await reloadPostMeeting() }
+            }
+        }
         .onChange(of: pageSessionID) { _, newValue in
             // 换一场会就复位：上一场的回看位置不该带过来。
             transcriptFollow = transcriptFollow.reset()

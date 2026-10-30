@@ -603,6 +603,8 @@ public actor AudiobookExportController {
 
         let allCandidates = try await store.candidates(for: bookID)
         let candidatesByID = Dictionary(uniqueKeysWithValues: allCandidates.map { ($0.id, $0) })
+        let preloadedContext = isHistorical ? nil : (try? await revisionController.preloadPlanningContext(bookID: bookID))
+        var verifiedCandidates: [UUID: Bool] = [:]
 
         let requestedIDSet: Set<UUID>? = chapterIDs.map(Set.init)
         let isFullBookRequest = (profile == .m4b) || (requestedIDSet == nil)
@@ -644,7 +646,12 @@ public actor AudiobookExportController {
                 let history = try await store.chapterRevisions(for: bookID, chapterID: chapter.id)
                 selectedChapterRevision = history.first { $0.id == revisionID && $0.sourceID == sourceID }
             } else {
-                let chapterAnns = try await store.annotations(for: bookID, chapterID: chapter.id)
+                let chapterAnns: [AudiobookAnnotation]
+                if let preloadedContext {
+                    chapterAnns = preloadedContext.annotationsByChapter[chapter.id] ?? []
+                } else {
+                    chapterAnns = try await store.annotations(for: bookID, chapterID: chapter.id)
+                }
                 if chapterAnns.isEmpty {
                     omit(chapter, reason: "尚未完成全书分析", blocker: .notAnalyzed)
                     continue
@@ -653,12 +660,22 @@ public actor AudiobookExportController {
                     omit(chapter, reason: "包含待确认说话人", blocker: .unknownSpeaker)
                     continue
                 }
-                selectedChapterRevision = try await revisionController.currentChapter(bookID: bookID, chapterID: chapter.id)
+                selectedChapterRevision = try await revisionController.currentChapter(
+                    bookID: bookID,
+                    chapterID: chapter.id,
+                    preloaded: preloadedContext
+                )
+                if let validRev = selectedChapterRevision {
+                    for binding in validRev.orderedBindings {
+                        verifiedCandidates[binding.candidateID] = true
+                    }
+                }
             }
             guard let validCurrentRev = selectedChapterRevision else {
                 let hasPrev = (try? await revisionController.previousListenableChapter(
                     bookID: bookID,
-                    chapterID: chapter.id
+                    chapterID: chapter.id,
+                    candidatesByID: candidatesByID
                 )) != nil
                 let hasCurrentRevision = chapter.currentChapterRevisionID != nil
                 if hasPrev {
@@ -676,9 +693,21 @@ public actor AudiobookExportController {
             var assetFailed = false
             for binding in validCurrentRev.orderedBindings {
                 guard let candidate = candidatesByID[binding.candidateID],
-                      candidate.isReceiptVerified,
-                      try await store.verifyCandidateAsset(candidate)
+                      candidate.isReceiptVerified
                 else {
+                    omit(chapter, reason: "片段音频资产缺失或未通过核验", blocker: .missingAsset)
+                    assetFailed = true
+                    break
+                }
+                let isValid: Bool
+                if let cached = verifiedCandidates[candidate.id] {
+                    isValid = cached
+                } else {
+                    let valid = try await store.verifyCandidateAsset(candidate)
+                    verifiedCandidates[candidate.id] = valid
+                    isValid = valid
+                }
+                guard isValid else {
                     omit(chapter, reason: "片段音频资产缺失或未通过核验", blocker: .missingAsset)
                     assetFailed = true
                     break

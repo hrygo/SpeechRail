@@ -58,6 +58,23 @@ def test_a_fully_observed_recipe_is_complete_and_digested() -> None:
     assert payload["digest"] == recipe.digest
 
 
+def test_system_voice_without_voice_revision_is_complete_and_digested() -> None:
+    recipe = _complete_recipe(
+        voice_id="serena",
+        voice_revision=None,
+        voice_mode="system",
+    )
+
+    assert recipe.state == "complete"
+    assert recipe.missing_fields == ()
+    assert recipe.digest is not None
+    payload = recipe.to_dict()
+    assert payload["state"] == "complete"
+    assert payload["voice"]["mode"] == "system"
+    assert payload["voice"]["revision"] is None
+    assert payload["digest"] == recipe.digest
+
+
 def test_the_recipe_records_the_original_text_and_the_spoken_text_separately() -> None:
     """`raw_text` is what the caller wrote; `acoustic_text` is what was spoken.
 

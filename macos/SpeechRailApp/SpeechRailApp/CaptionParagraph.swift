@@ -19,6 +19,8 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
     var startedAt: Date
     /// 第一行从 Stage 1 继承的草稿；段落翻译失败时至少不要闪回外语。
     var initialDraftTranslation: String?
+    /// 第一行定稿时归档的 Stage 1 稳定前缀（仅单行段落可用）。
+    var initialStabilizedPrefix: String?
     /// 第一行之前的前文，供段落翻译使用；组内后续行不重复取。
     var contextLines: [String] = []
 
@@ -26,7 +28,8 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
         line: CaptionSession.Line,
         observedAt: Date,
         isTranslating: Bool,
-        contextLines: [String] = []
+        contextLines: [String] = [],
+        initialStabilizedPrefix: String? = nil
     ) {
         self.id = line.id
         self.lineIDs = [line.id]
@@ -40,11 +43,16 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
         self.lastObservedAt = observedAt
         self.startedAt = observedAt
         self.initialDraftTranslation = line.translatedText
+        self.initialStabilizedPrefix = initialStabilizedPrefix
         self.contextLines = contextLines
     }
 
     mutating func append(_ line: CaptionSession.Line, observedAt: Date) {
         lineIDs.append(line.id)
+        if translatedText == initialDraftTranslation {
+            translatedText = nil
+        }
+        initialStabilizedPrefix = nil
         let head = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         let tail = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceText = [head, tail].filter { !$0.isEmpty }.joined(separator: " ")

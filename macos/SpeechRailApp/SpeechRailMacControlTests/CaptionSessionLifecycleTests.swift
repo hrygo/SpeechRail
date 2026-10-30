@@ -2176,6 +2176,77 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await h.settle { $0.session.partialText == "今天我们来看看这个实时字幕模块" }
     }
 
+    func testMultiLineMergedParagraphTranslationFailureDoesNotFallbackToFirstLineStage1DraftOrExportTruncatedSRT() async throws {
+        final class Stage1OnlyThenFailStage2Client: CaptionTranslationClient, @unchecked Sendable {
+            var stage2Attempts = 0
+            func translateStream(
+                sourceText: String,
+                contextLines: [String],
+                priorDraftTranslation: String?,
+                systemInstructions: String?
+            ) -> AsyncThrowingStream<String, any Error> {
+                let isParagraphCall = systemInstructions?.contains("【同段片段】") == true
+                    || sourceText.contains("next page")
+                return AsyncThrowingStream { continuation in
+                    if isParagraphCall {
+                        self.stage2Attempts += 1
+                        continuation.finish(throwing: URLError(.timedOut))
+                    } else {
+                        continuation.yield("第一部分的单句草稿")
+                        continuation.finish()
+                    }
+                }
+            }
+            func translateStream(
+                sourceText: String,
+                contextLines: [String],
+                priorDraftTranslation: String?
+            ) -> AsyncThrowingStream<String, any Error> {
+                translateStream(
+                    sourceText: sourceText,
+                    contextLines: contextLines,
+                    priorDraftTranslation: priorDraftTranslation,
+                    systemInstructions: nil
+                )
+            }
+        }
+
+        let client = Stage1OnlyThenFailStage2Client()
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { client }
+        h.session.translationEnabled = true
+        let sessionID = try await start(h)
+
+        try await h.emit(.partialSnapshot(itemID: "p-line-1", revision: 1, text: "The first part is on the"))
+        try await h.settle { $0.session.partialTranslatedText == "第一部分的单句草稿" }
+
+        try await h.emit(.completed(itemID: "p-line-1", transcript: "The first part is on the"))
+        try await h.emit(.completed(itemID: "p-line-2", transcript: "next page."))
+
+        try await h.settle {
+            $0.session.paragraphs.count == 1
+                && $0.session.paragraphs.first?.lineIDs.count == 2
+                && $0.session.paragraphs.first?.isTranslating == false
+                && client.stage2Attempts >= 1
+        }
+
+        let paragraph = try XCTUnwrap(h.session.paragraphs.first)
+        XCTAssertNil(paragraph.translatedText, "多行合并段落精翻失败时绝不能用第 1 行的单句草稿冒充整段译文")
+
+        let storedLines = try await h.store.lines(sessionID: sessionID)
+        XCTAssertEqual(storedLines.count, 2)
+        XCTAssertTrue(storedLines.allSatisfy { ($0.translatedText ?? "").isEmpty }, "落库行不得残留单句截断草稿冒充多行段落译文")
+
+        let fetchedRecord = try await h.store.session(id: sessionID)
+        let record = try XCTUnwrap(fetchedRecord)
+        let srt = SessionExporter.export(
+            SessionExportPayload(record: record, lines: storedLines, captionDisplayMode: .bilingual),
+            as: .srt
+        )
+        XCTAssertFalse(srt.contains("第一部分的单句草稿"), "导出 SRT 不得输出仅含第 1 句的截断草稿译文")
+        XCTAssertTrue(srt.contains("The first part is on the next page."))
+    }
+
     private func makeLine(
         _ text: String,
         id: String = UUID().uuidString,

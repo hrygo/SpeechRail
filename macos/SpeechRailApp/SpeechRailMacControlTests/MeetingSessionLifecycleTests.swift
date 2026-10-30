@@ -1632,6 +1632,51 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertTrue(needsReview, "库这一层的判断也应当是同一结论")
     }
 
+    func testPostMeetingSpeakerRenameAndMergeAdvanceTranscriptPresentationRevisionAndReloadSnapshot() async throws {
+        let h = try await makeHarness()
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection())
+        try await h.settle { $0.phase == .recording }
+        let sessionID = try XCTUnwrap(h.session.sessionID)
+        _ = try await h.store.appendLine(
+            LineDraft(
+                sessionID: sessionID, role: .speaker, text: "第一段发言。",
+                source: .microphone, speakerLabel: "A", tStart: 0, status: .final
+            ),
+            id: "\(sessionID)-line-a"
+        )
+        _ = try await h.store.appendLine(
+            LineDraft(
+                sessionID: sessionID, role: .speaker, text: "第二段发言。",
+                source: .microphone, speakerLabel: "B", tStart: 2, status: .final
+            ),
+            id: "\(sessionID)-line-b"
+        )
+        await h.session.stopCapture()
+
+        let initialRevision = h.session.transcriptPresentation.revision
+        await h.session.renameSpeaker(label: "A", to: "王五")
+        try await h.settle { $0.session.transcriptPresentation.revision > initialRevision }
+        let afterRenameRevision = h.session.transcriptPresentation.revision
+        let namesAfterRename = try await h.coordinator.speakerNames(sessionID: sessionID)
+        XCTAssertEqual(namesAfterRename["A"], "王五")
+
+        await h.session.merge(label: "B", into: "A")
+        try await h.settle { $0.session.transcriptPresentation.revision > afterRenameRevision }
+        let reloadedLines = try await h.coordinator.lines(sessionID: sessionID)
+        XCTAssertEqual(reloadedLines.map(\.speakerLabel), ["A", "A"])
+        let ordinals = SpeakerLabeling.displayOrdinals(for: reloadedLines.flatMap(\.speakerLabels))
+        let displayNames = Dictionary(uniqueKeysWithValues: Set(reloadedLines.flatMap(\.speakerLabels)).map { label in
+            (label, SpeakerLabeling.chipText(label: label, displayName: namesAfterRename[label], ordinal: ordinals[label]))
+        })
+        let matchingLines = reloadedLines.filter { line in
+            line.speakerLabels.contains { label in
+                (displayNames[label] ?? label).localizedCaseInsensitiveContains("王五")
+            }
+        }
+        XCTAssertEqual(matchingLines.count, 2, "会后改名与合并后按新说话人名过滤应命中全部归并转写行")
+    }
+
     /// 实时对齐写归属**不得**被当成用户改来源。
     ///
     /// 这是上一条成立的前提：`attachSpeakerLabel` 也服务于对齐证据的迟到到达。

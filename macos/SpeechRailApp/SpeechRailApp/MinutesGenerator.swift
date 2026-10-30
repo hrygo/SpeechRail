@@ -252,7 +252,11 @@ public final class MinutesGenerator {
         guard inFlight == nil else { return }
         bindPresentation(to: row.sessionID)
         inFlight = row.sessionID
-        defer { inFlight = nil }
+        inFlightMinutesID = row.id
+        defer {
+            inFlight = nil
+            inFlightMinutesID = nil
+        }
         state = .queued
         failedOnSetup = false
         coverage = nil
@@ -262,7 +266,19 @@ public final class MinutesGenerator {
             let units = Self.sourceUnits(lines: lines, names: names)
             let transcript = Self.transcript(units: units)
             guard !transcript.isEmpty else {
-                state = .failed("这一场没有可整理的正文。")
+                let reason = "这一场没有可整理的正文。"
+                if let claimed = try? await coordinator.claimMinutes(sessionID: row.sessionID, lease: Self.lease) {
+                    _ = try? await coordinator.failMinutesIfOwner(
+                        minutesID: claimed.id,
+                        expectedAttempts: claimed.attempts,
+                        reason: reason
+                    )
+                } else {
+                    try? await coordinator.failMinutes(minutesID: row.id, reason: reason)
+                }
+                state = .failed(reason)
+                versions = (try? await coordinator.minutesVersions(sessionID: row.sessionID)) ?? versions
+                versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
                 return
             }
             // MC-43/MC-35/MC-36：恢复续跑同样走快照输入，已校验的用户补充才带入。
@@ -272,6 +288,22 @@ public final class MinutesGenerator {
             )
             versions = try await coordinator.minutesVersions(sessionID: row.sessionID)
             versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
+            if cancellationRequested {
+                if let claimed = try await coordinator.claimMinutes(sessionID: row.sessionID, lease: Self.lease) {
+                    _ = try await coordinator.requestCancelMinutes(minutesID: claimed.id)
+                    _ = try await coordinator.cancelMinutesIfOwner(
+                        minutesID: claimed.id,
+                        expectedAttempts: claimed.attempts
+                    )
+                } else {
+                    _ = try await coordinator.requestCancelMinutes(minutesID: row.id)
+                }
+                state = .cancelled
+                remoteCancellationNote = "这一次尚未发送整理请求。"
+                versions = (try? await coordinator.minutesVersions(sessionID: row.sessionID)) ?? versions
+                versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
+                return
+            }
             let configuration = resolvedConfiguration.configuration
             // MC-32：恢复的是**原来那次任务**，它答应过用哪一套配置。
             // 用户这时改了设置，当前任务也不换端点——界面只说明新配置从下一次生效。
@@ -280,12 +312,20 @@ public final class MinutesGenerator {
             let jobConfig = MinutesJobConfig.parse(row.configSnapshot) ?? currentConfig
             jobConfigDiffersFromCurrent = jobConfig.configuration != currentConfig.configuration
             guard jobConfig.configuration.isConfigured else {
-                // 没配大模型：不断原 job，只如实记失败；行仍可被下次恢复认领。
+                let reason = "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。"
                 do {
-                    try await coordinator.failMinutes(
-                        minutesID: row.id,
-                        reason: "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。"
-                    )
+                    if let claimed = try await coordinator.claimMinutes(sessionID: row.sessionID, lease: Self.lease) {
+                        _ = try await coordinator.failMinutesIfOwner(
+                            minutesID: claimed.id,
+                            expectedAttempts: claimed.attempts,
+                            reason: reason
+                        )
+                    } else {
+                        try await coordinator.failMinutes(
+                            minutesID: row.id,
+                            reason: reason
+                        )
+                    }
                 } catch {
                     Self.logger.error("failMinutes 写不进去（\(row.id)）：\(error.localizedDescription)")
                 }
@@ -296,13 +336,18 @@ public final class MinutesGenerator {
                 return
             }
             let task = Task { [weak self] in
-                _ = try? await self?.run(
-                    version: row,
-                    units: units,
-                    supplements: supplements,
-                    jobConfig: jobConfig,
-                    resolvedConfiguration: resolvedConfiguration
-                )
+                guard let self else { return }
+                do {
+                    try await self.run(
+                        version: row,
+                        units: units,
+                        supplements: supplements,
+                        jobConfig: jobConfig,
+                        resolvedConfiguration: resolvedConfiguration
+                    )
+                } catch {
+                    self.state = .failed(Self.readableReason(for: error))
+                }
             }
             runTask = task
             if cancellationRequested { task.cancel() }
@@ -323,15 +368,45 @@ public final class MinutesGenerator {
     /// 留下一条永远转圈的 `running`。停掉的这一版落成 `cancelled` 而不是"整理失败"——
     /// 用户不要了和没整理出来，下一步不一样。
     public func stop() {
-        guard inFlight != nil else { return }
-        cancellationRequested = true
-        let task = runTask
-        let minutesID = inFlightMinutesID
-        Task { [weak self] in
-            if let minutesID {
-                _ = try? await self?.coordinator.requestCancelMinutes(minutesID: minutesID)
+        if inFlight != nil {
+            cancellationRequested = true
+            let task = runTask
+            let minutesID = inFlightMinutesID
+            Task { [weak self] in
+                if let minutesID {
+                    _ = try? await self?.coordinator.requestCancelMinutes(minutesID: minutesID)
+                }
+                task?.cancel()
             }
-            task?.cancel()
+            return
+        }
+        guard isBusy else { return }
+        let targetSessionID = sessionID
+        remoteCancellationNote = "本地已经停下；远端有没有一起停下无法确认。"
+        failedOnSetup = false
+        state = .cancelled
+        guard let targetSessionID else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            if let claimed = try? await self.coordinator.claimMinutes(
+                sessionID: targetSessionID,
+                lease: Self.lease
+            ) {
+                _ = try? await self.coordinator.requestCancelMinutes(minutesID: claimed.id)
+                _ = try? await self.coordinator.cancelMinutesIfOwner(
+                    minutesID: claimed.id,
+                    expectedAttempts: claimed.attempts
+                )
+            } else if let latest = try? await self.coordinator.latestMinutes(sessionID: targetSessionID),
+                      latest.status == .queued || latest.status == .running
+            {
+                _ = try? await self.coordinator.requestCancelMinutes(minutesID: latest.id)
+            }
+            self.versions = (try? await self.coordinator.minutesVersions(sessionID: targetSessionID)) ?? self.versions
+            self.versionsNeedingReview = await Self.reviewIDs(
+                coordinator: self.coordinator,
+                sessionID: targetSessionID
+            )
         }
     }
 
@@ -420,13 +495,18 @@ public final class MinutesGenerator {
             claimed.status = .running
             claimed.attempts = target.attempts + 1
             let task = Task { [weak self] in
-                _ = try? await self?.run(
-                    claimed: claimed,
-                    units: units,
-                    supplements: supplements,
-                    jobConfig: jobConfig,
-                    resolvedConfiguration: resolvedConfiguration
-                )
+                guard let self else { return }
+                do {
+                    try await self.run(
+                        claimed: claimed,
+                        units: units,
+                        supplements: supplements,
+                        jobConfig: jobConfig,
+                        resolvedConfiguration: resolvedConfiguration
+                    )
+                } catch {
+                    self.state = .failed(Self.readableReason(for: error))
+                }
             }
             runTask = task
             if cancellationRequested { task.cancel() }
@@ -550,7 +630,25 @@ public final class MinutesGenerator {
         resolvedConfiguration: ResolvedLLMConfiguration
     ) async throws {
         let claimed = try await coordinator.claimMinutes(sessionID: version.sessionID, lease: Self.lease)
-        guard let claimed else { return }
+        guard let claimed else {
+            if cancellationRequested || Task.isCancelled {
+                state = .cancelled
+                return
+            }
+            if let latest = try? await coordinator.latestMinutes(sessionID: version.sessionID) {
+                switch latest.status {
+                case .ready: state = .ready
+                case .failed: state = .failed(latest.failureReason ?? "没有可读的原因")
+                case .cancelled: state = .cancelled
+                case .submissionUnknown: state = .submissionUnknown
+                case .queued, .running:
+                    state = .failed("这一版未能认领，请刷新状态。")
+                }
+            } else {
+                state = .idle
+            }
+            return
+        }
         try await run(
             claimed: claimed,
             units: units,

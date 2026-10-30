@@ -102,6 +102,14 @@ public actor AudiobookProjectStore {
     private var startupRunningBookUpdatedAt: [UUID: Double] = [:]
     private var didApplyStartupRecovery = false
     private var castingScoreCache = AudiobookCastingScoreCache()
+    private var verifiedWAVAssetCache: [String: (fileSize: Int64, modTime: Double, fileSHA: String, pcmSHA: String)] = [:]
+    public private(set) var recoveredBookIDsHistoryForTest: [UUID] = []
+    public private(set) var workingSourceSnapshotLoadCountForTest: [UUID: Int] = [:]
+
+    public func resetDiagnosticCountersForTest() {
+        recoveredBookIDsHistoryForTest.removeAll()
+        workingSourceSnapshotLoadCountForTest.removeAll()
+    }
 
     // The foreground book and a concurrently producing book can share the store without unbounded retained indexes.
     private func touchBookCache(_ bookID: UUID) {
@@ -658,6 +666,7 @@ public actor AudiobookProjectStore {
               let referenceID = metadata.referenceSourceID, let mapRel = metadata.mapRel else {
             throw AudiobookStoreError.workingTextPreparationRequired
         }
+        workingSourceSnapshotLoadCountForTest[bookID, default: 0] += 1
         // Revalidate disk bytes even with a warm UI cache. Never fall back to reference bytes.
         let source = try readSourceRecord(metadata)
         let reference = try readSourceRecord(sourceRecord(bookID: bookID, sourceID: referenceID))
@@ -1352,11 +1361,20 @@ public actor AudiobookProjectStore {
         guard !changedRoles.isEmpty else { return }
         let bindings = try fetchVoiceBindings(bookID: bookID), chapters = try fetchChapters(bookID: bookID)
         let source = try workingSourceSnapshot(bookID: bookID).sourceIndex
+        let pronunciation = try pronunciationBinding(for: bookID)
         for fragment in try fetchFragments(bookID: bookID, chapterID: nil) where changedRoles.contains(fragment.roleID) {
             guard let chapter = chapters.first(where: { $0.id == fragment.chapterID }) else { throw AudiobookStoreError.chapterNotFound(fragment.chapterID) }
             let voiceDigest = bindings[fragment.roleID]?.bindingDigest ?? "unbound"
-            let dependency = AudiobookDigest.sha256Hex(Data(["frag_dep_v3", AudiobookTextPreparation.version, AudiobookDigest.sha256Hex(Data(try source.text(in: fragment.sourceRange).utf8)),
-                chapter.sourceID.uuidString, "\(fragment.sourceRange.lowerBound)-\(fragment.sourceRange.upperBound)", fragment.localAssignmentDigest, voiceDigest, fragment.policyDigest].joined(separator: "|").utf8))
+            let fragmentText = try source.text(in: fragment.sourceRange)
+            let dependency = AudiobookFragmentPlanner.dependencyDigest(
+                fragmentText: fragmentText,
+                sourceID: chapter.sourceID,
+                sourceRange: fragment.sourceRange,
+                localAssignmentDigest: fragment.localAssignmentDigest,
+                voiceDigest: voiceDigest,
+                policyDigest: fragment.policyDigest,
+                pronunciation: pronunciation
+            )
             try upsertFragmentRow(.init(id: fragment.id, bookID: bookID, chapterID: fragment.chapterID, ordinal: fragment.ordinal, roleID: fragment.roleID,
                 sourceRange: fragment.sourceRange, atomIDs: fragment.atomIDs, localAssignmentDigest: fragment.localAssignmentDigest,
                 voiceBindingDigest: voiceDigest, policyDigest: fragment.policyDigest, dependencyDigest: dependency))
@@ -2032,6 +2050,7 @@ public actor AudiobookProjectStore {
                     .text(entriesJSON),
                     .real(Date().timeIntervalSince1970),
                 ])
+            try refreshPronunciationDependencies(bookID: bookID, pronunciation: binding)
         }
     }
 
@@ -2040,6 +2059,47 @@ public actor AudiobookProjectStore {
             try executePrepared(
                 "DELETE FROM pronunciation_bindings WHERE book_id = ?;",
                 [.text(bookID.uuidString)]
+            )
+            try refreshPronunciationDependencies(bookID: bookID, pronunciation: nil)
+        }
+    }
+
+    private func refreshPronunciationDependencies(
+        bookID: UUID,
+        pronunciation: AudiobookPronunciationBinding?
+    ) throws {
+        let fragments = try fetchFragments(bookID: bookID, chapterID: nil)
+        guard !fragments.isEmpty else { return }
+        let chapters = try fetchChapters(bookID: bookID)
+        let chaptersByID = Dictionary(uniqueKeysWithValues: chapters.map { ($0.id, $0) })
+        guard let source = try? workingSourceSnapshot(bookID: bookID).sourceIndex else { return }
+        for fragment in fragments {
+            guard let chapter = chaptersByID[fragment.chapterID] else { continue }
+            let fragmentText = try? source.text(in: fragment.sourceRange)
+            let dependency = AudiobookFragmentPlanner.dependencyDigest(
+                fragmentText: fragmentText,
+                sourceID: chapter.sourceID,
+                sourceRange: fragment.sourceRange,
+                localAssignmentDigest: fragment.localAssignmentDigest,
+                voiceDigest: fragment.voiceBindingDigest,
+                policyDigest: fragment.policyDigest,
+                pronunciation: pronunciation
+            )
+            guard dependency != fragment.dependencyDigest else { continue }
+            try upsertFragmentRow(
+                .init(
+                    id: fragment.id,
+                    bookID: bookID,
+                    chapterID: fragment.chapterID,
+                    ordinal: fragment.ordinal,
+                    roleID: fragment.roleID,
+                    sourceRange: fragment.sourceRange,
+                    atomIDs: fragment.atomIDs,
+                    localAssignmentDigest: fragment.localAssignmentDigest,
+                    voiceBindingDigest: fragment.voiceBindingDigest,
+                    policyDigest: fragment.policyDigest,
+                    dependencyDigest: dependency
+                )
             )
         }
     }
@@ -2149,6 +2209,16 @@ public actor AudiobookProjectStore {
         guard AudiobookDigest.sha256Hex(finalReadBack) == candidate.fileSHA256 else {
             throw AudiobookStoreError.invalidWAVAsset("正式 WAV 落盘读回校验失败。")
         }
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: finalURL.path),
+           let fileSize = (attrs[.size] as? NSNumber)?.int64Value,
+           let modDate = attrs[.modificationDate] as? Date {
+            verifiedWAVAssetCache[finalURL.path] = (
+                fileSize: fileSize,
+                modTime: modDate.timeIntervalSince1970,
+                fileSHA: candidate.fileSHA256,
+                pcmSHA: candidate.pcmSHA256
+            )
+        }
         if simulatedCrashStage == .afterDatabaseCommitted {
             throw AudiobookStoreError.simulatedCrash(.afterDatabaseCommitted)
         }
@@ -2164,6 +2234,17 @@ public actor AudiobookProjectStore {
     }
 
     public func recover() async throws -> AudiobookRecoveryReport {
+        try recoverBooks(try fetchAllBooksOrdered())
+    }
+
+    public func recover(bookID: UUID) async throws -> AudiobookRecoveryReport {
+        guard let book = try fetchBook(id: bookID) else {
+            throw AudiobookStoreError.bookNotFound(bookID)
+        }
+        return try recoverBooks([book])
+    }
+
+    private func recoverBooks(_ books: [AudiobookBook]) throws -> AudiobookRecoveryReport {
         if !didApplyStartupRecovery {
             try applyStartupRecovery()
             didApplyStartupRecovery = true
@@ -2176,8 +2257,8 @@ public actor AudiobookProjectStore {
         var preservedUnknownPaths: [String] = []
         var damagedIDs: [UUID] = []
 
-        let books = try fetchAllBooksOrdered()
         for book in books {
+            recoveredBookIDsHistoryForTest.append(book.id)
             // 1. Reconcile pending sidecar journal entries and SQLite asset_transactions
             let sidecarEntries = assetJournal.pendingEntries(bookID: book.id)
             let dbEntries = try fetchPendingAssetTransactions(bookID: book.id)
@@ -2494,23 +2575,45 @@ public actor AudiobookProjectStore {
 
     private func isValidWAVAsset(at url: URL, expectedFileSHA: String, expectedPCMSHA: String) -> Bool {
         guard FileManager.default.fileExists(atPath: url.path),
-              (try? Self.isSymbolicLink(at: url)) == false,
-              let data = try? Data(contentsOf: url)
+              (try? Self.isSymbolicLink(at: url)) == false
         else {
+            verifiedWAVAssetCache.removeValue(forKey: url.path)
             return false
         }
-        guard AudiobookDigest.sha256Hex(data) == expectedFileSHA else {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let fileSize = (attrs[.size] as? NSNumber)?.int64Value,
+              let modDate = attrs[.modificationDate] as? Date
+        else {
+            verifiedWAVAssetCache.removeValue(forKey: url.path)
+            return false
+        }
+        let modTime = modDate.timeIntervalSince1970
+        if let cached = verifiedWAVAssetCache[url.path],
+           cached.fileSize == fileSize,
+           abs(cached.modTime - modTime) < 0.001 {
+            return cached.fileSHA == expectedFileSHA && cached.pcmSHA == expectedPCMSHA
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            verifiedWAVAssetCache.removeValue(forKey: url.path)
+            return false
+        }
+        let fileSHA = AudiobookDigest.sha256Hex(data)
+        guard fileSHA == expectedFileSHA else {
+            verifiedWAVAssetCache.removeValue(forKey: url.path)
             return false
         }
         guard let pcmSHA = try? AudioDigest.sha256HexOfPCM(in: data),
               pcmSHA == expectedPCMSHA
         else {
+            verifiedWAVAssetCache.removeValue(forKey: url.path)
             return false
         }
+        verifiedWAVAssetCache[url.path] = (fileSize: fileSize, modTime: modTime, fileSHA: fileSHA, pcmSHA: pcmSHA)
         return true
     }
 
     private func quarantineKnownFile(at url: URL, bookID: UUID) throws -> String {
+        verifiedWAVAssetCache.removeValue(forKey: url.path)
         let qDir = try bookDirectory(for: bookID, create: true)
             .appendingPathComponent("quarantine", isDirectory: true)
         try FileManager.default.createDirectory(at: qDir, withIntermediateDirectories: true)
@@ -3766,6 +3869,29 @@ public actor AudiobookProjectStore {
 
     // MARK: - Trash Snapshot Export / Restore
 
+    private struct CastingRevisionRowSnapshot: Codable, Sendable {
+        let sequence: Int64
+        let id: String
+        let bookID: UUID
+        let restoresRevisionID: String?
+        let undoneBy: String?
+        let recordJSON: String
+        let createdAt: Double
+    }
+
+    private struct VoiceRegistrationIntentRowSnapshot: Codable, Sendable {
+        let id: String
+        let bookID: UUID
+        let roleID: String?
+        let voiceID: String
+        let targetMetadataDigest: String
+        let expectedCastRevisionID: String
+        let expectedVoiceSetDigest: String
+        let phase: String
+        let intentJSON: String
+        let updatedAt: Double
+    }
+
     private struct AudiobookTrashSnapshot: Codable, Sendable {
         let sources: [SourceRecord]?
         let characterSources: [UUID: UUID]?
@@ -3783,6 +3909,9 @@ public actor AudiobookProjectStore {
         let bookmark: AudiobookBookmark?
         let exports: [AudiobookExportRecord]
         let productionCheckpoint: AudiobookProductionCheckpoint?
+        let castingRevisions: [CastingRevisionRowSnapshot]?
+        let voiceRegistrationIntents: [VoiceRegistrationIntentRowSnapshot]?
+        let pronunciationBinding: AudiobookPronunciationBinding?
     }
 
     private func exportBookSnapshot(bookID: UUID) throws -> AudiobookTrashSnapshot {
@@ -3801,6 +3930,58 @@ public actor AudiobookProjectStore {
             }
             return map
         }
+        let castingRevs: [CastingRevisionRowSnapshot] = try withPrepared(
+            "SELECT sequence, id, restores_revision_id, undone_by, record_json, created_at FROM casting_revisions WHERE book_id = ? ORDER BY sequence ASC;",
+            [.text(bookID.uuidString)]
+        ) { stmt in
+            var rows: [CastingRevisionRowSnapshot] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                guard let id = columnText(stmt, 1), let recordJSON = columnText(stmt, 4) else { continue }
+                rows.append(
+                    CastingRevisionRowSnapshot(
+                        sequence: columnInt(stmt, 0),
+                        id: id,
+                        bookID: bookID,
+                        restoresRevisionID: columnText(stmt, 2),
+                        undoneBy: columnText(stmt, 3),
+                        recordJSON: recordJSON,
+                        createdAt: columnDouble(stmt, 5)
+                    )
+                )
+            }
+            return rows
+        }
+        let registrationIntents: [VoiceRegistrationIntentRowSnapshot] = try withPrepared(
+            "SELECT id, role_id, voice_id, target_metadata_digest, expected_cast_revision_id, expected_voice_set_digest, phase, intent_json, updated_at FROM voice_registration_intents WHERE book_id = ? ORDER BY id ASC;",
+            [.text(bookID.uuidString)]
+        ) { stmt in
+            var rows: [VoiceRegistrationIntentRowSnapshot] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                guard let id = columnText(stmt, 0),
+                      let voiceID = columnText(stmt, 2),
+                      let targetDigest = columnText(stmt, 3),
+                      let expectedCastRev = columnText(stmt, 4),
+                      let expectedVoiceSet = columnText(stmt, 5),
+                      let phase = columnText(stmt, 6),
+                      let intentJSON = columnText(stmt, 7)
+                else { continue }
+                rows.append(
+                    VoiceRegistrationIntentRowSnapshot(
+                        id: id,
+                        bookID: bookID,
+                        roleID: columnText(stmt, 1),
+                        voiceID: voiceID,
+                        targetMetadataDigest: targetDigest,
+                        expectedCastRevisionID: expectedCastRev,
+                        expectedVoiceSetDigest: expectedVoiceSet,
+                        phase: phase,
+                        intentJSON: intentJSON,
+                        updatedAt: columnDouble(stmt, 8)
+                    )
+                )
+            }
+            return rows
+        }
         return AudiobookTrashSnapshot(
             sources: try sourceRecords(bookID: bookID), characterSources: roleSources,
             book: book,
@@ -3816,7 +3997,10 @@ public actor AudiobookProjectStore {
             productionRevisions: try fetchProductionRevisions(bookID: bookID),
             bookmark: try fetchBookmark(bookID: bookID),
             exports: try fetchExportRecords(bookID: bookID),
-            productionCheckpoint: try productionCheckpoint(for: bookID)
+            productionCheckpoint: try productionCheckpoint(for: bookID),
+            castingRevisions: castingRevs,
+            voiceRegistrationIntents: registrationIntents,
+            pronunciationBinding: try pronunciationBinding(for: bookID)
         )
     }
 
@@ -3855,5 +4039,63 @@ public actor AudiobookProjectStore {
         if let bm = snapshot.bookmark { try upsertBookmarkRow(bm) }
         for exp in snapshot.exports { try upsertExportRecordRow(exp) }
         if let checkpoint = snapshot.productionCheckpoint { try upsertProductionCheckpointRow(checkpoint) }
+        if let castingRevisions = snapshot.castingRevisions {
+            for rev in castingRevisions {
+                try executePrepared(
+                    """
+                    INSERT OR REPLACE INTO casting_revisions (sequence, id, book_id, restores_revision_id, undone_by, record_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    [
+                        .int(rev.sequence),
+                        .text(rev.id),
+                        .text(bID.uuidString),
+                        .text(rev.restoresRevisionID),
+                        .text(rev.undoneBy),
+                        .text(rev.recordJSON),
+                        .real(rev.createdAt),
+                    ]
+                )
+            }
+        }
+        if let intents = snapshot.voiceRegistrationIntents {
+            for intent in intents {
+                try executePrepared(
+                    """
+                    INSERT OR REPLACE INTO voice_registration_intents (id, book_id, role_id, voice_id, target_metadata_digest,
+                        expected_cast_revision_id, expected_voice_set_digest, phase, intent_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    [
+                        .text(intent.id),
+                        .text(bID.uuidString),
+                        .text(intent.roleID),
+                        .text(intent.voiceID),
+                        .text(intent.targetMetadataDigest),
+                        .text(intent.expectedCastRevisionID),
+                        .text(intent.expectedVoiceSetDigest),
+                        .text(intent.phase),
+                        .text(intent.intentJSON),
+                        .real(intent.updatedAt),
+                    ]
+                )
+            }
+        }
+        if let pronunciation = snapshot.pronunciationBinding {
+            let entriesJSON = String(decoding: try JSONEncoder().encode(pronunciation.entries), as: UTF8.self)
+            try executePrepared(
+                """
+                INSERT OR REPLACE INTO pronunciation_bindings (book_id, set_id, revision, entries_json, updated_at)
+                VALUES (?, ?, ?, ?, ?);
+                """,
+                [
+                    .text(bID.uuidString),
+                    .text(pronunciation.setID),
+                    .text(pronunciation.revision),
+                    .text(entriesJSON),
+                    .real(Date().timeIntervalSince1970),
+                ]
+            )
+        }
     }
 }

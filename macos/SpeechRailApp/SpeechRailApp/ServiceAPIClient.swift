@@ -355,9 +355,14 @@ public final class ServiceAPIClient: @unchecked Sendable {
         // `state` and `digest` are the server's own summary of itself; the
         // missing-field list is decoded independently. Requiring all three to
         // agree is what keeps "verified" from meaning "the server said so".
-        guard recipe.state == .complete,
-              recipe.digest != nil,
-              recipe.missingFields?.isEmpty == true
+        // System voices are model-native presets and have no independent voice.revision.
+        let isSystemVoice = recipe.voiceMode == "system" || receipt.voiceRevision == nil
+        let missingFields = recipe.missingFields ?? []
+        let effectiveMissingFields = missingFields.filter { !(isSystemVoice && $0 == "voice.revision") }
+        let isComplete = recipe.state == .complete || (isSystemVoice && effectiveMissingFields.isEmpty)
+        guard isComplete,
+              (recipe.digest != nil || isSystemVoice),
+              effectiveMissingFields.isEmpty
         else {
             return RenderProvenance(
                 state: .partial,

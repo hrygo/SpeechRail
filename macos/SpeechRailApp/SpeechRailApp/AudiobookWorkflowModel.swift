@@ -1419,6 +1419,85 @@ public final class AudiobookWorkflowModel {
         }
     }
 
+    /// 将底层音色标识（如 voice_design_... 或哈希串）解析为面向用户的友好名称或声线定位，杜绝机器串外露。
+    public func voiceDisplayName(for voiceID: String?, roleID: UUID? = nil) -> String? {
+        guard let voiceID = voiceID?.trimmingCharacters(in: .whitespacesAndNewlines), !voiceID.isEmpty else {
+            return nil
+        }
+
+        let role = roleID.flatMap { charactersByID[$0] }
+        let roleName = role?.displayName
+
+        // 1. 查找已知音色条目（已加载的目录音色）
+        let knownVoice = catalogVoices.first(where: { $0.id == voiceID })
+
+        let meta = voiceCatalogModel.snapshot.state.metadataByVoiceID[voiceID]
+
+        if let voice = knownVoice, !voice.name.isEmpty, !isTechnicalVoiceID(voice.name) {
+            let vName = voice.name
+            // 如果音色名称与角色名相同或包含角色名（如“彷徨·高尔础” vs 角色“高尔础”）
+            if let roleName, (vName == roleName || vName.hasSuffix("·\(roleName)") || vName.contains(roleName)) {
+                if let arch = meta?.archetypeOverride?.shortBadgeTitle {
+                    return arch
+                }
+                return meta?.visibilityScope == .bookExclusive ? "专属音色" : "定制音色"
+            }
+            return vName
+        }
+
+        // 2. 从音色元数据中查找人设定位、归属或角色名称
+        if let meta {
+            if let roleName, let origin = meta.originRoleName, !origin.isEmpty {
+                if origin != roleName {
+                    return "\(origin)声线"
+                }
+            }
+            if let arch = meta.archetypeOverride?.shortBadgeTitle {
+                return arch
+            }
+            if meta.originRoleID == roleID || meta.visibilityScope == .bookExclusive {
+                return "专属音色"
+            }
+            if meta.creationSource == .voiceDesign {
+                return "设计音色"
+            }
+        }
+
+        // 3. 常见系统音色内置预设
+        switch voiceID.lowercased() {
+        case "serena": return "沉稳女声"
+        case "alex": return "成熟男声"
+        case "v-narrator": return "沉稳旁白"
+        case "v-hero": return "青年男声"
+        default:
+            break
+        }
+
+        // 4. 根据技术前缀归纳
+        if voiceID.hasPrefix("voice_design_") {
+            return "设计音色"
+        }
+        if voiceID.hasPrefix("ab_arch_") {
+            return "群像音色"
+        }
+        if voiceID.hasPrefix("ab_") {
+            return "定制音色"
+        }
+
+        // 5. 若是机器哈希串，绝不裸露给用户
+        return isTechnicalVoiceID(voiceID) ? "定制音色" : voiceID
+    }
+
+    private func isTechnicalVoiceID(_ string: String) -> Bool {
+        if string.hasPrefix("voice_design_") || string.hasPrefix("ab_") || string.hasPrefix("vr_") {
+            return true
+        }
+        if string.count >= 20 && string.range(of: "^[0-9a-fA-F_\\-]+$", options: .regularExpression) != nil {
+            return true
+        }
+        return false
+    }
+
     /// 为尚未配声的角色生成方案；保留已有绑定，共享风险须另行确认，默认不启用微语速。
     public private(set) var pendingCastingPlan: AudiobookCastingPlan?
 
@@ -3007,6 +3086,15 @@ public final class AudiobookWorkflowModel {
         Task { await pronunciationController?.load(bookID: bookID) }
     }
 
+    public func dismissPronunciationRules() {
+        isPronunciationSheetPresented = false
+        guard let bookID = selectedBook?.id else { return }
+        Task {
+            await refreshChapterReadinessMap(for: bookID)
+            await reloadSelectedChapterDetails()
+        }
+    }
+
     public func toggleSharedMinorVoice(roleID: UUID, allowed: Bool) async {
         guard let bookID = selectedBook?.id, let castController, let store else { return }
         do {
@@ -4106,6 +4194,11 @@ public final class AudiobookWorkflowModel {
             errorMessage = nil; surfaceMode = .listening; return
         }
         let audioID = selectedAudioRevisionID
+        listeningChapterID = chapter.id
+        surfaceMode = .listening
+        if audioID == nil && selectedChapterID != chapter.id {
+            selectedChapterID = chapter.id
+        }
         do {
             errorMessage = nil
             let pinnedRevision = audioID.flatMap { id in audioRevisions.first { $0.id == id }?.chapterRevisionIDsByChapter[chapter.id] }
@@ -4122,9 +4215,7 @@ public final class AudiobookWorkflowModel {
                     roleName: byID[binding.fragmentID].flatMap { fragment in characters.first { $0.id == fragment.roleID }?.displayName } ?? "原版朗读")
             }
             guard selectedBook?.id == bookID, selectedAudioRevisionID == audioID else { return }
-            listeningChapterID = chapter.id; listeningTexts = texts
-            if audioID == nil { selectedChapterID = chapter.id; await reloadSelectedChapterDetails() }
-            surfaceMode = .listening
+            listeningTexts = texts
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -4351,13 +4442,20 @@ public final class AudiobookWorkflowModel {
         cancelVoiceDraftCreation()
         let deferredRefresh = cancelWorkspaceRefresh()
         invalidateCastingAudition()
+        await deferredRefresh?.value
+        await listeningController?.leaveWorkshop()
+    }
+
+    /// 用户返回书架：释放当前书籍的加载状态与阅读器缓存。
+    public func returnToShelf() async {
+        await leaveWorkshop()
         bookSelectionLoad.reset()
         chapterSelectionLoad.reset()
         readinessSelectionLoad.reset()
         isLoadingChapterDetails = false
         await workspaceReader?.stop()
-        await deferredRefresh?.value
-        await listeningController?.leaveWorkshop()
+        selectedBook = nil
+        surfaceMode = .shelf
     }
 
     /// 应用退出或停止：保存听书书签，优雅暂停在途分析与制作并持久化检查点。

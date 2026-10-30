@@ -1118,4 +1118,78 @@ final class AssistantCancelReceiveTests: XCTestCase {
         try? await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(session.uploadedSamplesDropped, 100, "快照回退不得倒扣已累计的丢样数")
     }
+
+    func testOversizedReplyInVoiceSessionFinalizesFullTextWithoutStartingTTS() async throws {
+        let oversized = String(repeating: "答", count: 4_097)
+        let harness = try await makeVoiceHarness(
+            llmScripts: [.deltas(["前半段", String(oversized.dropFirst(3))]), .deltas(["后续回复。"])]
+        )
+        defer { cleanup(harness) }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "请详细回答"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant && $0.text.count == 4_097 } },
+            message: "超长回复必须完整定稿入列"
+        )
+        XCTAssertNil(harness.session.streamingReply, "定稿后流式预览气泡必须收起")
+        let assistantTurn = try XCTUnwrap(harness.session.turns.first { $0.role == .assistant })
+        XCTAssertFalse(assistantTurn.isInterrupted)
+        XCTAssertEqual(assistantTurn.text.unicodeScalars.count, 4_097)
+
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        let storedLines = try await harness.store.lines(sessionID: recordID)
+        let storedAssistant = try XCTUnwrap(storedLines.first { $0.role == .assistant })
+        XCTAssertEqual(storedAssistant.status, .final)
+        XCTAssertFalse(storedAssistant.isInterrupted)
+        XCTAssertEqual(storedAssistant.text.unicodeScalars.count, 4_097)
+
+        let counters = await harness.clients()[0].snapshot()
+        XCTAssertEqual(counters.startTTS, 0, "朗读计划超限时不得开启远端 TTS 流")
+
+        await harness.clients()[0].emit(.completed(itemID: "q2", transcript: "继续追问"))
+        await waitUntil(
+            { harness.session.turns.filter { $0.role == .assistant }.count == 2 },
+            message: "第二轮追问应正常完成"
+        )
+        let requests = await harness.llm.requests
+        let secondRequest = try XCTUnwrap(requests.last)
+        XCTAssertTrue(
+            secondRequest.messages.contains { $0.role == .assistant && $0.text.unicodeScalars.count == 4_097 },
+            "下一轮追问上下文必须包含上一轮定稿的完整超长回复"
+        )
+    }
+
+    func testVoiceApplyOrTTSBeginFailureStillFinalizesCompletedReplyText() async throws {
+        let harness = try await makeVoiceHarness(
+            llmScripts: [.deltas(["第一段正文，", "第二段完整收尾。"])]
+        )
+        defer { cleanup(harness) }
+        var allowVoiceBinding = true
+        harness.session.realtimeCapabilityBindingProvider = { _ in
+            guard allowVoiceBinding else { return nil }
+            return RealtimeCapabilityBinding(
+                asrModelRevision: "asr-1",
+                canonicalVoiceID: "voice-1",
+                voiceRevision: "v-1",
+                ttsModelRevision: "tts-1"
+            )
+        }
+        try await harness.coordinator.begin(.assistant)
+        await harness.clients()[0].emit(.configured)
+        allowVoiceBinding = false
+        await harness.session.changeVoice(to: "unavailable-voice", name: "未就绪音色")
+        await harness.clients()[0].emit(.completed(itemID: "q1", transcript: "测试音色失败"))
+        await waitUntil(
+            { harness.session.turns.contains { $0.role == .assistant } },
+            message: "音色切换或 TTS 前置失败时仍需将完整回复定稿入列"
+        )
+        XCTAssertNil(harness.session.streamingReply)
+        XCTAssertNotNil(harness.session.lastFailure)
+        let recordID = try XCTUnwrap(harness.session.sessionID)
+        let storedLines = try await harness.store.lines(sessionID: recordID)
+        let storedAssistant = try XCTUnwrap(storedLines.first { $0.role == .assistant })
+        XCTAssertEqual(storedAssistant.status, .final)
+        XCTAssertEqual(storedAssistant.text, "第一段正文，第二段完整收尾。")
+    }
 }
