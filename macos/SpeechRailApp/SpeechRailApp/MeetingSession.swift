@@ -330,6 +330,7 @@ public final class MeetingSession {
                     $0.speakerLabelIsManual = saved.speakerLabelIsManual
                 }
             }
+            self.transcriptPresentation.advanceRevision()
             await self.minutes.reload(sessionID: sessionID)
         }
     }

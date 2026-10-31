@@ -1652,7 +1652,9 @@ final class MeetingSessionLifecycleTests: XCTestCase {
             ),
             id: "\(sessionID)-line-b"
         )
-        await h.session.stopCapture()
+        await h.clients.all.last?.finishEventsOnClose()
+        await h.session.finishAndSummarize()
+        try await h.settle { $0.phase == .archived }
 
         let initialRevision = h.session.transcriptPresentation.revision
         await h.session.renameSpeaker(label: "A", to: "王五")
@@ -1664,10 +1666,12 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         await h.session.merge(label: "B", into: "A")
         try await h.settle { $0.session.transcriptPresentation.revision > afterRenameRevision }
         let reloadedLines = try await h.coordinator.lines(sessionID: sessionID)
-        XCTAssertEqual(reloadedLines.map(\.speakerLabel), ["A", "A"])
+        XCTAssertEqual(reloadedLines.map(\.speakerLabel), ["A", "B"])
+        let namesAfterMerge = try await h.coordinator.speakerNames(sessionID: sessionID)
+        XCTAssertEqual(namesAfterMerge["B"], "王五")
         let ordinals = SpeakerLabeling.displayOrdinals(for: reloadedLines.flatMap(\.speakerLabels))
         let displayNames = Dictionary(uniqueKeysWithValues: Set(reloadedLines.flatMap(\.speakerLabels)).map { label in
-            (label, SpeakerLabeling.chipText(label: label, displayName: namesAfterRename[label], ordinal: ordinals[label]))
+            (label, SpeakerLabeling.chipText(label: label, displayName: namesAfterMerge[label], ordinal: ordinals[label]))
         })
         let matchingLines = reloadedLines.filter { line in
             line.speakerLabels.contains { label in
