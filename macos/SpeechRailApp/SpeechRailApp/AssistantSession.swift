@@ -453,18 +453,27 @@ public final class AssistantSession {
             from: snapshot.lines, selectedLineIDs: selectedLineIDs, maxTurns: maxTurns
         )
         guard !seedTurns.isEmpty else { return nil }
+        let startedAt = Date()
+        let resolved = preferences?().resolvedLLMConfiguration(
+            for: .assistant,
+            globalAPIKey: apiKeyProvider(),
+            moduleAPIKey: moduleAPIKeyProvider(.assistant)
+        )
+        let configuration = resolved?.configuration
         // 建新场：只带非秘密 route/persona/voice 信息，不带 key 与旧同意。
         let draft = SessionDraft(
             kind: .assistant,
             engineProfile: "unknown",
             audioSource: .microphone,
-            llmEndpoint: snapshot.record.llmEndpoint,
-            llmModel: snapshot.record.llmModel,
+            diarization: .off,
+            llmEndpoint: configuration?.normalizedBaseURL ?? snapshot.record.llmEndpoint,
+            llmModel: configuration?.model ?? snapshot.record.llmModel,
             persona: snapshot.record.persona,
             voice: snapshot.record.voice,
-            startedAt: Date()
+            startedAt: startedAt
         )
         guard let record = try? await coordinator.createSession(draft) else { return nil }
+        prepareConversationContext(startedAt: startedAt)
         // 冻结种子：选定文字自包含；parent 引用可置空但保留来源与范围描述。
         continuationSeed = AssistantContinuationSeed(
             parentSessionID: parentID,
@@ -472,7 +481,7 @@ public final class AssistantSession {
             frozenText: seedTurns.map { ($0.role == SessionLineRole.assistant ? "助手" : "你") + "：" + $0.text }
                 .joined(separator: "\n"),
             sourceRangeDescription: "旧记录 \(parentID) 最近 \(seedTurns.count) 句（已选完整轮次）",
-            createdAt: Date()
+            createdAt: startedAt
         )
         // 新场从种子重建 history：只含选定完整轮次，不含密钥与旧同意。
         contextTurns = []
@@ -488,14 +497,34 @@ public final class AssistantSession {
                 )
             ))
         }
+        if let resolved {
+            frozenRoute = FrozenRoute(
+                endpoint: resolved.configuration.normalizedBaseURL,
+                model: resolved.configuration.model,
+                origin: resolved.origin
+            )
+            llmModel = resolved.configuration.model
+        } else {
+            frozenRoute = nil
+            llmModel = snapshot.record.llmModel
+        }
+        do {
+            memories = try await coordinator.memories(activeOnly: true).map(\.body)
+            memoryLoadFailed = false
+        } catch {
+            memories = []
+            memoryLoadFailed = true
+            lastFailure = "本次未加载记忆：\(error.localizedDescription)"
+        }
         sessionID = record.id
         currentOrdinal = 0
         turns = []
         streamingReply = nil
         currentReply = nil
         lastFinalizedReply = nil
-        memories = []
-        frozenRoute = nil
+        isTextOnlyConversation = true
+        blocked = nil
+        phase = .listening
         return record.id
     }
 
@@ -1159,8 +1188,35 @@ public final class AssistantSession {
         let token = beginStartToken()
         let transport = try await openVoiceTransport(token: token)
         try requireLive(token)
-        prepareConversationContext(startedAt: transport.startedAt)
-        try await createConversationRecord(token: token, transport: transport)
+        if continuationSeed != nil, isTextOnlyConversation, let existingID = sessionID {
+            sessionStartedAt = sessionStartedAt ?? transport.startedAt
+            isStoppingIntentionally = false
+            isMuted = false
+            inputLifecycle = .active
+            isTextOnlyConversation = false
+            if frozenRoute == nil {
+                frozenRoute = FrozenRoute(
+                    endpoint: transport.configuration.normalizedBaseURL,
+                    model: transport.configuration.model,
+                    origin: transport.configurationOrigin
+                )
+            }
+            if memories.isEmpty, !memoryLoadFailed {
+                do {
+                    memories = try await coordinator.memories(activeOnly: true).map(\.body)
+                    memoryLoadFailed = false
+                } catch {
+                    memories = []
+                    memoryLoadFailed = true
+                    lastFailure = "本次未加载记忆：\(error.localizedDescription)"
+                }
+            }
+            try requireLive(token)
+            coordinator.sessionDidStartRecording(id: existingID)
+        } else {
+            prepareConversationContext(startedAt: transport.startedAt)
+            try await createConversationRecord(token: token, transport: transport)
+        }
         phase = .listening
         startPump(
             stream: transport.stream,
@@ -1484,6 +1540,7 @@ public final class AssistantSession {
         invalidateReply()
         turns = []
         contextTurns = []
+        continuationSeed = nil
         replyQuestionIDs = [:]
         replySpoken = [:]
         replyPlayback = [:]
@@ -3154,23 +3211,46 @@ public final class AssistantSession {
         }
         // M0e：完整终态后才确认朗读计划。定稿原文 → 整体解析/保义转换 →
         // 计划文本 TTS → 播放确认。计划超限则暂停朗读保留全文，不硬切不开口。
-        if spoken, let stream = ttsStream {
+        speakBlock: if spoken, let stream = ttsStream {
             guard generation == replyGeneration else { return }
+            let utterance: String
+            switch AssistantSpeechPlanBuilder.build(from: replyState.text) {
+            case .success(let plan):
+                guard plan.isValid, !plan.speakText.isEmpty else {
+                    replyPlayback[replyState.id] = .notPlayed
+                    lastFailure = "朗读计划校验未通过，已保留完整文字。"
+                    if phase == .thinking { phase = .listening }
+                    break speakBlock
+                }
+                utterance = plan.speakText
+            case .failure(let error):
+                replyPlayback[replyState.id] = .notPlayed
+                switch error {
+                case .sourceTooLong:
+                    lastFailure = "这句回答较长，已保留完整文字并暂停朗读。"
+                case .nothingSpeakable:
+                    lastFailure = "这句回答无可朗读正文，已保留完整文字。"
+                }
+                if phase == .thinking { phase = .listening }
+                break speakBlock
+            }
             // 上一轮远端归属未确认时不开新轮：由调用方走显式重试。
             if let effect = interruptEffect {
                 let confirmed = await effect.value
                 guard generation == replyGeneration else { return }
                 guard confirmed, ttsStream === stream else {
+                    replyPlayback[replyState.id] = .notPlayed
                     lastFailure = "上一轮朗读尚未确认结束，请重试语音。"
                     if phase == .thinking { phase = .listening }
-                    return
+                    break speakBlock
                 }
             }
             if selectedVoice != nil {
                 guard await applyLatestVoice() else {
+                    replyPlayback[replyState.id] = .notPlayed
                     lastFailure = "所选音色尚未准备好，请重试。"
                     if phase == .thinking { phase = .listening }
-                    return
+                    break speakBlock
                 }
                 guard generation == replyGeneration else { return }
             }
@@ -3200,27 +3280,24 @@ public final class AssistantSession {
                 )
             } catch {
                 guard generation == replyGeneration else { return }
+                speechRequests.removeValue(forKey: requestID)
+                speechRequestIDs.removeValue(forKey: generation)
+                requestVoices.removeValue(forKey: requestID)
+                replyPlayback[replyState.id] = .notPlayed
                 lastFailure = error.localizedDescription
                 if phase == .thinking { phase = .listening }
-                return
+                break speakBlock
             }
             if let state = currentReply, state.generation == generation,
                let ordinal = state.ordinal {
                 await recordAcceptedVoice(requestID: requestID, ordinal: ordinal)
             }
             guard generation == replyGeneration else { return }
-            do {
-                try await stream.speakConfirmedPlan(replyState.text)
-                // 关输入之后仍然继续收音频；这里只保证"没 ACK 的文本不会越过 finish"。
-                await stream.finishInput()
-                // 确认计划已开嗓：朗读态由首个音频到达 Boo 认（receiver .ttsAudio），
-                // 无音频回包时保持 thinking 直至终态收尾，不伪造 speaking。
-            } catch {
-                guard generation == replyGeneration else { return }
-                // 超限/计划失败：暂停朗读，保留全文与落库，不开口。
-                if phase == .thinking { phase = .listening }
-                return
-            }
+            stream.offerConfirmed(utterance)
+            // 关输入之后仍然继续收音频；这里只保证"没 ACK 的文本不会越过 finish"。
+            await stream.finishInput()
+            // 确认计划已开嗓：朗读态由首个音频到达确认（receiver .ttsAudio），
+            // 无音频回包时保持 thinking 直至终态收尾，不伪造 speaking。
         }
         guard generation == replyGeneration, currentReply?.id == replyState.id else { return }
         // 朗读被打断过就按打断收尾，否则按正常完成收尾。两者写的是同一行。

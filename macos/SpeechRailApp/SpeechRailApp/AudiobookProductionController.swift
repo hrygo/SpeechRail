@@ -49,7 +49,7 @@ public enum AudiobookProductionError: LocalizedError, Equatable, Sendable {
         case .pauseWithUnconfirmedRemoteStop:
             return "制作已暂停；当前在途片段的服务端停止状态尚未确认，稍后继续时将自动核对。"
         case .savedAudioNeedsVerification:
-            return "音频已保存，但校验未通过。请检查音色与服务的版本信息后重新预览；按相同条件再次更新不能解决此问题。已有音频和当前采用版本均已保留。"
+            return "音频已妥善保存，但生成校验未通过。已有音频已保留，请点击重新制作未就绪片段进行重试。"
         case .cancelled:
             return "章节制作已暂停。"
         }

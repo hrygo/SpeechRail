@@ -423,4 +423,119 @@ final class AssistantReplyPersistenceRaceTests: XCTestCase {
         XCTAssertEqual(assistantLines.first?.status, .final)
         gate.release()
     }
+
+    func testContinueFromRecordAllowsImmediateTypedQuestionWithContext() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assistant-continue-typed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = SessionStore(directory: directory)
+        let suiteName = "assistant-continue-typed-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let coordinator = SessionCoordinator(store: store, defaults: defaults)
+        await coordinator.openStore()
+        let llm = AssistantSessionTests.FakeAssistantLLM(
+            scripts: [.deltas(["历史回答一。"]), .deltas(["续接后的新回答。"])]
+        )
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.llmBaseURL = "http://127.0.0.1:8000/v1"
+        preferences.llmModel = "test-model"
+        let session = AssistantSession(
+            coordinator: coordinator,
+            dependencies: AssistantSessionDependencies(llm: llm)
+        )
+        session.preferences = { preferences }
+        session.apiKeyProvider = { "test-key" }
+        session.moduleAPIKeyProvider = { _ in nil }
+        session.serviceReadiness = { .ready(profile: nil) }
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            defaults.removePersistentDomain(forName: defaults.description)
+        }
+
+        _ = await session.ask(typed: "历史问题一")
+        await waitUntil({ session.turns.contains { $0.role == .assistant && $0.text == "历史回答一。" } })
+        let parentID = try XCTUnwrap(session.sessionID)
+        _ = await session.endConversation()
+
+        let continuedID = await session.continueFromRecord(parentID: parentID)
+        let childID = try XCTUnwrap(continuedID)
+        XCTAssertNotEqual(childID, parentID)
+        let sendResult = await session.ask(typed: "接着说")
+        XCTAssertEqual(sendResult, .accepted, "continueFromRecord 后应立即可打字提问")
+        await waitUntil({ session.turns.contains { $0.role == .assistant && $0.text == "续接后的新回答。" } })
+
+        let requests = await llm.requests
+        let latestRequest = try XCTUnwrap(requests.last)
+        XCTAssertTrue(latestRequest.messages.contains { $0.role == .user && $0.text == "历史问题一" })
+        XCTAssertTrue(latestRequest.messages.contains { $0.role == .assistant && $0.text == "历史回答一。" })
+        XCTAssertTrue(latestRequest.messages.contains { $0.role == .user && $0.text == "接着说" })
+    }
+
+    func testContinueFromRecordThenMicRetainsContextTurns() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assistant-continue-mic-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = SessionStore(directory: directory)
+        let suiteName = "assistant-continue-mic-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let coordinator = SessionCoordinator(store: store, defaults: defaults)
+        await coordinator.openStore()
+        let llm = AssistantSessionTests.FakeAssistantLLM(
+            scripts: [.deltas(["历史回答一。"]), .deltas(["语音续接回答。"])]
+        )
+        let audio = AssistantSessionTests.FakeAssistantAudio(autoStartCapture: true)
+        let box = AssistantSessionTests.ClientBox()
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.llmBaseURL = "http://127.0.0.1:8000/v1"
+        preferences.llmModel = "test-model"
+        let session = AssistantSession(
+            coordinator: coordinator,
+            dependencies: AssistantSessionDependencies(
+                llm: llm,
+                makeRealtimeClient: { configuration in
+                    let client = AssistantSessionTests.FakeAssistantRealtime()
+                    box.append(client, configuration: configuration)
+                    return client
+                }
+            )
+        )
+        session.preferences = { preferences }
+        session.apiKeyProvider = { "test-key" }
+        session.moduleAPIKeyProvider = { _ in nil }
+        session.audioSourceFactory = { audio }
+        session.realtimeCapabilityBindingProvider = { _ in
+            RealtimeCapabilityBinding(
+                asrModelRevision: "asr-1",
+                canonicalVoiceID: "voice-1",
+                voiceRevision: "v-1",
+                ttsModelRevision: "tts-1"
+            )
+        }
+        session.serviceReadiness = { .ready(profile: nil) }
+        coordinator.starter = { kind in
+            guard kind == .assistant else { return }
+            try await session.beginCapture()
+        }
+        coordinator.stopper = { kind in
+            guard kind == .assistant else { return }
+            await session.stopCapture()
+        }
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            defaults.removePersistentDomain(forName: defaults.description)
+        }
+
+        _ = await session.ask(typed: "历史问题一")
+        await waitUntil({ session.turns.contains { $0.role == .assistant && $0.text == "历史回答一。" } })
+        let parentID = try XCTUnwrap(session.sessionID)
+        _ = await session.endConversation()
+
+        let continuedID = await session.continueFromRecord(parentID: parentID)
+        let childID = try XCTUnwrap(continuedID)
+        XCTAssertEqual(session.contextTurnCountForTest, 1)
+
+        try await coordinator.begin(.assistant)
+        XCTAssertEqual(session.sessionID, childID, "开麦应复用 continueFromRecord 创建的会话，不新建重复记录")
+        XCTAssertEqual(session.contextTurnCountForTest, 1, "开麦不得清空已恢复的种子上下文")
+    }
 }

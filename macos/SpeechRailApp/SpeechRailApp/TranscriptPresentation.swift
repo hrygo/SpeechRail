@@ -100,6 +100,7 @@ public final class TranscriptPresentation<Row: TranscriptPresentationRow> {
         revision &+= 1
     }
     public func replace(_ line: Row) { update(id: line.id) { $0 = line } }
+    public func advanceRevision() { revision &+= 1 }
     public func beginHistory(anchorID: String?) {
         if isFollowingTail {
             let frozen = tail.rows

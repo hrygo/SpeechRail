@@ -152,9 +152,7 @@ actor AudiobookWorkspaceReader {
                 || input.chapters.contains { $0.currentChapterRevisionID != nil || $0.previousChapterRevisionID != nil }
             let resume = started ? try? await revisions?.resumePlan(bookID: request.bookID) : nil
             try Task.checkCancellation()
-            if let resume,
-               input.chapters.contains(where: { $0.currentChapterRevisionID == nil && resume.readyChapterIDs.contains($0.id) })
-            {
+            if resume != nil, try await store.workspaceChangeToken() != input.changeToken {
                 input = try await store.loadWorkspaceInput(bookID: request.bookID, chapterID: request.chapterID)
                 try Task.checkCancellation()
             }

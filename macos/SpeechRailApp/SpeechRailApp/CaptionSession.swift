@@ -2192,16 +2192,19 @@ public final class CaptionSession {
                         ).formattedPromptLine
                     }
             )
-            // ② 定稿瞬间继承未定稿译文，消除「中文 → 外语 → 中文」的视觉断层。
-            //    但只在**这一句真的会被翻译**时继承：中文句与「仅原文」档不调模型，
-            //    继承上一句的草稿会让这一行先闪出别人的译文，再被 `onFinished(nil)` 抹掉。
+            // ② 定稿瞬间同步消费并清空协调器内的 Stage 1 草稿状态，消除段落宽限期（200ms–750ms）
+            //    跨句串扰、新句预览被误杀与防抖废请求；同时在真正需要翻译时继承首行草稿。
+            let consumedDraft = translationCoordinator.consumePartialDraftAndReset(
+                forCompletedSource: command.text
+            )
             let initialDraftTranslation = Self.inheritableDraftTranslation(
-                lastPartialTranslation: lastPartialTranslation?.translatedText,
-                lastPartialSourceText: lastPartialTranslation?.sourceText,
+                lastPartialTranslation: consumedDraft.draftText ?? lastPartialTranslation?.translatedText,
+                lastPartialSourceText: consumedDraft.draftText != nil ? command.text : lastPartialTranslation?.sourceText,
                 sourceText: command.text,
                 displayMode: mode,
                 preferredLanguage: sourceLanguage
             )
+            let initialStabilizedPrefix = initialDraftTranslation != nil ? consumedDraft.stabilizedPrefix : nil
             lastPartialTranslation = nil
             partialTranslatedText = nil
             let lineID = command.lineID
@@ -2227,15 +2230,26 @@ public final class CaptionSession {
                 &line,
                 contextLines: contextLines,
                 willTranslate: willTranslate,
-                observedAt: command.observedAt
+                observedAt: command.observedAt,
+                initialStabilizedPrefix: initialStabilizedPrefix
             )
             persistedTranscriptRevision &+= 1
-            if let initialDraftTranslation, !initialDraftTranslation.isEmpty {
+            if paragraphID == lineID, let initialDraftTranslation, !initialDraftTranslation.isEmpty {
                 _ = try? await coordinator.attachLineTranslation(
                     lineID: lineID,
                     translatedText: initialDraftTranslation,
                     sourceLanguage: nil
                 )
+            } else if paragraphID != lineID {
+                if let idx = paragraphs.firstIndex(where: { $0.id == paragraphID }),
+                   paragraphs[idx].translatedText == nil
+                {
+                    _ = try? await coordinator.attachLineTranslation(
+                        lineID: paragraphID,
+                        translatedText: nil,
+                        sourceLanguage: nil
+                    )
+                }
             }
             _ = try? await coordinator.attachLineParagraphID(lineID: lineID, paragraphID: paragraphID)
             persistedTranscriptRevision &+= 1
@@ -2262,7 +2276,8 @@ public final class CaptionSession {
         _ line: inout Line,
         contextLines: [String],
         willTranslate: Bool,
-        observedAt: Date
+        observedAt: Date,
+        initialStabilizedPrefix: String? = nil
     ) -> String {
         if let index = paragraphs.indices.last,
            paragraphs[index].id == openParagraphID,
@@ -2274,8 +2289,15 @@ public final class CaptionSession {
            ) {
             let paragraphID = paragraphs[index].id
             line.paragraphID = paragraphID
+            line.translatedText = nil
             transcriptPresentation.apply(line)
+            let hadSingleLineDraftOnly = paragraphs[index].translatedText == paragraphs[index].initialDraftTranslation
             paragraphs[index].append(line, observedAt: observedAt)
+            if hadSingleLineDraftOnly {
+                transcriptPresentation.update(id: paragraphID) {
+                    $0.translatedText = nil
+                }
+            }
             paragraphs[index].isTranslating = paragraphs[index].isTranslating || willTranslate
             pruneParagraphs()
             if let currentIdx = paragraphs.firstIndex(where: { $0.id == paragraphID }) {
@@ -2294,7 +2316,8 @@ public final class CaptionSession {
             line: line,
             observedAt: observedAt,
             isTranslating: willTranslate,
-            contextLines: contextLines
+            contextLines: contextLines,
+            initialStabilizedPrefix: initialStabilizedPrefix
         )
         paragraph.initialDraftTranslation = line.translatedText
         paragraphs.append(paragraph)
@@ -2507,7 +2530,9 @@ public final class CaptionSession {
             contextLines: paragraph.contextLines,
             displayMode: effectiveDisplayMode,
             preferredLanguage: sourceLanguage,
-            priorDraftHint: isParagraph ? (paragraph.translatedText ?? paragraph.initialDraftTranslation) : paragraph.initialDraftTranslation,
+            priorDraftHint: capturedFallbackDraft,
+            explicitStabilizedPrefix: isParagraph ? nil : paragraph.initialStabilizedPrefix,
+            cancelActivePartial: false,
             requestedAt: paragraph.startedAt,
             glossary: glossary,
             isParagraph: isParagraph,
@@ -2548,17 +2573,22 @@ public final class CaptionSession {
                 }
                 // 即使段落已因滑动窗口上限被 prune 出内存，正式行仍在 SQLite 中，迟到译文必须写回首行。
                 self.transcriptPresentation.update(id: firstLineID) {
-                    if let resolved { $0.translatedText = resolved }
+                    if let resolved {
+                        $0.translatedText = resolved
+                    } else if currentLineIDs.count > 1 {
+                        $0.translatedText = nil
+                    }
                     $0.sourceLanguage = lang.isEmpty ? $0.sourceLanguage : lang
                     $0.isTranslating = false
                 }
-                // 组内后续行保留各自已有的草稿，不做破坏性清空；显示与最终译文走段落。
+                // 多行段落中后续行的局部草稿不得残留冒充段落译文。
                 for lineID in currentLineIDs.dropFirst() {
                     self.transcriptPresentation.update(id: lineID) {
+                        $0.translatedText = nil
                         $0.isTranslating = false
                     }
                 }
-                if resolved != nil || !lang.isEmpty {
+                if resolved != nil || !lang.isEmpty || currentLineIDs.count > 1 {
                     _ = try? await self.coordinator.attachLineTranslation(
                         lineID: firstLineID,
                         translatedText: resolved,

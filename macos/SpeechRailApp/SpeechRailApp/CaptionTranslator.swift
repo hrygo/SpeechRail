@@ -898,6 +898,38 @@ public final class CaptionTranslationCoordinator {
         return false
     }
 
+    public struct ConsumedPartialDraft: Equatable, Sendable {
+        public let draftText: String?
+        public let stabilizedPrefix: String?
+
+        public init(draftText: String?, stabilizedPrefix: String?) {
+            self.draftText = draftText
+            self.stabilizedPrefix = stabilizedPrefix
+        }
+    }
+
+    /// 在单句定稿（completed）瞬间同步消费并清空当前句的 Stage 1 草稿状态，
+    /// 避免在段落聚合等待宽限期（200ms–750ms）内残留上一句草稿污染下一句 Stage 1 预览或白发防抖请求。
+    public func consumePartialDraftAndReset(
+        forCompletedSource completedSource: String
+    ) -> ConsumedPartialDraft {
+        let trimmed = completedSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidateSource = !inFlightPartialSourceText.isEmpty ? inFlightPartialSourceText : lastPartialSourceText
+        let draftText: String?
+        let stabilizedPrefix: String?
+        if !trimmed.isEmpty,
+           (candidateSource.isEmpty || Self.draftMatchesSource(partialSource: candidateSource, completedSource: trimmed))
+        {
+            draftText = lastPartialTranslation ?? inFlightPartialTranslation
+            stabilizedPrefix = stabilizedDraftPrefix
+        } else {
+            draftText = nil
+            stabilizedPrefix = nil
+        }
+        cancelPartial()
+        return ConsumedPartialDraft(draftText: draftText, stabilizedPrefix: stabilizedPrefix)
+    }
+
     /// Stage 2：当句子定稿（completed / sealed）时，取消 partial 预览并携带前 3 句双语平行上下文精翻。
     ///
     /// 终态一定回调 `onFinished`：失败时用已到达前缀或 Stage 1 草稿兜底，绝不把行留在「翻译中」。
@@ -908,6 +940,8 @@ public final class CaptionTranslationCoordinator {
         displayMode: CaptionDisplayMode,
         preferredLanguage: CaptionSourceLanguage = .auto,
         priorDraftHint: String? = nil,
+        explicitStabilizedPrefix: String? = nil,
+        cancelActivePartial: Bool = true,
         /// 定稿文本到达的时间；用于把落库等待和队列等待一起算进首字延迟。
         requestedAt: Date = Date(),
         glossary: CaptionGlossary = .empty,
@@ -917,20 +951,28 @@ public final class CaptionTranslationCoordinator {
         onFinished: @escaping @MainActor (String, String?, String) async -> Void
     ) {
         let trimmed = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let candidateSource = !inFlightPartialSourceText.isEmpty ? inFlightPartialSourceText : lastPartialSourceText
         let coordinatorDraft: String?
         let coordinatorStabilized: String?
-        if candidateSource.isEmpty || Self.draftMatchesSource(partialSource: candidateSource, completedSource: trimmed) {
-            coordinatorDraft = lastPartialTranslation ?? inFlightPartialTranslation
-            coordinatorStabilized = stabilizedDraftPrefix
+        if cancelActivePartial {
+            let candidateSource = !inFlightPartialSourceText.isEmpty ? inFlightPartialSourceText : lastPartialSourceText
+            if !isParagraph,
+               (candidateSource.isEmpty || Self.draftMatchesSource(partialSource: candidateSource, completedSource: trimmed))
+            {
+                coordinatorDraft = lastPartialTranslation ?? inFlightPartialTranslation
+                coordinatorStabilized = explicitStabilizedPrefix ?? stabilizedDraftPrefix
+            } else {
+                coordinatorDraft = nil
+                coordinatorStabilized = explicitStabilizedPrefix
+            }
+            cancelPartial()
         } else {
             coordinatorDraft = nil
-            coordinatorStabilized = nil
+            coordinatorStabilized = isParagraph ? nil : explicitStabilizedPrefix
         }
-        // 即使 Stage 1 在流式中途被定稿事件打断，也保留已流式产出的草稿或会话层传入的 `priorDraftHint` 作为保底
-        let fallbackDraft = coordinatorDraft ?? priorDraftHint
-        let draftForPrompt = coordinatorStabilized ?? fallbackDraft
-        cancelPartial()
+        // 即使 Stage 1 在流式中途被定稿事件打断，也保留已流式产出的草稿或会话层传入的 `priorDraftHint` 作为保底；
+        // 多行段落不允许用单行草稿冒充整段译文。
+        let fallbackDraft = isParagraph ? priorDraftHint : (coordinatorDraft ?? priorDraftHint)
+        let draftForPrompt = isParagraph ? fallbackDraft : (coordinatorStabilized ?? fallbackDraft)
         let isChinese: Bool
         let detectedLanguageCode: String
         switch preferredLanguage {

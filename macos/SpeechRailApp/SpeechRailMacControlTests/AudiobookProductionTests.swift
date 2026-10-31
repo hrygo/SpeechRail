@@ -1865,4 +1865,173 @@ final class AudiobookProductionTests: XCTestCase {
         catch { XCTAssertEqual(error as? ServiceAPIClientError, refusal) }
         XCTAssertEqual(renderer.requests.count - before, 1, "Only transient errors may be retried")
     }
+
+    @MainActor
+    func testTrashAndRestorePreservesPronunciationCastingHistoryAndReadyChapters() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let capabilities = Self.makeDefaultCapabilities()
+        let castController = AudiobookCastController(store: store, capabilityProvider: { capabilities })
+        let revisionController = AudiobookRevisionController(store: store)
+        let renderer = ScriptedSpeechRenderer(capabilities: capabilities)
+        let admission = SpeechCreationAdmission()
+        let production = AudiobookProductionController(
+            store: store,
+            castController: castController,
+            revisionController: revisionController,
+            renderer: renderer,
+            admission: admission
+        )
+
+        let text = "第一章 重庆\n他踏上旅途去重庆。\n"
+        let url = tempRoot.appendingPathComponent("trash-restore.txt")
+        try Data(text.utf8).write(to: url)
+        let preview = try await AudiobookTXTImporter.prepare(fileURL: url, encoding: .utf8)
+        let bookID = try await store.importBook(preview)
+        let chapter = try await store.chapters(for: bookID)[0]
+
+        var book = try await store.book(id: bookID)
+        book.analysisState = .allWindowsValidated
+        try await store.updateBook(book)
+
+        let narrator = try await store.characters(for: bookID)[0]
+        let atoms = try await store.atoms(for: bookID, chapterID: chapter.id).filter { $0.kind != .formatting }
+        let anns = atoms.map { atom in
+            AudiobookAnnotation(
+                bookID: bookID,
+                chapterID: chapter.id,
+                windowID: UUID(),
+                atomID: atom.id,
+                sourceRange: atom.sourceRange,
+                assignment: .assigned(roleID: narrator.id)
+            )
+        }
+        try await store.saveAnnotations(bookID: bookID, annotations: anns)
+
+        let modelRev = String(repeating: "a", count: 40)
+        let voice1 = AudiobookVoiceBinding(
+            roleID: narrator.id,
+            voiceID: "v-narrator",
+            voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+            modelRevision: modelRev
+        )
+        let voice2 = AudiobookVoiceBinding(
+            roleID: narrator.id,
+            voiceID: "v-hero",
+            voiceRevision: "vr_1123456789abcdef0123456789abcdef",
+            modelRevision: modelRev
+        )
+        try await castController.bindVoice(bookID: bookID, roleID: narrator.id, binding: voice1)
+        try await castController.bindVoice(bookID: bookID, roleID: narrator.id, binding: voice2)
+
+        let pron = AudiobookPronunciationBinding(
+            setID: "ab-\(bookID.uuidString.lowercased())",
+            revision: "pr_1",
+            entries: [PronunciationEntry(id: "e1", surface: "重庆", spoken: "崇庆")]
+        )
+        try await store.savePronunciationBinding(pron, bookID: bookID)
+
+        let castRev = try await castController.currentCastRevisionID(for: bookID)
+        try await castController.confirmCast(bookID: bookID, revisionID: castRev)
+        let voiceDigest = try await castController.currentVoiceSetDigest(for: bookID)
+        try await castController.confirmAudition(bookID: bookID, voiceSetDigest: voiceDigest)
+
+        try await production.start(bookID: bookID, chapterIDs: [chapter.id])
+        let resumeBefore = try await revisionController.resumePlan(bookID: bookID)
+        XCTAssertEqual(resumeBefore.readyChapterIDs, [chapter.id])
+
+        try await store.trashBook(id: bookID)
+        try await store.restoreTrashedBook(id: bookID)
+
+        let restoredPron = try await store.pronunciationBinding(for: bookID)
+        XCTAssertEqual(restoredPron, pron, "废纸篓恢复后作品发音规则不得丢失")
+        let resumeAfter = try await revisionController.resumePlan(bookID: bookID)
+        XCTAssertEqual(resumeAfter.readyChapterIDs, [chapter.id], "废纸篓恢复后已就绪章节不得因发音规则丢失而退化为待重做")
+
+        try await castController.undoLastCastingChange(bookID: bookID)
+        let bindingsAfterUndo = try await store.voiceBindings(for: bookID)
+        XCTAssertEqual(bindingsAfterUndo[narrator.id]?.voiceID, "v-narrator", "废纸篓恢复后配声修订历史应可正常撤销")
+    }
+
+    @MainActor
+    func testResumePlanAndExportAuditScopeRecoveryToTargetBookAndLoadSourceIndexOnce() async throws {
+        let store = try AudiobookProjectStore(root: tempRoot)
+        let capabilities = Self.makeDefaultCapabilities()
+        let castController = AudiobookCastController(store: store, capabilityProvider: { capabilities })
+        let revisionController = AudiobookRevisionController(store: store)
+        let exportController = AudiobookExportController(
+            store: store,
+            castController: castController,
+            revisionController: revisionController
+        )
+        let renderer = ScriptedSpeechRenderer(capabilities: capabilities)
+        let admission = SpeechCreationAdmission()
+        let production = AudiobookProductionController(
+            store: store,
+            castController: castController,
+            revisionController: revisionController,
+            renderer: renderer,
+            admission: admission
+        )
+
+        var bookIDs: [UUID] = []
+        let modelRev = String(repeating: "a", count: 40)
+        for index in 1...3 {
+            let chaptersText = (1...4).map { "第\($0)章 章节\($0)\n这是第\(index)本书第\($0)章的正文内容。\n" }.joined(separator: "\n")
+            let url = tempRoot.appendingPathComponent("book-\(index).txt")
+            try Data(chaptersText.utf8).write(to: url)
+            let preview = try await AudiobookTXTImporter.prepare(fileURL: url, encoding: .utf8)
+            let bookID = try await store.importBook(preview)
+            bookIDs.append(bookID)
+
+            var book = try await store.book(id: bookID)
+            book.analysisState = .allWindowsValidated
+            try await store.updateBook(book)
+            let narrator = try await store.characters(for: bookID)[0]
+            let chapters = try await store.chapters(for: bookID)
+            var anns: [AudiobookAnnotation] = []
+            for ch in chapters {
+                let atoms = try await store.atoms(for: bookID, chapterID: ch.id).filter { $0.kind != .formatting }
+                anns.append(contentsOf: atoms.map {
+                    AudiobookAnnotation(
+                        bookID: bookID,
+                        chapterID: ch.id,
+                        windowID: UUID(),
+                        atomID: $0.id,
+                        sourceRange: $0.sourceRange,
+                        assignment: .assigned(roleID: narrator.id)
+                    )
+                })
+            }
+            try await store.saveAnnotations(bookID: bookID, annotations: anns)
+            try await castController.bindVoice(
+                bookID: bookID,
+                roleID: narrator.id,
+                binding: AudiobookVoiceBinding(
+                    roleID: narrator.id,
+                    voiceID: "v-narrator",
+                    voiceRevision: "vr_0123456789abcdef0123456789abcdef",
+                    modelRevision: modelRev
+                )
+            )
+            let castRev = try await castController.currentCastRevisionID(for: bookID)
+            try await castController.confirmCast(bookID: bookID, revisionID: castRev)
+            let voiceDigest = try await castController.currentVoiceSetDigest(for: bookID)
+            try await castController.confirmAudition(bookID: bookID, voiceSetDigest: voiceDigest)
+        }
+
+        let targetBookID = bookIDs[0]
+        let targetChapters = try await store.chapters(for: targetBookID)
+        try await production.start(bookID: targetBookID, chapterIDs: targetChapters.map(\.id))
+
+        await store.resetDiagnosticCountersForTest()
+        _ = try await revisionController.resumePlan(bookID: targetBookID)
+        let recoveredBooks = await store.recoveredBookIDsHistoryForTest
+        XCTAssertEqual(recoveredBooks, [targetBookID], "resumePlan 仅应恢复当前打开的 bookID，不得扫描书库内其余作品")
+
+        await store.resetDiagnosticCountersForTest()
+        let audit = try await exportController.audit(bookID: targetBookID, chapterIDs: nil, profile: .chapterMP3)
+        XCTAssertEqual(audit.readyChapterCount, targetChapters.count)
+        let loadCount = await store.workingSourceSnapshotLoadCountForTest[targetBookID] ?? 0
+        XCTAssertEqual(loadCount, 1, "多章导出预检时全书源索引只应加载构建 1 次，而非逐章重复加载")
+    }
 }

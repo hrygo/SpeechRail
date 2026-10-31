@@ -4088,4 +4088,44 @@ final class AudiobookWorkflowTests: XCTestCase {
         XCTAssertNotEqual(adoptedSecondRevID, promotedSecondRevID, "一键采用本章新候选后应发布新的章节版本")
         XCTAssertTrue(workflow.resumePlan?.reviewChapterIDs.isEmpty == true)
     }
+
+    /// 验证将底层的技术哈希 ID（voice_design_... / ab_...）彻底隐藏，向用户呈现友好名称或声线定位。
+    @MainActor
+    func testVoiceDisplayNameHidesTechnicalIDsAndSurfacesFriendlyNames() async throws {
+        let workflow = AudiobookWorkflowModel()
+        let roleID = UUID()
+
+        // 1. 空白与 nil
+        XCTAssertNil(workflow.voiceDisplayName(for: nil))
+        XCTAssertNil(workflow.voiceDisplayName(for: "   "))
+
+        // 2. 内置预设友好名
+        XCTAssertEqual(workflow.voiceDisplayName(for: "serena"), "沉稳女声")
+        XCTAssertEqual(workflow.voiceDisplayName(for: "v-narrator"), "沉稳旁白")
+
+        // 3. 技术 ID 绝不裸露字符串
+        let rawDesignID = "voice_design_b7d1871aa1964fe792418abdb2f9977c"
+        let rawHashID = "ab_e2201c219327479d6dca5d7bf20c670ff4fe0104bc2cd1a0"
+        let rawArchID = "ab_arch_98060f_ym"
+        XCTAssertNotEqual(workflow.voiceDisplayName(for: rawDesignID), rawDesignID)
+        XCTAssertNotEqual(workflow.voiceDisplayName(for: rawHashID), rawHashID)
+        XCTAssertNotEqual(workflow.voiceDisplayName(for: rawArchID), rawArchID)
+        XCTAssertEqual(workflow.voiceDisplayName(for: rawArchID), "群像音色")
+
+        // 4. 元数据解析测试
+        _ = try await workflow.voiceCatalogModel.store.registerBookExclusiveVoice(
+            voiceID: rawDesignID,
+            bookID: UUID(),
+            bookTitle: "彷徨",
+            roleID: roleID,
+            roleName: "高尔础",
+            archetype: nil
+        )
+        await workflow.voiceCatalogModel.refresh()
+        XCTAssertEqual(workflow.voiceDisplayName(for: rawDesignID, roleID: roleID), "专属音色")
+
+        try await workflow.voiceCatalogModel.store.setArchetypeOverride(.youngMale, for: rawHashID)
+        await workflow.voiceCatalogModel.refresh()
+        XCTAssertEqual(workflow.voiceDisplayName(for: rawHashID), "青年男声")
+    }
 }

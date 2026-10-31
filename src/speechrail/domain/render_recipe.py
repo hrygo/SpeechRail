@@ -142,7 +142,9 @@ class RenderRecipe:
             "content.planner_revision": self.planner_revision is not None,
             "content.pronunciation_revision": self.pronunciation_revision is not None,
             "voice.id": self.voice_id is not None,
-            "voice.revision": self.voice_revision is not None,
+            "voice.revision": (
+                self.voice_revision is not None or self.voice_mode == "system"
+            ),
             "model.role": self.model_role is not None,
             "model.artifact": self.model_artifact is not None,
             "model.artifact_revision": self.model_artifact_revision is not None,

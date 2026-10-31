@@ -60,7 +60,7 @@ public struct AudiobookListeningView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                transportBar
+                AudiobookListeningTransportBar(workflow: workflow, listening: listening)
                     .frame(height: SpeechRailDesignTokens.Layout.audiobookTransportBarHeight)
             }
         }
@@ -141,55 +141,21 @@ public struct AudiobookListeningView: View {
                     LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         ForEach(workflow.listeningTexts) { fragment in
                             let isActive = (listening?.activePlayback?.fragmentID == fragment.id)
-                            let text = fragment.text
-
-                            CardSurface {
-                                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                        AudiobookVoiceTag(
-                                            name: fragment.roleName,
-                                            detail: isActive ? "正在朗读" : "片段 #\(fragment.ordinal + 1)"
-                                        )
-                                        if isActive {
-                                            WaveformBars(
-                                                pattern: SpeechRailDesignTokens.Waveform.resultBar,
-                                                isPlaying: listening?.isPlaying == true
-                                            )
-                                            .frame(width: 48, height: 14)
-                                        }
-                                        Spacer()
-                                        Button("重录本段") {
-                                            Task {
-                                                await listening?.pause()
-                                                workflow.selectedFragmentID = fragment.id
-                                                workflow.workbenchTab = .production
-                                                workflow.surfaceMode = .workspace
-                                            }
-                                        }
-                                        .speechRailButton(.quiet)
-                                        .disabled(workflow.isListeningToHistoricalAudio)
-                                        .help(workflow.isListeningToHistoricalAudio ? "之前版本保留原音频；请返回当前文本制作新版本。" : "返回制作工作台重新生成此段音频")
+                            AudiobookListeningFragmentRow(
+                                fragment: fragment,
+                                isActive: isActive,
+                                isPlaying: listening?.isPlaying == true,
+                                isHistorical: workflow.isListeningToHistoricalAudio,
+                                onRerecord: {
+                                    Task {
+                                        await listening?.pause()
+                                        workflow.selectedFragmentID = fragment.id
+                                        workflow.workbenchTab = .production
+                                        workflow.surfaceMode = .workspace
                                     }
-
-                                    Text(text)
-                                        .font(SpeechRailDesignTokens.Typography.body)
-                                        .foregroundStyle(
-                                            isActive
-                                                ? SpeechRailDesignTokens.Color.ink
-                                                : SpeechRailDesignTokens.Color.inkSecondary
-                                        )
-                                        .frame(maxWidth: .infinity, alignment: .leading)
                                 }
-                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                                .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
-                            }
-                            .overlay(
-                                SpeechRailDesignTokens.Corner.containerShape
-                                    .stroke(
-                                        isActive ? SpeechRailDesignTokens.Color.rail : Color.clear,
-                                        lineWidth: isActive ? 1 : 0
-                                    )
                             )
+                            .id(fragment.id)
                         }
                     }
                     .padding(SpeechRailDesignTokens.Spacing.md)
@@ -198,9 +164,87 @@ public struct AudiobookListeningView: View {
         }
     }
 
-    // MARK: - Bottom Transport Bar (64pt Token Height)
+    private var listenableChapters: [AudiobookChapter] {
+        workflow.exportChapters.filter { !$0.isSkipped }
+    }
 
-    private var transportBar: some View {
+    private var currentChapterTitle: String {
+        guard let chID = workflow.listeningChapterID,
+              let chapter = workflow.exportChapters.first(where: { $0.id == chID })
+        else {
+            return "章节收听"
+        }
+        return chapter.title
+    }
+
+    private var activeFragmentProgressLabel: String {
+        guard let active = listening?.activePlayback else {
+            return "未开始播放"
+        }
+        return "片段 \(active.fragmentIndex + 1) / \(active.totalFragments)"
+    }
+}
+
+// MARK: - Subviews for Fine-Grained Observation Isolation
+
+private struct AudiobookListeningFragmentRow: View {
+    let fragment: AudiobookListeningText
+    let isActive: Bool
+    let isPlaying: Bool
+    let isHistorical: Bool
+    let onRerecord: () -> Void
+
+    var body: some View {
+        CardSurface {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    AudiobookVoiceTag(
+                        name: fragment.roleName,
+                        detail: isActive ? "正在朗读" : "片段 #\(fragment.ordinal + 1)"
+                    )
+                    if isActive {
+                        WaveformBars(
+                            pattern: SpeechRailDesignTokens.Waveform.resultBar,
+                            isPlaying: isPlaying
+                        )
+                        .frame(width: 48, height: 14)
+                    }
+                    Spacer()
+                    Button("重录本段") {
+                        onRerecord()
+                    }
+                    .speechRailButton(.quiet)
+                    .disabled(isHistorical)
+                    .help(isHistorical ? "之前版本保留原音频；请返回当前文本制作新版本。" : "返回制作工作台重新生成此段音频")
+                }
+
+                Text(fragment.text)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(
+                        isActive
+                            ? SpeechRailDesignTokens.Color.ink
+                            : SpeechRailDesignTokens.Color.inkSecondary
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        }
+        .overlay(
+            SpeechRailDesignTokens.Corner.containerShape
+                .stroke(
+                    isActive ? SpeechRailDesignTokens.Color.rail : Color.clear,
+                    lineWidth: isActive ? 1 : 0
+                )
+        )
+    }
+}
+
+private struct AudiobookListeningTransportBar: View {
+    let workflow: AudiobookWorkflowModel
+    let listening: AudiobookListeningController?
+
+    var body: some View {
         SessionPanel {
             HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
                 Button {
@@ -244,14 +288,7 @@ public struct AudiobookListeningView: View {
                 .accessibilityLabel("前进 15 秒")
                 .accessibilityIdentifier("audiobook-listening-skip-forward-15")
 
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                    Text(timecodeSummary)
-                        .font(SpeechRailDesignTokens.Typography.technical)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    Text("自动保存收听进度，暂停或离开后可随时续听")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                }
+                AudiobookListeningTimecodeView(listening: listening)
 
                 Spacer()
 
@@ -274,7 +311,7 @@ public struct AudiobookListeningView: View {
 
                 Button("返回工作台") {
                     Task {
-                        await workflow.leaveWorkshop()
+                        await listening?.pause()
                         workflow.surfaceMode = .workspace
                     }
                 }
@@ -284,30 +321,23 @@ public struct AudiobookListeningView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
+}
 
-    private var listenableChapters: [AudiobookChapter] {
-        workflow.exportChapters.filter { !$0.isSkipped }
-    }
+private struct AudiobookListeningTimecodeView: View {
+    let listening: AudiobookListeningController?
 
-    private var currentChapterTitle: String {
-        guard let chID = workflow.listeningChapterID,
-              let chapter = workflow.exportChapters.first(where: { $0.id == chID })
-        else {
-            return "章节收听"
-        }
-        return chapter.title
-    }
-
-    private var activeFragmentProgressLabel: String {
-        guard let active = listening?.activePlayback else {
-            return "未开始播放"
-        }
-        return "片段 \(active.fragmentIndex + 1) / \(active.totalFragments)"
-    }
-
-    private var timecodeSummary: String {
+    var body: some View {
         let elapsed = listening?.chapterElapsedSeconds ?? 0
         let total = listening?.chapterTotalDurationSeconds ?? 0
-        return AudiobookDisplayFormat.timecode(elapsed) + " / " + AudiobookDisplayFormat.timecode(total)
+        let summary = AudiobookDisplayFormat.timecode(elapsed) + " / " + AudiobookDisplayFormat.timecode(total)
+
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+            Text(summary)
+                .font(SpeechRailDesignTokens.Typography.technical)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            Text("自动保存收听进度，暂停或离开后可随时续听")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        }
     }
 }

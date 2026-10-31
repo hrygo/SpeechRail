@@ -877,6 +877,77 @@ final class MeetingMinutesJobRecoveryTests: XCTestCase {
         XCTAssertNil(version.cancelRequestedAt)
     }
 
+    func testRecoverPendingWithQueuedRowAndUnconfiguredLLMPersistsFailedAndClearsBusy() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            .init(sessionID: sessionID, role: .speaker, text: "需要整理的正文。", source: .microphone, status: .final)
+        )
+        let queued = try await store.enqueueMinutes(
+            sessionID: sessionID,
+            model: nil,
+            promptChars: 8,
+            configSnapshot: nil,
+            snapshotID: nil
+        )
+        XCTAssertEqual(queued.status, .queued)
+
+        let coordinator = SessionCoordinator(store: store)
+        let generator = MinutesGenerator(coordinator: coordinator)
+        await generator.recoverPending(
+            resolvedConfiguration: .init(
+                configuration: .init(baseURL: "", model: ""),
+                apiKey: nil,
+                origin: .global
+            )
+        )
+        XCTAssertFalse(generator.isBusy)
+        if case .failed = generator.state {
+            // Expected
+        } else {
+            XCTFail("未配置大模型恢复 queued 纪要后应收敛为 .failed，实际为 \(generator.state)")
+        }
+
+        await generator.reload(sessionID: sessionID)
+        XCTAssertFalse(generator.isBusy, "reload 后不得回退成 .queued 造成 isBusy 死锁")
+        if case .failed = generator.state {
+            // Expected
+        } else {
+            XCTFail("reload 后状态仍应保持 .failed，实际为 \(generator.state)")
+        }
+        let persisted = try await version(store, queued.id)
+        XCTAssertEqual(persisted.status, .failed, "SQLite 中的 queued 行必须落库为 failed")
+    }
+
+    func testStopOnReloadedOrphanQueuedMinutesCancelsRowAndUnblocksNewMeeting() async throws {
+        let store = try requireStore(), sessionID = try requireSessionID()
+        _ = try await store.appendLine(
+            .init(sessionID: sessionID, role: .speaker, text: "孤儿排队纪要。", source: .microphone, status: .final)
+        )
+        let queued = try await store.enqueueMinutes(
+            sessionID: sessionID,
+            model: "test-model",
+            promptChars: 7,
+            configSnapshot: nil,
+            snapshotID: nil
+        )
+        let coordinator = SessionCoordinator(store: store)
+        let generator = MinutesGenerator(coordinator: coordinator)
+        await generator.reload(sessionID: sessionID)
+        XCTAssertEqual(generator.state, .queued)
+        XCTAssertTrue(generator.isBusy)
+
+        generator.stop()
+        XCTAssertFalse(generator.isBusy, "点击停止整理后应立即解除 isBusy 阻塞")
+        XCTAssertEqual(generator.state, .cancelled)
+
+        for _ in 0..<200 {
+            if (try? await version(store, queued.id).status) == .cancelled { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        let persisted = try await version(store, queued.id)
+        XCTAssertEqual(persisted.status, .cancelled, "孤儿 queued 纪要行在点击停止后应持久化为 cancelled")
+    }
+
     // MARK: - 工具
 
     /// 直接对库文件执行 SQL（模拟"库已经是旧形状"）。测试内用，sqlite3 系统库已链。

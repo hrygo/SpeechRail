@@ -682,6 +682,36 @@ final class AudiobookExportTests: XCTestCase {
         )
     }
 
+    /// 验证 M4B 最后一章因 AAC 容器对齐填充允许在扩展容差（4x）内正常通过，而中间章节依然严格执行基础容差。
+    func testMediaVerifierAcceptsM4BLastChapterAACPaddedEndWithinExtendedTolerance() async throws {
+        let titles = ["开篇", "终章"]
+        let chapterFrames: [Int64] = [48_000, 48_000]
+        let mediaURL = try await makePlayableM4BWithChapters(
+            zip(titles, chapterFrames).map { (title: $0.0, frameCount: $0.1) }
+        )
+        let bookID = UUID()
+        let chapters = makeTestChapters(bookID: bookID, titles: titles)
+
+        // 中间章节偏移 2000 帧（~41.7ms > 24ms 单倍容差），必须被拒绝
+        let shiftedFirstChapter = makeExpectedM4B(
+            mediaURL: mediaURL,
+            chapters: chapters,
+            chapterFrameCounts: [46_000, 50_000],
+            expectedFrameCount: 96_000
+        )
+        await assertMediaVerificationFails(url: mediaURL, expected: shiftedFirstChapter)
+
+        // 最后一章末尾存在 2000 帧填充（~41.7ms > 24ms，但在 4x 容差 96ms 内），应正常放行
+        let paddedLastChapter = makeExpectedM4B(
+            mediaURL: mediaURL,
+            chapters: chapters,
+            chapterFrameCounts: [48_000, 46_000],
+            expectedFrameCount: 94_000
+        )
+        let verification = try await AudiobookMediaVerifier.verify(url: mediaURL, expected: paddedLastChapter)
+        XCTAssertEqual(verification.chapterTitles, titles)
+    }
+
     /// 章节时间表必须来自这份已核验的产物：M4B 有单文件时间轴，分章 MP3 继续用目录清单。
     func testPrepareAttachesChapterTimelineOnlyForVerifiedM4B() async throws {
         let store = try AudiobookProjectStore(root: tempRoot)

@@ -281,9 +281,13 @@ public enum AudiobookMediaVerifier {
         var actualTitles: [String] = []
         for (index, actualRange) in actualRanges.enumerated() {
             let expectedRange = expectedRanges[index]
+            let isLastChapter = (index == actualRanges.count - 1)
+            // AAC 编码器存在前导延迟与帧对齐填充（Priming & Padding），在 MP4 容器中
+            // 最后一章的 timeRange 会自动延伸至整段音频轨道的末尾（对应 verifyDuration 中的 4x 容差）。
+            let endTolerance = isLastChapter ? (maxDurationToleranceSeconds * 4) : maxDurationToleranceSeconds
             guard actualRange.title == expectedRange.title,
                   abs(actualRange.start - expectedRange.start) <= maxDurationToleranceSeconds,
-                  abs(actualRange.end - expectedRange.end) <= maxDurationToleranceSeconds
+                  abs(actualRange.end - expectedRange.end) <= endTolerance
             else {
                 throw AudiobookExportError.verificationFailed(
                     "M4B 第 \(index + 1) 章的标题或起止位置与所选章节不一致。"

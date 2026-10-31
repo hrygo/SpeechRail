@@ -3466,7 +3466,7 @@ struct OperationFeedback: Identifiable {
         self.autoDismiss = resolvedAutoDismiss
 
         if let presentation {
-            self.presentation = tone == .critical ? .alertCard : presentation
+            self.presentation = presentation
         } else {
             switch tone {
             case .critical:
@@ -3762,18 +3762,22 @@ struct OperationFeedbackCard: View {
                     .accessibilityHidden(true)
                 Text(feedback.title)
                     .font(SpeechRailDesignTokens.Typography.statusTitle)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-                if let title = feedback.actionTitle, let action = feedback.action {
-                    Button(title) { dismiss(); action() }
-                        .speechRailButton(.primary)
-                        .controlSize(.small)
+                Button(action: dismiss) {
+                    Image(systemName: SpeechRailDesignTokens.Icon.Symbol.close.rawValue)
+                        .font(SpeechRailDesignTokens.Typography.iconMicroSemibold)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .frame(
+                            width: SpeechRailDesignTokens.Icon.dismissButtonFrame,
+                            height: SpeechRailDesignTokens.Icon.dismissButtonFrame
+                        )
+                        .contentShape(Rectangle())
                 }
-                Button("知道了", action: dismiss)
-                    .speechRailButton(.secondary)
-                    .controlSize(.small)
-                    .keyboardShortcut(.cancelAction)
-                    .focused($isDismissFocused)
-                    .accessibilityIdentifier("operation-feedback-dismiss")
+                .buttonStyle(.plain)
+                .speechRailPointerCursor()
+                .accessibilityLabel("关闭提示")
+                .accessibilityIdentifier("operation-feedback-close-icon")
             }
             .fixedSize(horizontal: false, vertical: true)
 
@@ -3784,9 +3788,25 @@ struct OperationFeedbackCard: View {
             }
             .frame(maxHeight: min(
                 SpeechRailDesignTokens.Layout.Sheet.messageBodyMaximumHeight,
-                max(0, availableSize.height - SpeechRailDesignTokens.Control.regularHeight
-                    - SpeechRailDesignTokens.Spacing.md * 3 - SpeechRailDesignTokens.Spacing.sm * 2)
+                max(0, availableSize.height - SpeechRailDesignTokens.Control.regularHeight * 2
+                    - SpeechRailDesignTokens.Spacing.md * 3 - SpeechRailDesignTokens.Spacing.sm * 3)
             ))
+
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Spacer()
+                Button("知道了", action: dismiss)
+                    .speechRailButton(.secondary)
+                    .controlSize(.small)
+                    .keyboardShortcut(.cancelAction)
+                    .focused($isDismissFocused)
+                    .accessibilityIdentifier("operation-feedback-dismiss")
+                if let title = feedback.actionTitle, let action = feedback.action {
+                    Button(title) { dismiss(); action() }
+                        .speechRailButton(.primary)
+                        .controlSize(.small)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
         .frame(maxWidth: min(SpeechRailDesignTokens.Layout.Sheet.compactWidth,

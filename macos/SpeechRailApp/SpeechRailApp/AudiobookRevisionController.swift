@@ -360,13 +360,51 @@ public actor AudiobookRevisionController {
         )
     }
 
+    public struct PreloadedBookPlanningContext: Sendable {
+        public let chaptersByID: [UUID: AudiobookChapter]
+        public let source: AudiobookSourceIndex
+        public let bindings: [UUID: AudiobookVoiceBinding]
+        public let pronunciation: AudiobookPronunciationBinding?
+        public let annotationsByChapter: [UUID: [AudiobookAnnotation]]
+        public let atomsByChapter: [UUID: [AudiobookTextAtom]]
+        public let existingFragmentsByChapter: [UUID: [AudiobookFragment]]
+        public let candidatesByID: [UUID: AudiobookRenderCandidate]
+    }
+
+    public func preloadPlanningContext(bookID: UUID) async throws -> PreloadedBookPlanningContext {
+        let chapters = try await store.chapters(for: bookID)
+        let source = try await store.sourceIndex(for: bookID)
+        let bindings = try await store.voiceBindings(for: bookID)
+        let pronunciation = try await store.pronunciationBinding(for: bookID)
+        let allAnnotations = try await store.annotations(for: bookID)
+        let allAtoms = try await store.atoms(for: bookID)
+        let allFragments = (try? await store.fragments(for: bookID)) ?? []
+        let candidates = try await store.candidates(for: bookID)
+        return PreloadedBookPlanningContext(
+            chaptersByID: Dictionary(uniqueKeysWithValues: chapters.map { ($0.id, $0) }),
+            source: source,
+            bindings: bindings,
+            pronunciation: pronunciation,
+            annotationsByChapter: Dictionary(grouping: allAnnotations, by: \.chapterID),
+            atomsByChapter: Dictionary(grouping: allAtoms, by: \.chapterID),
+            existingFragmentsByChapter: Dictionary(grouping: allFragments, by: \.chapterID),
+            candidatesByID: Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
+        )
+    }
+
     /// 返回当前语义依然有效的章节版本；若某章已发生说话人/声音变更导致当前版本失效，返回 nil（历史版本通过 `previousListenableChapter` 读取并显示“之前的版本”）。
     public func currentChapter(
         bookID: UUID,
-        chapterID: UUID
+        chapterID: UUID,
+        preloaded: PreloadedBookPlanningContext? = nil
     ) async throws -> AudiobookChapterRevision? {
-        let chapters = try await store.chapters(for: bookID)
-        guard let chapter = chapters.first(where: { $0.id == chapterID }),
+        let chapter: AudiobookChapter?
+        if let preloaded {
+            chapter = preloaded.chaptersByID[chapterID]
+        } else {
+            chapter = try await store.chapters(for: bookID).first(where: { $0.id == chapterID })
+        }
+        guard let chapter,
               let currentRevID = chapter.currentChapterRevisionID
         else {
             return nil
@@ -376,15 +414,36 @@ public actor AudiobookRevisionController {
             return nil
         }
 
-        guard let plannedFragments = try? await currentPlannedFragments(bookID: bookID, chapter: chapter) else {
-            return nil
+        let plannedFragments: [AudiobookFragment]
+        let candidatesByID: [UUID: AudiobookRenderCandidate]
+        if let preloaded {
+            guard let planned = try? AudiobookFragmentPlanner.plan(
+                chapter: chapter,
+                annotations: preloaded.annotationsByChapter[chapter.id] ?? [],
+                bindings: preloaded.bindings,
+                policy: policy,
+                source: preloaded.source,
+                atoms: preloaded.atomsByChapter[chapter.id] ?? [],
+                pronunciation: preloaded.pronunciation
+            ) else {
+                return nil
+            }
+            if preloaded.existingFragmentsByChapter[chapter.id] != planned {
+                try await store.saveFragments(bookID: bookID, chapterID: chapter.id, fragments: planned)
+            }
+            plannedFragments = planned
+            candidatesByID = preloaded.candidatesByID
+        } else {
+            guard let planned = try? await currentPlannedFragments(bookID: bookID, chapter: chapter) else {
+                return nil
+            }
+            plannedFragments = planned
+            let candidates = try await store.candidates(for: bookID)
+            candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
         }
         guard revision.orderedBindings.count == plannedFragments.count else {
             return nil
         }
-
-        let candidates = try await store.candidates(for: bookID)
-        let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
 
         for (binding, planned) in zip(revision.orderedBindings, plannedFragments) {
             guard binding.sourceRange == planned.sourceRange,
@@ -402,12 +461,18 @@ public actor AudiobookRevisionController {
     /// 当章节因返修待更新时，返回最新一份完整可听的历史章节版本（界面标记“之前的版本”）。
     public func previousListenableChapter(
         bookID: UUID,
-        chapterID: UUID
+        chapterID: UUID,
+        candidatesByID preloadedCandidates: [UUID: AudiobookRenderCandidate]? = nil
     ) async throws -> AudiobookChapterRevision? {
         let revisions = try await store.chapterRevisions(for: bookID, chapterID: chapterID)
             .sorted { $0.revisionNumber > $1.revisionNumber }
-        let candidates = try await store.candidates(for: bookID)
-        let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
+        let candidatesByID: [UUID: AudiobookRenderCandidate]
+        if let preloadedCandidates {
+            candidatesByID = preloadedCandidates
+        } else {
+            let candidates = try await store.candidates(for: bookID)
+            candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
+        }
 
         for rev in revisions {
             var allAssetsValid = true
@@ -428,7 +493,9 @@ public actor AudiobookRevisionController {
     }
 
     public func resumePlan(bookID: UUID) async throws -> AudiobookResumePlan {
-        let recovery = try await store.recover()
+        let recovery = try await store.recover(bookID: bookID)
+        let recoveredValidSet = Set(recovery.verifiedCandidateIDs).union(recovery.recoveredCandidateIDs)
+        let damagedSet = Set(recovery.damagedCandidateIDs)
         let chapters = try await store.chapters(for: bookID).sorted { $0.ordinal < $1.ordinal }
         let candidates = try await store.candidates(for: bookID)
         let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
@@ -488,13 +555,20 @@ public actor AudiobookRevisionController {
             for fragment in plannedFragments {
                 let fragmentCandidates = (candidatesByFragmentID[fragment.id] ?? [])
                     .sorted { $0.createdAt > $1.createdAt }
-                if let validCandidate = fragmentCandidates.first(where: {
+                let matchingCandidate = fragmentCandidates.first(where: {
                     $0.dependencyDigest == fragment.dependencyDigest
                         && $0.isReceiptVerified
-                        && !recovery.damagedCandidateIDs.contains($0.id)
-                }),
-                   (try? await store.verifyCandidateAsset(validCandidate)) == true
-                {
+                        && !damagedSet.contains($0.id)
+                })
+                var isValid = false
+                if let candidate = matchingCandidate {
+                    if recoveredValidSet.contains(candidate.id) {
+                        isValid = true
+                    } else if (try? await store.verifyCandidateAsset(candidate)) == true {
+                        isValid = true
+                    }
+                }
+                if let validCandidate = matchingCandidate, isValid {
                     reusableIDs.append(fragment.id)
                     latestValidCandidateByFragment[fragment.id] = validCandidate
                 } else {
@@ -513,7 +587,7 @@ public actor AudiobookRevisionController {
                          binding.dependencyDigest == planned.dependencyDigest,
                          let cand = candidatesByID[binding.candidateID],
                          cand.isReceiptVerified,
-                         !recovery.damagedCandidateIDs.contains(cand.id),
+                         !damagedSet.contains(cand.id),
                          let latestCand = latestValidCandidateByFragment[planned.id],
                          binding.candidateID == latestCand.id
                    else { return false }

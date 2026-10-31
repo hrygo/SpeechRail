@@ -58,6 +58,7 @@ public struct AudiobookWorkshopView: View {
                         ? workflow.errorMessage
                         : nil,
                     id: workflow.errorNoticeID.uuidString,
+                    presentation: .snackbar,
                     onDismiss: {
                         if workflow.errorMessage == workflow.productionProgress?.lastErrorMessage {
                             acknowledgedProductionErrorID = productionErrorID
@@ -138,8 +139,7 @@ public struct AudiobookWorkshopView: View {
                     helpText: "返回有声书书架列表"
                 ) {
                     Task {
-                        await workflow.leaveWorkshop()
-                        workflow.surfaceMode = .shelf
+                        await workflow.returnToShelf()
                     }
                 }
 
@@ -152,7 +152,7 @@ public struct AudiobookWorkshopView: View {
                                 Task { await workflow.startListening() }
                             } else {
                                 Task {
-                                    await workflow.leaveWorkshop()
+                                    await workflow.listeningController?.pause()
                                     workflow.surfaceMode = newMode
                                 }
                             }
@@ -1131,7 +1131,7 @@ struct AudiobookCastMergeSplitSheet: View {
 
 struct AudiobookVoiceTag: View {
     let name: String
-    let detail: String
+    var detail: String? = nil
 
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -1142,9 +1142,11 @@ struct AudiobookVoiceTag: View {
             Text(name)
                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            Text("· \(detail)")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            if let detail = detail?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty {
+                Text("· \(detail)")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
