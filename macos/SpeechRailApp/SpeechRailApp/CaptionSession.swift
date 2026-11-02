@@ -2286,8 +2286,10 @@ public final class CaptionSession {
         if let index = paragraphs.indices.last,
            paragraphAssemblyEnabled {
             let isOpen = (paragraphs[index].id == openParagraphID)
+            let prevText = paragraphs[index].sourceText
             let canMergeClosed = paragraphs[index].lastLineCloseReason == .budgetRollover
-                || CaptionParagraphAssembler.strongIncompleteEnding(paragraphs[index].sourceText)
+                || CaptionParagraphAssembler.strongIncompleteEnding(prevText)
+                || CaptionParagraphAssembler.isShortFragment(prevText)
                 || CaptionParagraphAssembler.continuationStart(line.text)
             if (isOpen || canMergeClosed),
                CaptionParagraphAssembler.shouldMerge(

@@ -488,8 +488,13 @@ class RealtimeAsrOwner:
                 if effective_ms >= 8_000 and stop_frames > 5:
                     soft_ms = min(8_000, max(5_000, int(effective_ms * 0.55)))
                     soft_max_samples = int(soft_ms * 16)
-                    soft_stop_frames = min(stop_frames, 5)
-                    punctuation_stop_frames = min(stop_frames, 3)
+                    # When at punctuation boundary, allow eager cut on micro-pause
+                    # (3~4 frames, 96~128ms).
+                    punctuation_stop_frames = min(stop_frames, 4)
+                    # When NOT at punctuation boundary, preserve sufficient stop frames
+                    # (>= 12 frames / 384ms) so natural mid-clause breath pauses
+                    # (e.g. "叙事节奏" ... 180ms) are not split mid-sentence.
+                    soft_stop_frames = min(stop_frames, max(12, int(stop_frames * 0.85)))
                 candidate_admission = SpeechAdmission(
                     threshold=threshold,
                     # Silero already confirms speech; extra energy-VAD debounce

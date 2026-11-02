@@ -1815,6 +1815,45 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         }
     }
 
+    func testParagraphAssemblerMergesDuneCommentaryFragmentationArtifacts() {
+        let now = Date()
+        // 场景 1：短碎片“我们国内观众。”接“对于沙丘的普遍评价是...”
+        let line1 = makeLine("我们国内观众。", start: 0, end: 1.0)
+        var p1 = CaptionParagraph(line: line1, observedAt: now, isTranslating: false)
+        XCTAssertEqual(
+            CaptionParagraphAssembler.flushDelayMilliseconds(for: p1, assemblyEnabled: true),
+            CaptionParagraphAssembler.incompleteHoldMilliseconds,
+            "短碎片应给予 incompleteHoldMilliseconds 等待后续合并"
+        )
+        let line2 = makeLine(
+            "对于沙丘的普遍评价是, 注意, 尼克说的是普遍, 不是全部。一边惊艳于它的美学奇观, 一边觉得叙事节奏。",
+            start: 1.2,
+            end: 6.0
+        )
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(p1, line2, observedAt: now.addingTimeInterval(0.2)),
+            "短碎片与以'对于'开头的长句应合并"
+        )
+        p1.append(line2, observedAt: now.addingTimeInterval(0.2))
+
+        // 场景 2：“...一边觉得叙事节奏。”接“沉闷而无感, 所谓的科幻史诗...”
+        let line3 = makeLine(
+            "沉闷而无感, 所谓的科幻史诗, 不过就是一部老套的王子复仇记。总结来说, 就是。",
+            start: 6.2,
+            end: 11.0
+        )
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(p1, line3, observedAt: now.addingTimeInterval(0.4)),
+            "在'叙事节奏'处断句并以'沉闷而无感'连词结构续接应合并"
+        )
+        p1.append(line3, observedAt: now.addingTimeInterval(0.4))
+
+        XCTAssertEqual(
+            p1.displaySourceText,
+            "我们国内观众对于沙丘的普遍评价是, 注意, 尼克说的是普遍, 不是全部。一边惊艳于它的美学奇观, 一边觉得叙事节奏沉闷而无感, 所谓的科幻史诗, 不过就是一部老套的王子复仇记。总结来说, 就是。"
+        )
+    }
+
     func testParagraphAssemblerDoesNotMergeTwoCompleteSentencesJustBecauseTheyAreClose() {
         let now = Date()
         let first = makeLine("第一条完整字幕。", start: 0, end: 1)
