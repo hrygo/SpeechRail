@@ -4228,7 +4228,7 @@ extension AppModelTests {
             voice: Self.renderVoice(),
             speed: 1.0
         )
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntilDubbing({ model.pendingDubbing?.scriptText == "第二段文稿。" })
         XCTAssertEqual(model.pendingDubbing?.scriptText, "第二段文稿。")
 
         // 取消进行中的生成不影响已完成但未保存的结果。
