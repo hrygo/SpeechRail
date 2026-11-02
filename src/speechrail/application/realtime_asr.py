@@ -472,6 +472,24 @@ class RealtimeAsrOwner:
             if self._settings.realtime_speech_admission_enabled:
                 prefix_samples = int(prefix_padding * 16)
                 stop_frames = max(1, (silence_duration + 31) // 32)
+                candidate_policy = candidate.get("asr_policy")
+                if not isinstance(candidate_policy, ASRPolicy):
+                    candidate_policy = self.policy()
+                service_bytes = self._settings.max_realtime_buffer_bytes or 8_388_608
+                effective_ms = resolve_effective_max_segment_ms(
+                    candidate_policy,
+                    service_max_segment_ms=service_bytes // 64,
+                    capability_max_segment_ms=None,
+                    decoder_max_segment_ms=30_000,
+                )
+                soft_max_samples: int | None = None
+                soft_stop_frames: int | None = None
+                punctuation_stop_frames: int | None = None
+                if effective_ms >= 8_000 and stop_frames > 5:
+                    soft_ms = min(8_000, max(5_000, int(effective_ms * 0.55)))
+                    soft_max_samples = int(soft_ms * 16)
+                    soft_stop_frames = min(stop_frames, 5)
+                    punctuation_stop_frames = min(stop_frames, 3)
                 candidate_admission = SpeechAdmission(
                     threshold=threshold,
                     # Silero already confirms speech; extra energy-VAD debounce
@@ -481,6 +499,9 @@ class RealtimeAsrOwner:
                     prefix_samples=prefix_samples,
                     frame_samples=512,
                     sample_rate=16_000,
+                    soft_max_samples=soft_max_samples,
+                    soft_stop_frames=soft_stop_frames,
+                    punctuation_stop_frames=punctuation_stop_frames,
                 )
                 # 与原实现一致: 只有 speech admission 接管时才重置采样游标与原始缓冲.
                 resets_vad_buffer = True
@@ -1296,6 +1317,8 @@ class RealtimeAsrOwner:
         self._sync_asr_item()
         item = self._asr_item
         assert item is not None
+        if reason == "rollover" and self._speech_admission is not None:
+            self._speech_admission.advance_segment_start(item.end_kernel)
         item.commit_event_id = self._active_commit_event_id if reason == "client" else None
         item.close_reason = (
             "budget_rollover"
@@ -1562,6 +1585,12 @@ class RealtimeAsrOwner:
                     break
                 if event.kind == "partial":
                     current_text = apply_light_itn(event.text)
+                    if self._speech_admission is not None:
+                        stripped_partial = current_text.strip()
+                        self._speech_admission.set_punctuation_boundary_hint(
+                            bool(stripped_partial)
+                            and stripped_partial[-1] in "。！？.!?;；,，:：、…"
+                        )
                     if item.first_partial is None:
                         item.first_partial = time.monotonic()
                     item.preview_revision += 1

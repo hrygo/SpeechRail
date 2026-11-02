@@ -15,6 +15,7 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
     var start: TimeInterval?
     var end: TimeInterval?
     var speakerLabel: String?
+    var lastLineCloseReason: TranscriptPreviewLedger.SegmentCloseReason?
     var lastObservedAt: Date
     var startedAt: Date
     /// 第一行从 Stage 1 继承的草稿；段落翻译失败时至少不要闪回外语。
@@ -40,6 +41,7 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
         self.start = line.start
         self.end = line.end
         self.speakerLabel = line.speakerLabel
+        self.lastLineCloseReason = line.closeReason
         self.lastObservedAt = observedAt
         self.startedAt = observedAt
         self.initialDraftTranslation = line.translatedText
@@ -49,9 +51,7 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
 
     mutating func append(_ line: CaptionSession.Line, observedAt: Date) {
         lineIDs.append(line.id)
-        if translatedText == initialDraftTranslation {
-            translatedText = nil
-        }
+        translatedText = nil
         initialStabilizedPrefix = nil
         let head = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         let tail = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -64,6 +64,7 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
         if start == nil { start = line.start }
         if let end = line.end { self.end = end }
         if speakerLabel == nil { speakerLabel = line.speakerLabel }
+        lastLineCloseReason = line.closeReason
         lastObservedAt = observedAt
     }
 
@@ -94,14 +95,15 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
 
 /// 段边界判定：只做可解释的启发式，不引入模型。
 ///
-/// 目标不是“合并所有相邻行”，而是优先合并三类：
-/// 1. 上一行在连接词/介词/列表引导语处断开；
-/// 2. 上一行以逗号/冒号等分句标点结束；
-/// 3. 两行间隔极短，后一行很可能是同一句的补充。
+/// 目标不是“合并所有相邻行”，而是优先合并四类：
+/// 1. 上一行因服务端 `budget_rollover` 被动截断（句末句号属于截断伪影）；
+/// 2. 上一行在连接词/介词/助词/列表引导语处断开；
+/// 3. 上一行以逗号/冒号等分句标点结束，或下一行以明确的后置词尾（如“之旅”“中心之一”）续接；
+/// 4. 两行间隔极短，后一行很可能是同一句的补充。
 enum CaptionParagraphAssembler {
     static let maximumGap: TimeInterval = 1.2
     static let maximumLines = 3
-    static let maximumDuration: TimeInterval = 12
+    static let maximumDuration: TimeInterval = 28
     /// Display-only conversation state stays bounded even if the session runs for hours.
     static let maximumRetainedParagraphs = 500
 
@@ -128,7 +130,7 @@ enum CaptionParagraphAssembler {
 
     /// 根据当前段落完整性与合并开关计算收口等待时长（毫秒）。
     /// - 关闭段落合并或已满 `maximumLines` 行时，后续绝无可能继续并入，返回 `0` 立即收口并启动精翻；
-    /// - 强未完成结尾（连接词、介词、列表引导词）等待 `incompleteHoldMilliseconds`；
+    /// - 被动截断（`budgetRollover`）或强未完成结尾（连接词、介词、助词、列表引导词）等待 `incompleteHoldMilliseconds`；
     /// - 已带句末终结标点的完整句缩短为 `completeSentenceGraceMilliseconds`，兼顾极短跨句拼接与首字响应；
     /// - 其余常规分句等待 `closeGraceMilliseconds`。
     static func flushDelayMilliseconds(
@@ -139,7 +141,7 @@ enum CaptionParagraphAssembler {
             return 0
         }
         let text = paragraph.sourceText
-        if strongIncompleteEnding(text) {
+        if paragraph.lastLineCloseReason == .budgetRollover || strongIncompleteEnding(text) {
             return incompleteHoldMilliseconds
         }
         if endsWithTerminalPunctuation(text) {
@@ -166,8 +168,12 @@ enum CaptionParagraphAssembler {
         if observedAt.timeIntervalSince(paragraph.startedAt) > maximumDuration {
             return false
         }
-        return score(previous: paragraph.sourceText, next: line.text, gap: gap)
-            >= mergeScoreThreshold
+        return score(
+            previous: paragraph.sourceText,
+            next: line.text,
+            gap: gap,
+            previousCloseReason: paragraph.lastLineCloseReason
+        ) >= mergeScoreThreshold
     }
 
     static func gapBetween(
@@ -178,24 +184,42 @@ enum CaptionParagraphAssembler {
         if let end = paragraph.end, let start = line.start {
             return Swift.max(0, start - end)
         }
+        if paragraph.lastLineCloseReason == .budgetRollover {
+            return 0
+        }
         return Swift.max(0, observedAt.timeIntervalSince(paragraph.lastObservedAt))
     }
 
-    static func score(previous: String, next: String, gap: TimeInterval) -> Int {
+    static func score(
+        previous: String,
+        next: String,
+        gap: TimeInterval,
+        previousCloseReason: TranscriptPreviewLedger.SegmentCloseReason? = nil
+    ) -> Int {
         var score = 0
-        if strongIncompleteEnding(previous) {
+        let isRollover = previousCloseReason == .budgetRollover
+        let incompletePrevious = strongIncompleteEnding(previous)
+        let continuationNext = continuationStart(next)
+        if isRollover {
+            score += 4
+        }
+        if incompletePrevious {
             score += 4
         } else if endsWithClausePunctuation(previous) {
             score += 2
         } else if !endsWithTerminalPunctuation(previous) {
             score += 1
         }
-        if continuationStart(next) {
-            score += 2
+        if continuationNext {
+            score += 3
         }
         // 紧邻本身不是语义证据：两个都带句末标点的完整句，即使挨得很近也不合并。
-        // 但“PS5。” + “必备游戏（没有句号）”仍应合并，因为后一行明显是残句。
-        let bothTerminal = endsWithTerminalPunctuation(previous)
+        // 但“PS5。” + “必备游戏（没有句号）”仍应合并，因为后一行明显是残句；
+        // 若上一行是 budget_rollover 被动截断、或去标点后仍为悬空未完成词尾（如“而在河谷镇的。”）、
+        // 或下一行以明确的后置续接成分开头（如“之旅…”、“中心之一…”），则上一行句末句号属于截断伪影。
+        let hasTruncationArtifact = isRollover || incompletePrevious || continuationNext
+        let bothTerminal = !hasTruncationArtifact
+            && endsWithTerminalPunctuation(previous)
             && endsWithTerminalPunctuation(next)
         if gap <= 0.45, !bothTerminal {
             score += 3
@@ -206,7 +230,7 @@ enum CaptionParagraphAssembler {
         return score
     }
 
-    /// 强未完成结尾：去掉句末标点后，仍以连接词/介词/列表引导语收束。
+    /// 强未完成结尾：去掉句末标点后，仍以连接词/介词/结构助词/列表引导语或书名号后孤立数词收束。
     static func strongIncompleteEnding(_ text: String) -> Bool {
         let stripped = trimTrailingPunctuation(text).lowercased()
         guard !stripped.isEmpty else { return false }
@@ -216,10 +240,20 @@ enum CaptionParagraphAssembler {
             "虽然", "尽管", "无论", "只要", "只有", "以及", "还有", "或者", "还是",
             "而是", "就是", "包括", "例如", "比如", "有的说", "有的认为", "有人说",
             "他说", "她说", "同时", "随后", "然后", "于是", "因此", "不过", "却",
+            "的", "地", "得", "之", "在", "从", "向", "往", "把", "被", "对",
+            "于", "由", "给", "与", "和", "跟", "同", "比", "为", "着", "名为",
             "が", "を", "に", "は", "と", "で", "も", "から", "まで", "より",
             "ので", "けれど", "けど", "고", "서", "며", "지만", "는데", "를", "을",
         ]
         if suffixes.contains(where: { stripped.hasSuffix($0) }) { return true }
+
+        // 书名号或引号闭合后紧跟孤立数词/破折号/短词被硬切（如“《霍比特人》一”、“《霍比特人》一意外”）
+        if let range = stripped.range(
+            of: #"[》」』”’][一二三四五六七八九十0-9—\-]{1,2}[\u4e00-\u9fa5]{0,2}$"#,
+            options: .regularExpression
+        ), !range.isEmpty {
+            return true
+        }
 
         let english = [
             "and", "but", "or", "because", "so", "if", "when", "which", "that",
@@ -236,7 +270,7 @@ enum CaptionParagraphAssembler {
             || stripped.hasSuffix("others say")
     }
 
-    /// 后一行以连接词、列表词或小写英文开头，提示它仍在上一句里。
+    /// 后一行以连接词、后置复合词尾（如“之旅”“中心之一”）或小写英文开头，提示它仍在上一句里。
     static func continuationStart(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.first else { return false }
@@ -246,6 +280,8 @@ enum CaptionParagraphAssembler {
         let prefixes = [
             "而", "但", "并且", "还有", "以及", "或者", "还是", "同时", "随后",
             "然后", "于是", "因此", "所以", "不过", "却", "也", "又", "再",
+            "之旅", "之一", "之中", "之上", "之下", "之间", "之后", "之前",
+            "之际", "之初", "中心之一",
             "and ", "but ", "or ", "because ", "so ", "if ", "when ", "which ",
             "that ", "who ", "whom ", "whose ", "to ", "of ", "in ", "on ",
             "for ", "with ", "as ", "than ", "then ", "while ", "although ",

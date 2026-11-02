@@ -2247,13 +2247,61 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertTrue(srt.contains("The first part is on the next page."))
     }
 
+    func testBudgetRolloverAndHobbitCommentaryFragmentsMergeAcrossFlushGraceAndStripFakePeriods() async throws {
+        let h = try await makeHarness()
+        _ = try await start(h)
+
+        let line1 = "魔界的现世，以及一头沉睡巨龙的苏醒，再次把中土世界的史诗感拉回了观众眼前。而这就是今天要说的《霍比特人》一意外。"
+        let line2 = "之旅故事要从中土北面的孤山说起，在幽暗密林的左侧，有一座名为河谷镇的繁华城镇，这里曾经是中土大陆最重要的贸易。"
+        let line3 = "中心之一，无数商队从四面八方赶来，金银珠宝、兵器、织物全都在这里流通，而在河谷镇的。"
+
+        try await h.emit(.segmentClosed(
+            itemID: "hobbit-1",
+            sampleSpan: .init(startSample: 0, endSample: 192_000),
+            reason: .budgetRollover,
+            commitEventID: nil
+        ))
+        try await h.emit(.completed(itemID: "hobbit-1", transcript: line1))
+        try await h.settle { $0.session.lines.count == 1 }
+
+        // 模拟第 2 段在数秒后才定稿到达（此时第 1 段的 flush 宽限期早已到期，hasOpenParagraph 变为 false）
+        try await Task.sleep(for: .milliseconds(820))
+        XCTAssertFalse(h.session.hasOpenParagraph)
+
+        try await h.emit(.segmentClosed(
+            itemID: "hobbit-2",
+            sampleSpan: .init(startSample: 192_000, endSample: 384_000),
+            reason: .budgetRollover,
+            commitEventID: nil
+        ))
+        try await h.emit(.completed(itemID: "hobbit-2", transcript: line2))
+        try await h.settle { $0.session.lines.count == 2 }
+
+        try await h.emit(.segmentClosed(
+            itemID: "hobbit-3",
+            sampleSpan: .init(startSample: 384_000, endSample: 528_000),
+            reason: .vad,
+            commitEventID: nil
+        ))
+        try await h.emit(.completed(itemID: "hobbit-3", transcript: line3))
+        try await h.settle { $0.session.lines.count == 3 }
+
+        XCTAssertEqual(h.session.paragraphs.count, 1, "被 8 秒硬切的三段解说词应合并为同一语义段落")
+        XCTAssertEqual(h.session.bandContent.rows.count, 1)
+        XCTAssertEqual(
+            h.session.bandContent.rows.first?.text,
+            "魔界的现世，以及一头沉睡巨龙的苏醒，再次把中土世界的史诗感拉回了观众眼前。而这就是今天要说的《霍比特人》一意外之旅故事要从中土北面的孤山说起，在幽暗密林的左侧，有一座名为河谷镇的繁华城镇，这里曾经是中土大陆最重要的贸易中心之一，无数商队从四面八方赶来，金银珠宝、兵器、织物全都在这里流通，而在河谷镇的。"
+        )
+    }
+
     private func makeLine(
         _ text: String,
         id: String = UUID().uuidString,
         start: TimeInterval? = nil,
-        end: TimeInterval? = nil
+        end: TimeInterval? = nil,
+        closeReason: TranscriptPreviewLedger.SegmentCloseReason? = nil
     ) -> CaptionSession.Line {
-        CaptionSession.Line(id: id, ordinal: 1, text: text, start: start, end: end)
+        CaptionSession.Line(id: id, ordinal: 1, text: text, start: start, end: end, closeReason: closeReason)
     }
 
     @MainActor

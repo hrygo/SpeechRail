@@ -286,3 +286,81 @@ def test_stop_threshold_defaults_and_validation() -> None:
         SpeechAdmission(threshold=0.5, stop_threshold=0.6)
     with pytest.raises(ValueError, match="stop_threshold must be between"):
         SpeechAdmission(threshold=0.5, stop_threshold=-0.1)
+
+
+def test_soft_watermark_valley_seeking_closes_on_micro_pause() -> None:
+    """Once continuous speech exceeds soft_max_samples, a brief micro-pause
+    (or punctuation-assisted pause) closes the utterance cleanly instead of
+    waiting for full stop_frames and hitting a mid-word budget rollover."""
+    gate = SpeechAdmission(
+        threshold=0.5,
+        start_frames=1,
+        stop_frames=10,
+        prefix_samples=0,
+        frame_samples=512,
+        soft_max_samples=2048,  # 4 frames
+        soft_stop_frames=3,
+        punctuation_stop_frames=2,
+    )
+    frame = bytes(1024)
+
+    # Activate and speak for 2 frames (1024 samples < 2048 soft_max_samples)
+    gate.push(frame, start_sample=0, probability=0.9)
+    gate.push(frame, start_sample=512, probability=0.9)
+
+    # Before soft watermark, a 3-frame micro-pause does NOT close the utterance
+    gate.push(frame, start_sample=1024, probability=0.1)
+    gate.push(frame, start_sample=1536, probability=0.1)
+    assert gate.state == "HANGOVER"
+
+    # Resume speech past soft_max_samples (up to sample 3072 >= 2048)
+    gate.push(frame, start_sample=2048, probability=0.9)
+    gate.push(frame, start_sample=2560, probability=0.9)
+    assert gate.state == "ACTIVE"
+
+    # Now in soft watermark zone: 3 micro-pause frames close the utterance!
+    gate.push(frame, start_sample=3072, probability=0.1)
+    gate.push(frame, start_sample=3584, probability=0.1)
+    closing = gate.push(frame, start_sample=4096, probability=0.1)
+    assert gate.state == "IDLE"
+    assert closing[-1].kind == "end"
+    assert closing[-1].start_sample == 0
+    assert closing[-1].end_sample == 4608
+
+
+def test_soft_watermark_punctuation_hint_and_rollover_advance() -> None:
+    gate = SpeechAdmission(
+        threshold=0.5,
+        start_frames=1,
+        stop_frames=10,
+        prefix_samples=0,
+        frame_samples=512,
+        soft_max_samples=1536,  # 3 frames
+        soft_stop_frames=4,
+        punctuation_stop_frames=2,
+    )
+    frame = bytes(1024)
+
+    # Speak for 3 frames (1536 samples) -> enters soft watermark zone
+    gate.push(frame, start_sample=0, probability=0.9)
+    gate.push(frame, start_sample=512, probability=0.9)
+    gate.push(frame, start_sample=1024, probability=0.9)
+
+    # External rollover advances segment start to 1536 -> no longer in soft zone
+    gate.advance_segment_start(1536)
+    gate.push(frame, start_sample=1536, probability=0.1)
+    gate.push(frame, start_sample=2048, probability=0.1)
+    assert gate.state == "HANGOVER"
+
+    # Resume speech for 3 frames from 1536 -> reaches 4096 (span = 2560 >= 1536)
+    gate.push(frame, start_sample=2560, probability=0.9)
+    gate.push(frame, start_sample=3072, probability=0.9)
+    gate.set_punctuation_boundary_hint(True)
+
+    # With punctuation hint in soft zone, only 2 frames (64ms) close the segment
+    gate.push(frame, start_sample=3584, probability=0.40)  # below soft stop threshold 0.425
+    closing = gate.push(frame, start_sample=4096, probability=0.40)
+    assert gate.state == "IDLE"
+    assert closing[-1].kind == "end"
+    assert closing[-1].start_sample == 1536
+    assert closing[-1].end_sample == 4608

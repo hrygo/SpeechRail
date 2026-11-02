@@ -51,6 +51,9 @@ class SpeechAdmission:
         prefix_samples: int = 4800,
         frame_samples: int = 512,
         sample_rate: int = 16_000,
+        soft_max_samples: int | None = None,
+        soft_stop_frames: int | None = None,
+        punctuation_stop_frames: int | None = None,
     ) -> None:
         if threshold < 0.0 or threshold > 1.0:
             raise ValueError("threshold must be between 0.0 and 1.0")
@@ -66,6 +69,12 @@ class SpeechAdmission:
             raise ValueError("frame_samples must be >= 1")
         if prefix_samples < 0:
             raise ValueError("prefix_samples must be >= 0")
+        if soft_max_samples is not None and soft_max_samples < 1:
+            raise ValueError("soft_max_samples must be >= 1")
+        if soft_stop_frames is not None and soft_stop_frames < 1:
+            raise ValueError("soft_stop_frames must be >= 1")
+        if punctuation_stop_frames is not None and punctuation_stop_frames < 1:
+            raise ValueError("punctuation_stop_frames must be >= 1")
 
         self._threshold = threshold
         self._stop_threshold = stop_threshold
@@ -74,6 +83,9 @@ class SpeechAdmission:
         self._frame_samples = frame_samples
         self._frame_bytes = frame_samples * 2  # 16-bit PCM mono
         self._sample_rate = sample_rate
+        self._soft_max_samples = soft_max_samples
+        self._soft_stop_frames = soft_stop_frames
+        self._punctuation_stop_frames = punctuation_stop_frames
 
         # Bounded pre-roll ring buffer in frames
         max_prefix_frames = max(1, (prefix_samples + frame_samples - 1) // frame_samples)
@@ -93,6 +105,7 @@ class SpeechAdmission:
         self._hangover_count = 0
         self._current_utterance_start_sample = 0
         self._last_emitted_sample = 0
+        self._at_punctuation_boundary = False
 
     @property
     def state(self) -> Literal["IDLE", "CANDIDATE", "ACTIVE", "HANGOVER"]:
@@ -127,6 +140,37 @@ class SpeechAdmission:
         self._hangover_count = 0
         self._current_utterance_start_sample = next_sample
         self._last_emitted_sample = next_sample
+        self._at_punctuation_boundary = False
+
+    def advance_segment_start(self, sample_offset: int) -> None:
+        """Advance the current segment origin after an external budget rollover."""
+        if sample_offset > self._current_utterance_start_sample:
+            self._current_utterance_start_sample = sample_offset
+        self._hangover_count = 0
+        self._at_punctuation_boundary = False
+
+    def set_punctuation_boundary_hint(self, at_boundary: bool) -> None:
+        """Update whether the latest ASR partial ends at a punctuation boundary."""
+        self._at_punctuation_boundary = bool(at_boundary)
+
+    def _in_soft_watermark_zone(self, frame_end_sample: int) -> bool:
+        return (
+            self._soft_max_samples is not None
+            and (frame_end_sample - self._current_utterance_start_sample) >= self._soft_max_samples
+        )
+
+    def _effective_stop_threshold(self, frame_end_sample: int) -> float:
+        if self._in_soft_watermark_zone(frame_end_sample):
+            return (self._threshold + self._stop_threshold) / 2.0
+        return self._stop_threshold
+
+    def _effective_stop_frames(self, frame_end_sample: int) -> int:
+        if self._in_soft_watermark_zone(frame_end_sample):
+            if self._at_punctuation_boundary and self._punctuation_stop_frames is not None:
+                return min(self._stop_frames, self._punctuation_stop_frames)
+            if self._soft_stop_frames is not None:
+                return min(self._stop_frames, self._soft_stop_frames)
+        return self._stop_frames
 
     def push(
         self,
@@ -169,14 +213,14 @@ class SpeechAdmission:
         sample_offset: int,
         probability: float,
     ) -> list[AdmissionDecision]:
+        frame_end_sample = sample_offset + self._frame_samples
         # Dual-threshold hysteresis: onset confirmation uses the entry
         # threshold; an utterance in progress only yields below the lower
         # exit threshold (see class docstring).
         if self._state in ("ACTIVE", "HANGOVER"):
-            is_speech = probability >= self._stop_threshold
+            is_speech = probability >= self._effective_stop_threshold(frame_end_sample)
         else:
             is_speech = probability >= self._threshold
-        frame_end_sample = sample_offset + self._frame_samples
         decisions: list[AdmissionDecision] = []
 
         if self._state == "IDLE":
@@ -228,7 +272,7 @@ class SpeechAdmission:
                     )
                 )
                 self._last_emitted_sample = frame_end_sample
-                if self._hangover_count >= self._stop_frames:
+                if self._hangover_count >= self._effective_stop_frames(frame_end_sample):
                     decisions.append(self._close_active(frame_end_sample))
 
         elif self._state == "HANGOVER":
@@ -255,7 +299,7 @@ class SpeechAdmission:
                     )
                 )
                 self._last_emitted_sample = frame_end_sample
-                if self._hangover_count >= self._stop_frames:
+                if self._hangover_count >= self._effective_stop_frames(frame_end_sample):
                     decisions.append(self._close_active(frame_end_sample))
 
         if self._state in ("IDLE", "CANDIDATE"):
@@ -275,6 +319,7 @@ class SpeechAdmission:
         self._prefix_ring.clear()
         self._state = "ACTIVE"
         self._hangover_count = 0
+        self._at_punctuation_boundary = False
         self._current_utterance_start_sample = first_pre_sample
         frame_end_sample = sample_offset + self._frame_samples
 
@@ -314,6 +359,7 @@ class SpeechAdmission:
 
         self._state = "ACTIVE"
         self._hangover_count = 0
+        self._at_punctuation_boundary = False
         self._current_utterance_start_sample = first_pre_sample
         self._last_emitted_sample = last_cand_sample
 
@@ -338,6 +384,7 @@ class SpeechAdmission:
         start_sample = self._current_utterance_start_sample
         self._state = "IDLE"
         self._hangover_count = 0
+        self._at_punctuation_boundary = False
         return AdmissionDecision(
             kind="end",
             start_sample=start_sample,

@@ -434,6 +434,7 @@ public final class CaptionSession {
         public var speakerLabel: String?
         public var attributionUnits: [TranscriptAttributionUnit] = []
         public var speakerLabelIsManual = false
+        public var closeReason: TranscriptPreviewLedger.SegmentCloseReason?
         public var sourceLanguage: String?
         public var translatedText: String?
         public var paragraphID: String?
@@ -448,6 +449,7 @@ public final class CaptionSession {
             speakerLabel: String? = nil,
             attributionUnits: [TranscriptAttributionUnit] = [],
             speakerLabelIsManual: Bool = false,
+            closeReason: TranscriptPreviewLedger.SegmentCloseReason? = nil,
             sourceLanguage: String? = nil,
             translatedText: String? = nil,
             paragraphID: String? = nil,
@@ -461,6 +463,7 @@ public final class CaptionSession {
             self.speakerLabel = speakerLabel
             self.attributionUnits = attributionUnits
             self.speakerLabelIsManual = speakerLabelIsManual
+            self.closeReason = closeReason
             self.sourceLanguage = sourceLanguage
             self.translatedText = translatedText
             self.paragraphID = paragraphID
@@ -2128,7 +2131,7 @@ public final class CaptionSession {
         let command = TranscriptPersistenceQueue.Command(
             sessionID: sessionID, connection: identity.connection, itemID: itemID,
             generation: identity.generation, text: text, source: audioTarget?.lineSource ?? .microphone, role: .speaker,
-            tStart: inputTimes?.start, tEnd: inputTimes?.end, formal: formal,
+            tStart: inputTimes?.start, tEnd: inputTimes?.end, closeReason: boundary?.reason, formal: formal,
             isInterrupted: false, timingQuality: .unavailable, observedAt: Date()
         )
         switch inputPersistence.enqueue(command) {
@@ -2221,6 +2224,7 @@ public final class CaptionSession {
             var line = Line(
                 id: lineID, ordinal: ordinal, text: sourceText,
                 start: command.tStart, end: command.tEnd, speakerLabel: command.speakerLabel,
+                closeReason: command.closeReason,
                 translatedText: initialDraftTranslation,
                 isTranslating: willTranslate
             )
@@ -2280,30 +2284,36 @@ public final class CaptionSession {
         initialStabilizedPrefix: String? = nil
     ) -> String {
         if let index = paragraphs.indices.last,
-           paragraphs[index].id == openParagraphID,
-           paragraphAssemblyEnabled,
-           CaptionParagraphAssembler.shouldMerge(
-                paragraphs[index],
-                line,
-                observedAt: observedAt
-           ) {
-            let paragraphID = paragraphs[index].id
-            line.paragraphID = paragraphID
-            line.translatedText = nil
-            transcriptPresentation.apply(line)
-            let hadSingleLineDraftOnly = paragraphs[index].translatedText == paragraphs[index].initialDraftTranslation
-            paragraphs[index].append(line, observedAt: observedAt)
-            if hadSingleLineDraftOnly {
-                transcriptPresentation.update(id: paragraphID) {
-                    $0.translatedText = nil
+           paragraphAssemblyEnabled {
+            let isOpen = (paragraphs[index].id == openParagraphID)
+            let canMergeClosed = paragraphs[index].lastLineCloseReason == .budgetRollover
+                || CaptionParagraphAssembler.strongIncompleteEnding(paragraphs[index].sourceText)
+                || CaptionParagraphAssembler.continuationStart(line.text)
+            if (isOpen || canMergeClosed),
+               CaptionParagraphAssembler.shouldMerge(
+                    paragraphs[index],
+                    line,
+                    observedAt: observedAt
+               ) {
+                let paragraphID = paragraphs[index].id
+                line.paragraphID = paragraphID
+                line.translatedText = nil
+                transcriptPresentation.apply(line)
+                let hadPriorTranslation = paragraphs[index].translatedText != nil
+                paragraphs[index].append(line, observedAt: observedAt)
+                if hadPriorTranslation {
+                    transcriptPresentation.update(id: paragraphID) {
+                        $0.translatedText = nil
+                    }
                 }
+                paragraphs[index].isTranslating = paragraphs[index].isTranslating || willTranslate
+                openParagraphID = paragraphID
+                pruneParagraphs()
+                if let currentIdx = paragraphs.firstIndex(where: { $0.id == paragraphID }) {
+                    scheduleParagraphFlush(for: currentIdx, deferImmediateFlush: true)
+                }
+                return paragraphID
             }
-            paragraphs[index].isTranslating = paragraphs[index].isTranslating || willTranslate
-            pruneParagraphs()
-            if let currentIdx = paragraphs.firstIndex(where: { $0.id == paragraphID }) {
-                scheduleParagraphFlush(for: currentIdx, deferImmediateFlush: true)
-            }
-            return paragraphID
         }
 
         // 新行已经证明上一段结束：不再等宽限，立刻收口并翻译。

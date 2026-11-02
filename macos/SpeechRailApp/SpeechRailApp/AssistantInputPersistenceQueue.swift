@@ -49,6 +49,7 @@ public final class TranscriptPersistenceQueue {
         public let speakerLabel: String?
         public let tStart: TimeInterval?
         public let tEnd: TimeInterval?
+        public let closeReason: TranscriptPreviewLedger.SegmentCloseReason?
         public let formal: Bool
         public let isInterrupted: Bool
         public let isDeviceSwitch: Bool
@@ -70,6 +71,7 @@ public final class TranscriptPersistenceQueue {
             speakerLabel: String? = nil,
             tStart: TimeInterval? = nil,
             tEnd: TimeInterval? = nil,
+            closeReason: TranscriptPreviewLedger.SegmentCloseReason? = nil,
             formal: Bool,
             isInterrupted: Bool? = nil,
             isDeviceSwitch: Bool = false,
@@ -88,6 +90,7 @@ public final class TranscriptPersistenceQueue {
             self.speakerLabel = speakerLabel
             self.tStart = tStart
             self.tEnd = tEnd
+            self.closeReason = closeReason
             self.formal = formal
             self.isInterrupted = isInterrupted ?? !formal
             self.isDeviceSwitch = isDeviceSwitch
