@@ -1854,6 +1854,75 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         )
     }
 
+    func testParagraphAssemblerQuotesAdverbialsAndSpokenContinuations() {
+        let now = Date()
+
+        // 场景 1：动作链顺承合并（“离开了 OpenAI。” + “成立了Anthropic。”）
+        let l1 = makeLine("于是，2021年，他带着一群人离开了 OpenAI。", start: 0, end: 3.0)
+        let p1 = CaptionParagraph(line: l1, observedAt: now, isTranslating: false)
+        let l2 = makeLine("成立了Anthropic。", start: 3.1, end: 4.5)
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(p1, l2, observedAt: now.addingTimeInterval(0.1)),
+            "离开OpenAI与成立Anthropic应顺承合并"
+        )
+
+        // 场景 2：引述闭合引号穿透与防反向吸附
+        // L2（“成立了Anthropic。”）绝对不得被下一句带引号的完整句 L3 错误吸附
+        let p2 = CaptionParagraph(line: l2, observedAt: now, isTranslating: false)
+        let l3 = makeLine("Darrell后来谈起这段经历的时候说过一句话：“如果你有自己的愿景，你就带着你信任的人出去实现。你跟别人争论他的愿景。”", start: 4.6, end: 12.0)
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(p2, l3, observedAt: now.addingTimeInterval(0.1)),
+            "末尾带闭合双引号的独立引述句必须正确识别终结标点，不得反向吸附前文"
+        )
+
+        // 场景 3：动态引述导语断尾缝合（“……他们家的一位前员工说。” + “这感觉就像听牧师布道。”）
+        let quoteLead = makeLine("大瑞又给全公司讲AI，讲政治，讲战争。他们家的一位前员工说。", start: 0, end: 4.0)
+        var pQuote = CaptionParagraph(line: quoteLead, observedAt: now, isTranslating: false)
+        let quoteBody = makeLine("这感觉就像听牧师布道。", start: 4.05, end: 6.5)
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(pQuote, quoteBody, observedAt: now.addingTimeInterval(0.05)),
+            "以'员工说'结尾的引述导语应与引述正文合并"
+        )
+        pQuote.append(quoteBody, observedAt: now.addingTimeInterval(0.05))
+        XCTAssertTrue(pQuote.displaySourceText.contains("员工说这感觉就像听牧师布道。"))
+
+        // 场景 4：提示性结论断尾缝合（“……他得到一个结论。” + “AI太危险了。”）
+        let cueLine = makeLine("思来想去，他得到一个结论。", start: 0, end: 2.5)
+        let pCue = CaptionParagraph(line: cueLine, observedAt: now, isTranslating: false)
+        let cueContent = makeLine("AI太危险了。", start: 2.55, end: 4.0)
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(pCue, cueContent, observedAt: now.addingTimeInterval(0.05)),
+            "提示性引出短语'得到一个结论'应与结论内容合并"
+        )
+
+        // 场景 5：顺承履历副词连贯（“……他真懂技术。” + “先后在百度干了几年。”）
+        let resumeLine1 = makeLine("他跟一般神棍主要的区别是，他真懂技术。", start: 0, end: 3.0)
+        let pResume = CaptionParagraph(line: resumeLine1, observedAt: now, isTranslating: false)
+        let resumeLine2 = makeLine("先后在百度、Google干了几年。", start: 3.06, end: 5.5)
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(pResume, resumeLine2, observedAt: now.addingTimeInterval(0.06)),
+            "顺承副词'先后'引导的履历句应与前句合并"
+        )
+
+        // 场景 6：英文条件从句悬空与主句缝合
+        let enSubordinate = makeLine("Okay, now if you match all ten of these.", start: 0, end: 2.5)
+        let pEn = CaptionParagraph(line: enSubordinate, observedAt: now, isTranslating: false)
+        let enMain = makeLine("You're gonna walk out of here with a thousand dollars.", start: 2.55, end: 5.0)
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(pEn, enMain, observedAt: now.addingTimeInterval(0.05)),
+            "英文悬空条件从句应与紧邻主句合并"
+        )
+
+        // 场景 7：英文口语从属连词（“Cause my grandmama.”）
+        let enLead = makeLine("Yeah, pray for us.", start: 0, end: 1.5)
+        let pEnLead = CaptionParagraph(line: enLead, observedAt: now, isTranslating: false)
+        let enCause = makeLine("Cause my grandmama.", start: 1.55, end: 3.0)
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(pEnLead, enCause, observedAt: now.addingTimeInterval(0.05)),
+            "以口语'Cause'开头的从句应与前句合并"
+        )
+    }
+
     func testParagraphAssemblerDoesNotMergeTwoCompleteSentencesJustBecauseTheyAreClose() {
         let now = Date()
         let first = makeLine("第一条完整字幕。", start: 0, end: 1)
