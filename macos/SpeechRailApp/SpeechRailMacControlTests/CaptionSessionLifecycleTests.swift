@@ -2333,6 +2333,389 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         )
     }
 
+    func testCorrelativePairsAndUnifiedBoundaryEvidence() {
+        let now = Date()
+        let positivePairs: [(String, String)] = [
+            ("虽然画面很好。", "但是节奏拖沓。"),
+            ("尽管特效非常顶尖。", "却让人看得昏昏欲睡。"),
+            ("一方面画面出色。", "另一方面配乐平庸。"),
+            ("不仅画面表现极其出色。", "而且配乐也相当到位。"),
+            ("不但主角演技在线。", "还包揽了全片配乐。"),
+            ("一边惊艳于它的美学奇观。", "一边觉得叙事节奏有些慢。"),
+        ]
+
+        for (leftText, rightText) in positivePairs {
+            let evidence = CaptionParagraphAssembler.boundaryEvidence(previous: leftText, next: rightText)
+            XCTAssertTrue(evidence.correlativePair, "应识别关联词配对：\(leftText) -> \(rightText)")
+            let paragraph = CaptionParagraph(
+                line: makeLine(leftText, start: 0, end: 1.5),
+                observedAt: now,
+                isTranslating: false
+            )
+            let nextLine = makeLine(rightText, start: 1.8, end: 3.2)
+            XCTAssertTrue(
+                CaptionParagraphAssembler.shouldMerge(
+                    paragraph,
+                    nextLine,
+                    observedAt: now.addingTimeInterval(0.3)
+                ),
+                "关联词成对分句应合并：\(leftText) / \(rightText)"
+            )
+        }
+
+        let longPrefixAfterOpener = "虽然" + String(repeating: "画", count: 130) + "。"
+        let negativePairs: [(String, String, String)] = [
+            ("这部电影画面很好。", "但是节奏拖沓。", "无 opener 不得仅因'但是'合并两个完整句"),
+            ("这部电影画面很好。", "还拿下了最佳摄影奖。", "无 opener 不得仅因'还'合并两个完整句"),
+            ("这部电影画面很好。", "却没有拿到最佳导演。", "无 opener 不得仅因'却'合并两个完整句"),
+            ("所谓的科幻史诗大片。", "不过是一部老套的复仇记。", "所谓->不过暂不设强配对"),
+            ("哪怕特效做得再华丽。", "也救不了空洞的剧本。", "哪怕->也暂不设强配对"),
+            ("宁可错过开场十分钟。", "也不要提前看剧透。", "宁可->也不暂不设强配对"),
+            ("虽然昨天很累。今天精神已经恢复了。", "但是还是想早点休息。", "opener 在上一完整句内，跨句号后不得配对"),
+            ("虽然画面很好，但是我已经看过了。", "但是节奏还是拖沓。", "左侧 opener 后已出现 closer，不得重复配对"),
+            ("一边喝着咖啡，一边翻看资料。", "一边听着背景音乐。", "左侧一边...一边已闭合，不得继续强配对"),
+            ("一方面画面出色，另一方面配乐平庸。", "另一方面剧情也很老套。", "左侧一方面...另一方面已闭合，不得继续强配对"),
+            (longPrefixAfterOpener, "但是节奏拖沓。", "opener 超出最后 128 Character 扫描窗口时不得配对"),
+            ("虽然画面很好。", "经过了整整二十五个字符的漫长铺垫之后才终于说到但是节奏拖沓。", "closer 不在句首前 24 Character 起始位置时不得配对"),
+        ]
+
+        for (leftText, rightText, message) in negativePairs {
+            let evidence = CaptionParagraphAssembler.boundaryEvidence(previous: leftText, next: rightText)
+            XCTAssertFalse(evidence.correlativePair, message)
+            let paragraph = CaptionParagraph(
+                line: makeLine(leftText, start: 0, end: 2.0),
+                observedAt: now,
+                isTranslating: false
+            )
+            let nextLine = makeLine(rightText, start: 2.3, end: 4.0)
+            XCTAssertFalse(
+                CaptionParagraphAssembler.shouldMerge(
+                    paragraph,
+                    nextLine,
+                    observedAt: now.addingTimeInterval(0.3)
+                ),
+                message
+            )
+        }
+
+        // 硬边界优先：即使存在关联词配对，换说话人、换明确语言、超间隔、超时长、满 3 行均不得合并
+        var speakerA = makeLine("虽然画面很好。", start: 0, end: 1.5)
+        speakerA.speakerLabel = "A"
+        var speakerB = makeLine("但是节奏拖沓。", start: 1.7, end: 3.0)
+        speakerB.speakerLabel = "B"
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(
+                CaptionParagraph(line: speakerA, observedAt: now, isTranslating: false),
+                speakerB,
+                observedAt: now.addingTimeInterval(0.2)
+            ),
+            "换说话人必须阻断关联词合并"
+        )
+
+        var langZh = makeLine("虽然画面很好。", start: 0, end: 1.5)
+        langZh.sourceLanguage = "zh"
+        var langEn = makeLine("但是节奏拖沓。", start: 1.7, end: 3.0)
+        langEn.sourceLanguage = "en"
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(
+                CaptionParagraph(line: langZh, observedAt: now, isTranslating: false),
+                langEn,
+                observedAt: now.addingTimeInterval(0.2)
+            ),
+            "明确已知语种变化必须阻断合并"
+        )
+
+        let gapExceeded = makeLine("但是节奏拖沓。", start: 3.0, end: 4.5)
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(
+                CaptionParagraph(line: makeLine("虽然画面很好。", start: 0, end: 1.5), observedAt: now, isTranslating: false),
+                gapExceeded,
+                observedAt: now.addingTimeInterval(1.5)
+            ),
+            "超过 maximumGap 必须阻断关联词合并"
+        )
+
+        let durationExceeded = makeLine("但是节奏拖沓。", start: 27.5, end: 29.0)
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(
+                CaptionParagraph(line: makeLine("虽然画面很好，", start: 0, end: 27.0), observedAt: now, isTranslating: false),
+                durationExceeded,
+                observedAt: now.addingTimeInterval(0.5)
+            ),
+            "超过 maximumDuration 必须阻断关联词合并"
+        )
+    }
+
+    func testStandaloneRepliesDoNotExtendHoldOrMergeUnlessRollover() {
+        let now = Date()
+        for reply in ["好的。", "是的！", "走吧。", "行了？"] {
+            let evidence = CaptionParagraphAssembler.boundaryEvidence(previous: reply, next: "我们开始下一部分内容")
+            XCTAssertTrue(evidence.standaloneReply, "\(reply) 应识别为独立短回答")
+            XCTAssertFalse(evidence.strongIncomplete, "\(reply) 不应再按悬空助词判为 strongIncomplete")
+
+            let normalParagraph = CaptionParagraph(
+                line: makeLine(reply, start: 0, end: 0.6, closeReason: .vad),
+                observedAt: now,
+                isTranslating: false
+            )
+            XCTAssertEqual(
+                CaptionParagraphAssembler.flushDelayMilliseconds(for: normalParagraph, assemblyEnabled: true),
+                CaptionParagraphAssembler.completeSentenceGraceMilliseconds,
+                "\(reply) 非 rollover 时应按完整句等待 200ms"
+            )
+            XCTAssertFalse(
+                CaptionParagraphAssembler.shouldMerge(
+                    normalParagraph,
+                    makeLine("我们开始下一部分内容", start: 0.7, end: 2.0),
+                    observedAt: now.addingTimeInterval(0.1)
+                ),
+                "\(reply) 非 rollover 时不得自动并入后续行"
+            )
+
+            let rolloverParagraph = CaptionParagraph(
+                line: makeLine(reply, start: 0, end: 0.6, closeReason: .budgetRollover),
+                observedAt: now,
+                isTranslating: false
+            )
+            XCTAssertEqual(
+                CaptionParagraphAssembler.flushDelayMilliseconds(for: rolloverParagraph, assemblyEnabled: true),
+                CaptionParagraphAssembler.incompleteHoldMilliseconds,
+                "\(reply) 在 budgetRollover 时仍保留 750ms 截断等待"
+            )
+            XCTAssertTrue(
+                CaptionParagraphAssembler.shouldMerge(
+                    rolloverParagraph,
+                    makeLine("我们开始下一部分内容。", start: 0.6, end: 2.0),
+                    observedAt: now.addingTimeInterval(0.1)
+                ),
+                "\(reply) 在 budgetRollover 时仍允许续接合并"
+            )
+        }
+
+        // 包含 opener 但非悬空结尾的完整句不延长为 750ms
+        let openerComplete = CaptionParagraph(
+            line: makeLine("虽然这部电影的画面表现非常出色。", start: 0, end: 2.0),
+            observedAt: now,
+            isTranslating: false
+        )
+        XCTAssertEqual(
+            CaptionParagraphAssembler.flushDelayMilliseconds(for: openerComplete, assemblyEnabled: true),
+            CaptionParagraphAssembler.completeSentenceGraceMilliseconds
+        )
+    }
+
+    func testParagraphFlushWindowAppendsOnceDoesNotReopenAndCleansUpTimers() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["虽然画面很好，但节奏拖沓。"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
+        h.session.sourceLanguage = .english
+        _ = try await start(h)
+
+        // 1. 窗口内追加关联句：取消旧定时任务，合并为同一段且只触发一次 Stage 2 翻译
+        try await h.emit(.completed(itemID: "corr-1", transcript: "虽然这部电影的整体画面表现很好。"))
+        try await h.settle { $0.session.lines.count == 1 && $0.session.hasOpenParagraph }
+        XCTAssertTrue(h.session.hasPendingParagraphFlushTask)
+
+        try await h.emit(.completed(itemID: "corr-2", transcript: "但是后半段的叙事节奏实在太拖沓。"))
+        try await h.settle {
+            $0.session.lines.count == 2
+                && $0.session.paragraphs.count == 1
+                && $0.session.paragraphs.first?.lineIDs.count == 2
+        }
+
+        // 等待该段落自然收口并完成唯一一次翻译，不使用固定 sleep 断言并发结果
+        try await h.settle {
+            !$0.session.hasOpenParagraph
+                && !$0.session.hasPendingParagraphFlushTask
+                && $0.session.paragraphs.first?.translatedText == "虽然画面很好，但节奏拖沓。"
+        }
+        XCTAssertEqual(fake.callCount, 1, "窗口内合并的段落收口后只应触发一次 Stage 2 精翻")
+
+        // 2. 超时收口后到达的后续关联词不得重开已封存段落
+        fake.streamDeltas = ["虽然第二部配乐恢弘。"]
+        try await h.emit(.completed(itemID: "corr-3", transcript: "虽然第二部作品的配乐非常恢弘。"))
+        try await h.settle {
+            $0.session.lines.count == 3
+                && $0.session.paragraphs.count == 2
+                && !$0.session.hasOpenParagraph
+                && !$0.session.hasPendingParagraphFlushTask
+                && $0.session.paragraphs[1].translatedText == "虽然第二部配乐恢弘。"
+        }
+        XCTAssertEqual(fake.callCount, 2)
+
+        fake.streamDeltas = ["但是剧情依然平淡。"]
+        try await h.emit(.completed(itemID: "corr-late", transcript: "但是它的剧情展开依然显得比较平淡。"))
+        try await h.settle {
+            $0.session.lines.count == 4
+                && $0.session.paragraphs.count == 3
+                && !$0.session.hasOpenParagraph
+        }
+        XCTAssertEqual(h.session.paragraphs[1].lineIDs.count, 1, "已收口翻译的段落不得被迟到的关联词重开")
+        XCTAssertEqual(h.session.paragraphs[1].sourceText, "虽然第二部作品的配乐非常恢弘。")
+        XCTAssertEqual(h.session.paragraphs[2].lineIDs.count, 1)
+        XCTAssertEqual(h.session.paragraphs[2].sourceText, "但是它的剧情展开依然显得比较平淡。")
+
+        // 3. 关闭段落合并、暂停与结束均不得遗留未取消的 timer
+        try await h.emit(.completed(itemID: "hold-1", transcript: "这句话停在连接词，但。"))
+        try await h.settle { $0.session.lines.count == 5 && $0.session.hasPendingParagraphFlushTask }
+        h.session.paragraphAssemblyEnabled = false
+        XCTAssertFalse(h.session.hasOpenParagraph)
+        XCTAssertFalse(h.session.hasPendingParagraphFlushTask, "关闭段落合并时必须立即回收定时任务")
+
+        h.session.paragraphAssemblyEnabled = true
+        try await h.emit(.completed(itemID: "hold-2", transcript: "另一句未说完的话，因为。"))
+        try await h.settle { $0.session.lines.count == 6 && $0.session.hasPendingParagraphFlushTask }
+        await h.session.pause()
+        XCTAssertFalse(h.session.hasOpenParagraph)
+        XCTAssertFalse(h.session.hasPendingParagraphFlushTask, "暂停会话时必须回收段落定时任务")
+
+        await h.session.finish()
+        XCTAssertFalse(h.session.hasOpenParagraph)
+        XCTAssertFalse(h.session.hasPendingParagraphFlushTask, "结束会话时必须回收段落定时任务")
+    }
+
+    func testSoftCharacterBudgetBoundaryAndContinuityOverrides() async throws {
+        let now = Date()
+        // 左侧完整句去掉句末句号后恰为 18 个 Character（原句 19 个 Character）
+        let leftComplete19 = "这是一句十九字完整前文用来测预算边界。"
+        XCTAssertEqual(leftComplete19.count, 19)
+        XCTAssertEqual(CaptionParagraphAssembler.trimTrailingPunctuation(leftComplete19).count, 18)
+
+        // 右侧无句末标点的补充句（使 gap<=0.45 时基础得分为 3 >= 2）：
+        // 20 个 Character -> 候选显示文本 = 18 + 20 = 38（包含边界，允许合并）
+        // 21 个 Character -> 候选显示文本 = 18 + 21 = 39（超出 38 且左侧为完整句、无连续性证据，另起段）
+        let right20 = "紧接着二十个字符的补充内容恰好三十八字呀"
+        let right21 = "紧接着二十一个字符的补充内容达到三十九字呀"
+        XCTAssertEqual(right20.count, 20)
+        XCTAssertEqual(right21.count, 21)
+
+        let baseParagraph = CaptionParagraph(
+            line: makeLine(leftComplete19, start: 0, end: 2.0),
+            observedAt: now,
+            isTranslating: false
+        )
+        XCTAssertEqual(baseParagraph.candidateDisplaySourceText(appending: right20).count, 38)
+        XCTAssertEqual(baseParagraph.candidateDisplaySourceText(appending: right21).count, 39)
+
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(
+                baseParagraph,
+                makeLine(right20, start: 2.2, end: 4.0),
+                observedAt: now.addingTimeInterval(0.2)
+            ),
+            "候选展示文本恰为 38 Character 时不应阻断合并"
+        )
+        XCTAssertFalse(
+            CaptionParagraphAssembler.shouldMerge(
+                baseParagraph,
+                makeLine(right21, start: 2.2, end: 4.0),
+                observedAt: now.addingTimeInterval(0.2)
+            ),
+            "候选展示文本达到 39 Character 且左侧为无连续性证据的完整句时必须另起段"
+        )
+
+        // 五类连续性证据在 >= 39 Character 时均允许软超限：
+        let continuityCases: [(CaptionParagraph, CaptionSession.Line, String)] = [
+            (
+                CaptionParagraph(
+                    line: makeLine(leftComplete19, start: 0, end: 2.0, closeReason: .budgetRollover),
+                    observedAt: now,
+                    isTranslating: false
+                ),
+                makeLine(right21 + "。", start: 2.1, end: 4.0),
+                "budgetRollover 应允许超过 38 Character 软预算"
+            ),
+            (
+                CaptionParagraph(
+                    line: makeLine("这是一句结尾悬空的十九字前文测试，但。", start: 0, end: 2.0),
+                    observedAt: now,
+                    isTranslating: false
+                ),
+                makeLine(right21 + "。", start: 2.1, end: 4.0),
+                "strongIncomplete 应允许超过 38 Character 软预算"
+            ),
+            (
+                CaptionParagraph(
+                    line: makeLine("我们国内观众。", start: 0, end: 1.0),
+                    observedAt: now,
+                    isTranslating: false
+                ),
+                makeLine("在这个长达三十五个字符以上的后续未完分句里继续补充说明整个故事背景呀", start: 1.2, end: 4.0),
+                "短碎片引子应允许超过 38 Character 软预算"
+            ),
+            (
+                CaptionParagraph(
+                    line: makeLine("虽然这部科幻电影的视觉特效和美术设计非常惊艳。", start: 0, end: 2.5),
+                    observedAt: now,
+                    isTranslating: false
+                ),
+                makeLine("但是它在中后段的叙事节奏和人物动机处理上显得过于拖沓了。", start: 2.7, end: 5.5),
+                "correlativePair 应允许超过 38 Character 软预算"
+            ),
+            (
+                baseParagraph,
+                makeLine("对于整部作品的世界观塑造和后续剧情推进其实起到了关键作用。", start: 2.2, end: 5.0),
+                "明确 continuation 应允许超过 38 Character 软预算"
+            ),
+        ]
+
+        for (para, nextLine, description) in continuityCases {
+            XCTAssertGreaterThan(para.candidateDisplaySourceText(appending: nextLine.text).count, 38)
+            XCTAssertTrue(
+                CaptionParagraphAssembler.shouldMerge(
+                    para,
+                    nextLine,
+                    observedAt: now.addingTimeInterval(0.2)
+                ),
+                description
+            )
+        }
+
+        // 中英混排空格与组合 emoji 计数一致性：Swift Character 数与最终 displaySourceText 完全一致
+        var mixedPara = CaptionParagraph(
+            line: makeLine("The model Qwen3 👨‍👩‍👧‍👦 is running on,", start: 0, end: 1.5),
+            observedAt: now,
+            isTranslating: false
+        )
+        let mixedNext = makeLine("Apple Silicon Mac today.", start: 1.7, end: 3.0)
+        let predictedMixed = mixedPara.candidateDisplaySourceText(appending: mixedNext.text)
+        mixedPara.append(mixedNext, observedAt: now.addingTimeInterval(0.2))
+        XCTAssertEqual(mixedPara.displaySourceText, predictedMixed)
+        XCTAssertEqual(mixedPara.displaySourceText, "The model Qwen3 👨‍👩‍👧‍👦 is running on Apple Silicon Mac today.")
+
+        // 连续三段各 20 字分句：软超限合并至 3 行后由 maximumLines 硬限截断第 4 行
+        var threeLinePara = CaptionParagraph(
+            line: makeLine("第一段二十个字的未完分句内容正在持续输出，", start: 0, end: 2.0),
+            observedAt: now,
+            isTranslating: false
+        )
+        let seg2 = makeLine("第二段二十个字的未完分句内容继续往下延伸，", start: 2.2, end: 4.0)
+        let seg3 = makeLine("第三段二十个字的收尾分句内容到这里终于结束。", start: 4.2, end: 6.0)
+        let seg4 = makeLine("第四段即使带有而且也不会越过三行硬限制。", start: 6.1, end: 8.0)
+        XCTAssertTrue(CaptionParagraphAssembler.shouldMerge(threeLinePara, seg2, observedAt: now.addingTimeInterval(0.2)))
+        threeLinePara.append(seg2, observedAt: now.addingTimeInterval(0.2))
+        XCTAssertTrue(CaptionParagraphAssembler.shouldMerge(threeLinePara, seg3, observedAt: now.addingTimeInterval(0.4)))
+        threeLinePara.append(seg3, observedAt: now.addingTimeInterval(0.4))
+        XCTAssertEqual(threeLinePara.lineIDs.count, 3)
+        XCTAssertFalse(CaptionParagraphAssembler.shouldMerge(threeLinePara, seg4, observedAt: now.addingTimeInterval(0.6)))
+
+        // 单条超过 38 Character 的长 final 原样保留，落库与导出不丢字、不改写原行时间与序号
+        let h = try await makeHarness()
+        let sessionID = try await start(h)
+        let singleLongFinal = "这是一条单次定稿就已经远远超过三十八个字符软预算上限的超长完整字幕正文，客户端绝不能截断或删减任何文字。"
+        XCTAssertGreaterThan(singleLongFinal.count, 38)
+        try await h.emit(.completed(itemID: "long-final", transcript: singleLongFinal))
+        try await h.settle { $0.session.lines.count == 1 }
+        XCTAssertEqual(h.session.lines.first?.text, singleLongFinal)
+        XCTAssertEqual(h.session.bandContent.rows.first?.text, singleLongFinal)
+        await h.session.finish()
+        let savedRows = try await h.store.lines(sessionID: sessionID)
+        XCTAssertEqual(savedRows.map(\.text), [singleLongFinal])
+        XCTAssertEqual(savedRows.map(\.ordinal), [1])
+    }
+
     private func makeLine(
         _ text: String,
         id: String = UUID().uuidString,

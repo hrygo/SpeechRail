@@ -1,5 +1,25 @@
 import Foundation
 
+/// 段落边界统一证据：供合并评分、是否合并与收口等待时长共用，避免多处词表和优先级漂移。
+struct CaptionBoundaryEvidence: Equatable, Sendable {
+    var strongIncomplete: Bool
+    var correlativePair: Bool
+    var continuation: Bool
+    var standaloneReply: Bool
+
+    init(
+        strongIncomplete: Bool = false,
+        correlativePair: Bool = false,
+        continuation: Bool = false,
+        standaloneReply: Bool = false
+    ) {
+        self.strongIncomplete = strongIncomplete
+        self.correlativePair = correlativePair
+        self.continuation = continuation
+        self.standaloneReply = standaloneReply
+    }
+}
+
 /// 语义段落：把相邻的 ASR final 行合成一个翻译/显示单元。
 ///
 /// 正式 `Line` 仍是记录单位；段落只是行之上的投影，不改变行号、落库或对齐。
@@ -7,6 +27,8 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
     let id: String
     var lineIDs: [String]
     var sourceText: String
+    /// 非持久化的最后一条原行正文，供边界证据与关联词窗口分析使用，避免扫描整个历史段落。
+    var lastLineSourceText: String
     /// 显示用源文：段内 ASR 边界处的句号/逗号是切分伪影，上屏时去掉。
     /// 正式 `Line` 和翻译输入仍保留原始标点。
     var displaySourceText: String
@@ -36,6 +58,7 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
         self.id = line.id
         self.lineIDs = [line.id]
         self.sourceText = line.text
+        self.lastLineSourceText = line.text
         self.displaySourceText = line.text
         self.translatedText = line.translatedText
         self.isTranslating = isTranslating
@@ -51,6 +74,14 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
         self.contextLines = contextLines
     }
 
+    /// 构造候选追加后的段落展示文本；软预算计数与实际 `append` 共用同一函数。
+    func candidateDisplaySourceText(appending lineText: String) -> String {
+        let displayHead = CaptionParagraphAssembler
+            .trimTrailingPunctuation(displaySourceText)
+        let displayTail = lineText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self.joinedSource(displayHead, displayTail)
+    }
+
     mutating func append(_ line: CaptionSession.Line, observedAt: Date) {
         lineIDs.append(line.id)
         translatedText = nil
@@ -58,19 +89,17 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
         let head = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         let tail = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceText = [head, tail].filter { !$0.isEmpty }.joined(separator: " ")
-
-        let displayHead = CaptionParagraphAssembler
-            .trimTrailingPunctuation(displaySourceText)
-        let displayTail = tail
-        displaySourceText = Self.joinedSource(displayHead, displayTail)
+        lastLineSourceText = line.text
+        displaySourceText = candidateDisplaySourceText(appending: tail)
         if start == nil { start = line.start }
         if let end = line.end { self.end = end }
         if speakerLabel == nil { speakerLabel = line.speakerLabel }
+        if sourceLanguage == nil { sourceLanguage = line.sourceLanguage }
         lastLineCloseReason = line.closeReason
         lastObservedAt = observedAt
     }
 
-    private static func joinedSource(_ head: String, _ tail: String) -> String {
+    static func joinedSource(_ head: String, _ tail: String) -> String {
         let left = head.trimmingCharacters(in: .whitespacesAndNewlines)
         let right = tail.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !left.isEmpty else { return right }
@@ -99,13 +128,17 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
 ///
 /// 目标不是“合并所有相邻行”，而是优先合并四类：
 /// 1. 上一行因服务端 `budget_rollover` 被动截断（句末句号属于截断伪影）；
-/// 2. 上一行在连接词/介词/助词/列表引导语处断开；
+/// 2. 上一行在连接词/介词/助词/列表引导语处断开，或上下两行构成成对关联复句；
 /// 3. 上一行以逗号/冒号等分句标点结束，或下一行以明确的后置词尾（如“之旅”“中心之一”）续接；
 /// 4. 两行间隔极短，后一行很可能是同一句的补充。
 enum CaptionParagraphAssembler {
     static let maximumGap: TimeInterval = 1.2
     static let maximumLines = 3
     static let maximumDuration: TimeInterval = 28
+    static let softMaxCharacterCount = 38
+    static let correlativeLeftWindowCharacters = 128
+    static let correlativeRightWindowCharacters = 24
+    static let standaloneReplies: Set<String> = ["好的", "是的", "走吧", "行了"]
     /// Display-only conversation state stays bounded even if the session runs for hours.
     static let maximumRetainedParagraphs = 500
 
@@ -130,10 +163,36 @@ enum CaptionParagraphAssembler {
     static let incompleteHoldMilliseconds = 750
     static let mergeScoreThreshold = 2
 
+    /// 统一计算边界证据：合并判定传入 `lastLineSourceText` 与新行，收口计时传入 `lastLineSourceText` 与 `nil`。
+    static func boundaryEvidence(
+        previous: String,
+        next: String? = nil
+    ) -> CaptionBoundaryEvidence {
+        let standalone = isStandaloneReply(previous)
+        let strongIncomplete = !standalone && strongIncompleteEnding(previous)
+        let correlative = next.map { hasCorrelativePair(previous: previous, next: $0) } ?? false
+        let continuation = next.map { continuationStart($0) } ?? false
+        return CaptionBoundaryEvidence(
+            strongIncomplete: strongIncomplete,
+            correlativePair: correlative,
+            continuation: continuation,
+            standaloneReply: standalone
+        )
+    }
+
+    /// 独立短回答：去末端标点后等于明确集合且原行带终结标点。
+    static func isStandaloneReply(_ text: String) -> Bool {
+        guard endsWithTerminalPunctuation(text) else { return false }
+        let stripped = trimTrailingPunctuation(text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return standaloneReplies.contains(stripped)
+    }
+
     /// 判断一段文本是否是短碎片（去除句末标点后中文/CJK <= 6字，或西文 <= 2个词）。
     /// 诸如“我们国内观众。”、“审美上, 可。”等短句，
     /// 即使末尾带句号，在实际连续语音中也绝非独立语义大段，往往是 ASR 截断伪影或句首状语/引子。
     static func isShortFragment(_ text: String) -> Bool {
+        if isStandaloneReply(text) { return false }
         let stripped = trimTrailingPunctuation(text).trimmingCharacters(in: .whitespacesAndNewlines)
         if stripped.isEmpty { return true }
         let cjkCount = stripped.unicodeScalars.filter { scalar in
@@ -154,6 +213,7 @@ enum CaptionParagraphAssembler {
     /// 根据当前段落完整性与合并开关计算收口等待时长（毫秒）。
     /// - 关闭段落合并或已满 `maximumLines` 行时，后续绝无可能继续并入，返回 `0` 立即收口并启动精翻；
     /// - 被动截断（`budgetRollover`）、短碎片或强未完成结尾等待 `incompleteHoldMilliseconds`；
+    /// - 独立短回答（如“好的。”“是的。”“走吧。”“行了。”）非 rollover 时优先按完整句等待 `completeSentenceGraceMilliseconds`；
     /// - 已带句末终结标点的完整句缩短为 `completeSentenceGraceMilliseconds`，兼顾极短跨句拼接与首字响应；
     /// - 其余常规分句等待 `closeGraceMilliseconds`。
     static func flushDelayMilliseconds(
@@ -163,10 +223,15 @@ enum CaptionParagraphAssembler {
         guard assemblyEnabled, paragraph.lineIDs.count < maximumLines else {
             return 0
         }
-        let text = paragraph.sourceText
-        if paragraph.lastLineCloseReason == .budgetRollover
-            || strongIncompleteEnding(text)
-            || isShortFragment(text) {
+        let text = paragraph.lastLineSourceText
+        let evidence = boundaryEvidence(previous: text, next: nil)
+        if paragraph.lastLineCloseReason == .budgetRollover {
+            return incompleteHoldMilliseconds
+        }
+        if evidence.standaloneReply {
+            return completeSentenceGraceMilliseconds
+        }
+        if evidence.strongIncomplete || isShortFragment(text) {
             return incompleteHoldMilliseconds
         }
         if endsWithTerminalPunctuation(text) {
@@ -181,13 +246,18 @@ enum CaptionParagraphAssembler {
         observedAt: Date
     ) -> Bool {
         guard paragraph.lineIDs.count < maximumLines else { return false }
-        if let left = paragraph.speakerLabel, let right = line.speakerLabel, left != right {
+        if let left = paragraph.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let right = line.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !left.isEmpty, !right.isEmpty, left != right {
             return false
         }
-        if let left = paragraph.sourceLanguage, let right = line.sourceLanguage, left != right {
+        if let leftLang = normalizedLanguageCode(paragraph.sourceLanguage),
+           let rightLang = normalizedLanguageCode(line.sourceLanguage),
+           leftLang != rightLang {
             return false
         }
-        let leftIsChinese = CaptionLanguageDetector.detect(for: paragraph.sourceText).isChinese
+        let previousText = paragraph.lastLineSourceText
+        let leftIsChinese = CaptionLanguageDetector.detect(for: previousText).isChinese
         let rightIsChinese = CaptionLanguageDetector.detect(for: line.text).isChinese
         if leftIsChinese != rightIsChinese {
             return false
@@ -201,12 +271,42 @@ enum CaptionParagraphAssembler {
         if observedAt.timeIntervalSince(paragraph.startedAt) > maximumDuration {
             return false
         }
-        return score(
-            previous: paragraph.sourceText,
+        let isRollover = paragraph.lastLineCloseReason == .budgetRollover
+        let evidence = boundaryEvidence(previous: previousText, next: line.text)
+        if !isRollover, evidence.standaloneReply {
+            return false
+        }
+        let mergeScore = score(
+            previous: previousText,
             next: line.text,
             gap: gap,
-            previousCloseReason: paragraph.lastLineCloseReason
-        ) >= mergeScoreThreshold
+            previousCloseReason: paragraph.lastLineCloseReason,
+            evidence: evidence
+        )
+        let candidateDisplay = paragraph.candidateDisplaySourceText(appending: line.text)
+        if candidateDisplay.count > softMaxCharacterCount,
+           endsWithTerminalPunctuation(previousText),
+           !isRollover,
+           !isShortFragment(previousText),
+           !evidence.strongIncomplete,
+           !evidence.correlativePair,
+           !evidence.continuation {
+            return false
+        }
+        return mergeScore >= mergeScoreThreshold
+    }
+
+    private static func normalizedLanguageCode(_ code: String?) -> String? {
+        guard let raw = code?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !raw.isEmpty,
+              raw != "auto",
+              raw != "und",
+              raw != "unknown"
+        else {
+            return nil
+        }
+        let normalized = raw.replacingOccurrences(of: "_", with: "-")
+        return normalized.split(separator: "-").first.map(String.init) ?? normalized
     }
 
     static func gapBetween(
@@ -227,14 +327,23 @@ enum CaptionParagraphAssembler {
         previous: String,
         next: String,
         gap: TimeInterval,
-        previousCloseReason: TranscriptPreviewLedger.SegmentCloseReason? = nil
+        previousCloseReason: TranscriptPreviewLedger.SegmentCloseReason? = nil,
+        evidence: CaptionBoundaryEvidence? = nil
     ) -> Int {
-        var score = 0
+        let resolvedEvidence = evidence ?? boundaryEvidence(previous: previous, next: next)
         let isRollover = previousCloseReason == .budgetRollover
-        let incompletePrevious = strongIncompleteEnding(previous)
-        let shortPrevious = isShortFragment(previous)
-        let continuationNext = continuationStart(next)
+        if !isRollover, resolvedEvidence.standaloneReply {
+            return 0
+        }
+        var score = 0
+        let incompletePrevious = resolvedEvidence.strongIncomplete
+        let shortPrevious = !resolvedEvidence.standaloneReply && isShortFragment(previous)
+        let continuationNext = resolvedEvidence.continuation
+        let correlative = resolvedEvidence.correlativePair
         if isRollover {
+            score += 4
+        }
+        if correlative {
             score += 4
         }
         if incompletePrevious {
@@ -250,10 +359,12 @@ enum CaptionParagraphAssembler {
         // 紧邻本身不是语义证据：两个都带句末标点的完整句，即使挨得很近也不合并。
         // 但“PS5。” + “必备游戏（没有句号）”仍应合并，因为后一行明显是残句；
         // 若上一行是 budget_rollover 被动截断、去标点后仍为悬空未完成词尾（如“而在河谷镇的。”）、
+        // 或上下两行构成未闭合的关联词配对（如“虽然…。/但是…。”）、
         // 或下一行以明确的后置续接成分开头（如“之旅…”、“对于…”、“沉闷而…”），
         // 或上一行是超短碎片且后一行也是残句，则上一行句末句号属于截断伪影。
         let hasTruncationArtifact = isRollover
             || incompletePrevious
+            || correlative
             || continuationNext
             || (shortPrevious && !endsWithTerminalPunctuation(next))
         let bothTerminal = !hasTruncationArtifact
@@ -268,8 +379,106 @@ enum CaptionParagraphAssembler {
         return score
     }
 
+    /// 检查上一条原行最后 128 个 Character 与下一条句首前 24 个 Character 是否构成未闭合的关联词配对。
+    static func hasCorrelativePair(previous: String, next: String) -> Bool {
+        let leftWindow = String(previous.suffix(correlativeLeftWindowCharacters))
+        let strippedLeft = trimTrailingPunctuationAndQuotes(leftWindow)
+        guard !strippedLeft.isEmpty else { return false }
+
+        let internalTerminals: Set<Character> = ["。", "！", "？", "!", "?"]
+        let leftClause: String
+        if let lastTermIdx = strippedLeft.lastIndex(where: { internalTerminals.contains($0) }) {
+            leftClause = String(strippedLeft[strippedLeft.index(after: lastTermIdx)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            leftClause = strippedLeft
+        }
+        guard !leftClause.isEmpty else { return false }
+
+        var trimmedRight = next.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = trimmedRight.first,
+              first.isWhitespace || "“‘「『（《【(［[{\"'".contains(first) {
+            trimmedRight.removeFirst()
+        }
+        let rightWindow = String(trimmedRight.prefix(correlativeRightWindowCharacters))
+        guard !rightWindow.isEmpty else { return false }
+
+        // 1. 一边 -> 一边（左侧恰有一个“一边”待配对，若已成双则不再配对）
+        if rightWindow.hasPrefix("一边") {
+            let count = occurrences(of: "一边", in: leftClause)
+            if count == 1 { return true }
+        }
+
+        // 2. 一方面 -> 另一方面（排除“另一方面”自身包含的“一方面”子串）
+        if rightWindow.hasPrefix("另一方面") {
+            let masked = leftClause.replacingOccurrences(of: "另一方面", with: "\u{FFFC}")
+            if let openerRange = masked.range(of: "一方面", options: .backwards),
+               !masked[openerRange.upperBound...].contains("\u{FFFC}") {
+                return true
+            }
+        }
+
+        // 3. 不仅/不但 -> 而且/还
+        if rightWindow.hasPrefix("而且") || rightWindow.hasPrefix("还") {
+            if hasUnclosedOpener(
+                openers: ["不仅", "不但"],
+                closers: ["而且", "还"],
+                in: leftClause
+            ) {
+                return true
+            }
+        }
+
+        // 4. 虽然/尽管 -> 但是/但/却
+        if rightWindow.hasPrefix("但是") || rightWindow.hasPrefix("但") || rightWindow.hasPrefix("却") {
+            if hasUnclosedOpener(
+                openers: ["虽然", "尽管"],
+                closers: ["但是", "但", "却"],
+                in: leftClause
+            ) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func occurrences(of target: String, in text: String) -> Int {
+        guard !target.isEmpty else { return 0 }
+        var count = 0
+        var searchRange = text.startIndex..<text.endIndex
+        while let range = text.range(of: target, range: searchRange) {
+            count += 1
+            searchRange = range.upperBound..<text.endIndex
+        }
+        return count
+    }
+
+    private static func hasUnclosedOpener(
+        openers: [String],
+        closers: [String],
+        in clause: String
+    ) -> Bool {
+        var latestOpenerUpperBound: String.Index?
+        for opener in openers {
+            if let range = clause.range(of: opener, options: .backwards) {
+                if let current = latestOpenerUpperBound {
+                    if range.upperBound > current {
+                        latestOpenerUpperBound = range.upperBound
+                    }
+                } else {
+                    latestOpenerUpperBound = range.upperBound
+                }
+            }
+        }
+        guard let afterStart = latestOpenerUpperBound else { return false }
+        let trailing = clause[afterStart...]
+        return !closers.contains(where: { trailing.contains($0) })
+    }
+
     /// 强未完成结尾：去掉句末标点后，仍以连接词/介词/结构助词/列表引导语或书名号后孤立数词收束。
     static func strongIncompleteEnding(_ text: String) -> Bool {
+        if isStandaloneReply(text) { return false }
         let stripped = trimTrailingPunctuation(text).lowercased()
         guard !stripped.isEmpty else { return false }
 
@@ -315,25 +524,33 @@ enum CaptionParagraphAssembler {
         if first.isASCII, first.isLowercase, first.isLetter { return true }
 
         let lower = trimmed.lowercased()
+        // 注意：单字/转折/让步关联词（如“但”“但是”“却”“不过”“也”“又”“再”“还”“而且”）
+        // 只在存在未闭合 opener 时由 hasCorrelativePair 配对加分，不在此处无条件触发跨句强合并。
         let prefixes = [
-            "而", "但", "并且", "还有", "以及", "或者", "还是", "同时", "随后",
-            "然后", "于是", "因此", "所以", "不过", "却", "也", "又", "再",
+            "而", "并且", "还有", "以及", "或者", "还是", "同时", "随后",
+            "然后", "于是", "因此", "所以",
             "对于", "关于", "至于", "对", "在", "从", "向", "往", "由", "跟",
             "同", "随着", "为了", "因为", "由于", "正如", "比如", "例如",
             "也就是说", "换句话说", "包括", "特别是", "尤其是",
             "之旅", "之一", "之中", "之上", "之下", "之间", "之后", "之前",
-            "之际", "之初", "中心之一",
-            "and ", "but ", "or ", "because ", "so ", "if ", "when ", "which ",
+            "之际", "之初", "中心之一", "必备",
+            "and ", "or ", "because ", "so ", "if ", "when ", "which ",
             "that ", "who ", "whom ", "whose ", "to ", "of ", "in ", "on ",
-            "for ", "with ", "as ", "than ", "then ", "while ", "although ",
-            "though ", "unless ", "until ", "since ", "including ", "such as ",
+            "for ", "with ", "as ", "than ", "then ", "unless ",
+            "until ", "since ", "including ", "such as ",
             "some say ", "others say ",
         ]
         if prefixes.contains(where: { lower.hasPrefix($0) }) { return true }
 
-        // 句首修饰/并列短语中包含连词“而”（如“沉闷而无感”、“华丽而空洞”、“贫穷而落后”）
-        let prefixSlice = trimmed.prefix(6)
-        if prefixSlice.contains("而") || prefixSlice.contains("并且") {
+        // 句首修饰/并列短语中包含连词“而”（如“沉闷而无感”、“华丽而空洞”、“贫穷而落后”），但排除“而且/而是/而言”
+        let prefixSlice = String(trimmed.prefix(6))
+        if prefixSlice.contains("并且") {
+            return true
+        }
+        if prefixSlice.contains("而"),
+           !prefixSlice.hasPrefix("而且"),
+           !prefixSlice.hasPrefix("而是"),
+           !prefixSlice.contains("而言") {
             return true
         }
 
@@ -359,6 +576,15 @@ enum CaptionParagraphAssembler {
         while let last = value.last, "。！？.!?;；,，:：、…".contains(last) {
             value.removeLast()
             value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return value
+    }
+
+    private static func trimTrailingPunctuationAndQuotes(_ text: String) -> String {
+        var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let last = value.last,
+              last.isWhitespace || "。！？.!?;；,，:：、…”’」』）》】)］]}\"'".contains(last) {
+            value.removeLast()
         }
         return value
     }

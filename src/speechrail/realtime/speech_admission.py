@@ -41,6 +41,8 @@ class SpeechAdmission:
     so mid-word probability dips do not chop the utterance.
     """
 
+    PUNCTUATION_HINT_TTL_SAMPLES = 8_000
+
     def __init__(
         self,
         *,
@@ -53,7 +55,8 @@ class SpeechAdmission:
         sample_rate: int = 16_000,
         soft_max_samples: int | None = None,
         soft_stop_frames: int | None = None,
-        punctuation_stop_frames: int | None = None,
+        terminal_stop_frames: int | None = None,
+        clause_stop_frames: int | None = None,
     ) -> None:
         if threshold < 0.0 or threshold > 1.0:
             raise ValueError("threshold must be between 0.0 and 1.0")
@@ -73,8 +76,10 @@ class SpeechAdmission:
             raise ValueError("soft_max_samples must be >= 1")
         if soft_stop_frames is not None and soft_stop_frames < 1:
             raise ValueError("soft_stop_frames must be >= 1")
-        if punctuation_stop_frames is not None and punctuation_stop_frames < 1:
-            raise ValueError("punctuation_stop_frames must be >= 1")
+        if terminal_stop_frames is not None and terminal_stop_frames < 1:
+            raise ValueError("terminal_stop_frames must be >= 1")
+        if clause_stop_frames is not None and clause_stop_frames < 1:
+            raise ValueError("clause_stop_frames must be >= 1")
 
         self._threshold = threshold
         self._stop_threshold = stop_threshold
@@ -85,7 +90,8 @@ class SpeechAdmission:
         self._sample_rate = sample_rate
         self._soft_max_samples = soft_max_samples
         self._soft_stop_frames = soft_stop_frames
-        self._punctuation_stop_frames = punctuation_stop_frames
+        self._terminal_stop_frames = terminal_stop_frames
+        self._clause_stop_frames = clause_stop_frames
 
         # Bounded pre-roll ring buffer in frames
         max_prefix_frames = max(1, (prefix_samples + frame_samples - 1) // frame_samples)
@@ -105,7 +111,9 @@ class SpeechAdmission:
         self._hangover_count = 0
         self._current_utterance_start_sample = 0
         self._last_emitted_sample = 0
-        self._at_punctuation_boundary = False
+        self._hint_kind: Literal["terminal", "clause"] | None = None
+        self._hint_watermark: int | None = None
+        self._last_speech_frame_end = 0
 
     @property
     def state(self) -> Literal["IDLE", "CANDIDATE", "ACTIVE", "HANGOVER"]:
@@ -130,6 +138,11 @@ class SpeechAdmission:
             retained.append(self._leftover_sample_offset)
         return min(retained, default=self._last_emitted_sample)
 
+    def _clear_punctuation_hint(self, *, baseline_sample: int = 0) -> None:
+        self._hint_kind = None
+        self._hint_watermark = None
+        self._last_speech_frame_end = baseline_sample
+
     def reset(self, *, next_sample: int = 0) -> None:
         """Reset internal buffers and state machine to IDLE."""
         self._prefix_ring.clear()
@@ -140,18 +153,43 @@ class SpeechAdmission:
         self._hangover_count = 0
         self._current_utterance_start_sample = next_sample
         self._last_emitted_sample = next_sample
-        self._at_punctuation_boundary = False
+        self._clear_punctuation_hint(baseline_sample=next_sample)
 
     def advance_segment_start(self, sample_offset: int) -> None:
         """Advance the current segment origin after an external budget rollover."""
         if sample_offset > self._current_utterance_start_sample:
             self._current_utterance_start_sample = sample_offset
         self._hangover_count = 0
-        self._at_punctuation_boundary = False
+        self._clear_punctuation_hint(
+            baseline_sample=max(self._last_speech_frame_end, self._current_utterance_start_sample)
+        )
 
-    def set_punctuation_boundary_hint(self, at_boundary: bool) -> None:
-        """Update whether the latest ASR partial ends at a punctuation boundary."""
-        self._at_punctuation_boundary = bool(at_boundary)
+    def set_punctuation_boundary_hint(
+        self,
+        kind: Literal["terminal", "clause"] | None,
+        *,
+        sample_watermark: int | None,
+    ) -> None:
+        """Update the latest ASR partial punctuation boundary hint with kernel watermark."""
+        if kind not in (None, "terminal", "clause"):
+            raise ValueError("kind must be 'terminal', 'clause', or None")
+        if self._state not in ("ACTIVE", "HANGOVER"):
+            self._hint_kind = None
+            self._hint_watermark = None
+            return
+        if sample_watermark is None or isinstance(sample_watermark, bool):
+            self._hint_kind = None
+            return
+        if (
+            sample_watermark <= self._current_utterance_start_sample
+            or sample_watermark > self._last_emitted_sample
+        ):
+            self._hint_kind = None
+            return
+        if self._hint_watermark is not None and sample_watermark < self._hint_watermark:
+            return
+        self._hint_watermark = sample_watermark
+        self._hint_kind = kind
 
     def _in_soft_watermark_zone(self, frame_end_sample: int) -> bool:
         return (
@@ -164,13 +202,49 @@ class SpeechAdmission:
             return (self._threshold + self._stop_threshold) / 2.0
         return self._stop_threshold
 
+    def _active_punctuation_hint(
+        self, frame_end_sample: int
+    ) -> Literal["terminal", "clause"] | None:
+        if self._state not in ("ACTIVE", "HANGOVER"):
+            return None
+        if self._hint_kind is None or self._hint_watermark is None:
+            return None
+        if (
+            self._hint_watermark <= self._current_utterance_start_sample
+            or self._hint_watermark > frame_end_sample
+        ):
+            return None
+        age = frame_end_sample - self._hint_watermark
+        if age < 0 or age > self.PUNCTUATION_HINT_TTL_SAMPLES:
+            return None
+        if self._hint_watermark < self._last_speech_frame_end:
+            return None
+        return self._hint_kind
+
     def _effective_stop_frames(self, frame_end_sample: int) -> int:
-        if self._in_soft_watermark_zone(frame_end_sample):
-            if self._at_punctuation_boundary and self._punctuation_stop_frames is not None:
-                return min(self._stop_frames, self._punctuation_stop_frames)
-            if self._soft_stop_frames is not None:
-                return min(self._stop_frames, self._soft_stop_frames)
-        return self._stop_frames
+        if not self._in_soft_watermark_zone(frame_end_sample):
+            return self._stop_frames
+        soft_frames = (
+            min(self._stop_frames, self._soft_stop_frames)
+            if self._soft_stop_frames is not None
+            else self._stop_frames
+        )
+        clause_frames = (
+            min(soft_frames, self._clause_stop_frames)
+            if self._clause_stop_frames is not None
+            else soft_frames
+        )
+        terminal_frames = (
+            min(clause_frames, self._terminal_stop_frames)
+            if self._terminal_stop_frames is not None
+            else clause_frames
+        )
+        hint = self._active_punctuation_hint(frame_end_sample)
+        if hint == "terminal" and self._terminal_stop_frames is not None:
+            return terminal_frames
+        if hint == "clause" and self._clause_stop_frames is not None:
+            return clause_frames
+        return soft_frames
 
     def push(
         self,
@@ -251,6 +325,7 @@ class SpeechAdmission:
         elif self._state == "ACTIVE":
             if is_speech:
                 self._hangover_count = 0
+                self._last_speech_frame_end = frame_end_sample
                 decisions.append(
                     AdmissionDecision(
                         kind="audio",
@@ -279,6 +354,7 @@ class SpeechAdmission:
             if is_speech:
                 self._state = "ACTIVE"
                 self._hangover_count = 0
+                self._last_speech_frame_end = frame_end_sample
                 decisions.append(
                     AdmissionDecision(
                         kind="audio",
@@ -319,9 +395,9 @@ class SpeechAdmission:
         self._prefix_ring.clear()
         self._state = "ACTIVE"
         self._hangover_count = 0
-        self._at_punctuation_boundary = False
         self._current_utterance_start_sample = first_pre_sample
         frame_end_sample = sample_offset + self._frame_samples
+        self._clear_punctuation_hint(baseline_sample=frame_end_sample)
 
         all_pcm = b"".join(pre_pcm_list) + frame
         self._last_emitted_sample = frame_end_sample
@@ -359,9 +435,9 @@ class SpeechAdmission:
 
         self._state = "ACTIVE"
         self._hangover_count = 0
-        self._at_punctuation_boundary = False
         self._current_utterance_start_sample = first_pre_sample
         self._last_emitted_sample = last_cand_sample
+        self._clear_punctuation_hint(baseline_sample=last_cand_sample)
 
         all_pcm = b"".join(pre_pcm_list) + b"".join(cand_pcm_list)
 
@@ -384,7 +460,7 @@ class SpeechAdmission:
         start_sample = self._current_utterance_start_sample
         self._state = "IDLE"
         self._hangover_count = 0
-        self._at_punctuation_boundary = False
+        self._clear_punctuation_hint(baseline_sample=end_sample)
         return AdmissionDecision(
             kind="end",
             start_sample=start_sample,

@@ -497,6 +497,7 @@ public final class CaptionSession {
     @ObservationIgnored private var partialTailRollbackHeldOnce = false
     /// Test/UI observation only; no persistence semantic.
     var hasOpenParagraph: Bool { openParagraphID != nil }
+    var hasPendingParagraphFlushTask: Bool { paragraphFlushTask != nil }
     /// 未定稿的增量累加结果。`nil` 表示这一轮还没开始出字。
     public private(set) var partialText: String? {
         didSet {
@@ -1483,6 +1484,7 @@ public final class CaptionSession {
         if coordinator.occupancy?.kind == .captions {
             await coordinator.stopCapture(endingWith: .user)
         }
+        flushOpenParagraph()
         // The stop path flushes the last open paragraph. Give that final request a
         // bounded chance to finish before cancelling the queue, otherwise the last
         // translated paragraph is routinely discarded.
@@ -1548,6 +1550,9 @@ public final class CaptionSession {
 
     /// 把"正在跑"的那一套本地状态清掉，**保留已经定稿的字幕**。
     private func resetToIdleKeepingLines() {
+        paragraphFlushTask?.cancel()
+        paragraphFlushTask = nil
+        openParagraphID = nil
         phase = .idle
         level = 0
         partialText = nil
@@ -2286,11 +2291,18 @@ public final class CaptionSession {
         if let index = paragraphs.indices.last,
            paragraphAssemblyEnabled {
             let isOpen = (paragraphs[index].id == openParagraphID)
-            let prevText = paragraphs[index].sourceText
-            let canMergeClosed = paragraphs[index].lastLineCloseReason == .budgetRollover
-                || CaptionParagraphAssembler.strongIncompleteEnding(prevText)
-                || CaptionParagraphAssembler.isShortFragment(prevText)
-                || CaptionParagraphAssembler.continuationStart(line.text)
+            let prevText = paragraphs[index].lastLineSourceText
+            let evidence = CaptionParagraphAssembler.boundaryEvidence(
+                previous: prevText,
+                next: line.text
+            )
+            let isRollover = paragraphs[index].lastLineCloseReason == .budgetRollover
+            let canMergeClosed = isRollover
+                || (!evidence.standaloneReply && (
+                    evidence.strongIncomplete
+                    || CaptionParagraphAssembler.isShortFragment(prevText)
+                    || evidence.continuation
+                ))
             if (isOpen || canMergeClosed),
                CaptionParagraphAssembler.shouldMerge(
                     paragraphs[index],

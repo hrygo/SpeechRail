@@ -868,7 +868,10 @@ registry 不可读返回 `503 pronunciation_store_unavailable`（可重试）。
 - `audio.input.turn_detection` 仅接受 `null` 或 `"manual"`；服务端 VAD 使用
   `session.speechrail.endpointing.mode="server_vad"`。
   启用语音准入时，Silero 单帧概率达到入口阈值即可放行，能量 VAD 仍需连续三帧确认；
-  两者均保留请求的前缀，并沿用进行中话语的退出阈值和静默时长。
+  两者均保留请求的前缀，并沿用进行中话语的退出阈值和静默时长。满足长段软水位启用条件时，
+  服务端仅在存在真实 VAD 停顿的前提下，结合覆盖最新语音帧且未过期的当段预览标点证据，
+  按句末标点、分句标点与无提示分级缩短停顿收口帧数（对 `task` 保持中立，不改变公开事件
+  schema）。
 - `session.speechrail.task` 选择 `conversation`、`caption`、`transcription`、`render` 或
   `voice_design`；Alignment、Diarization 按请求 opt-in。
 - 可选的 `session.speechrail.asr` 在首个 PCM 前设置识别策略：

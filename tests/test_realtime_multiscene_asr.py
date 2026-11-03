@@ -593,3 +593,95 @@ def test_clear_gives_closed_pending_items_one_failed_terminal():
         await session.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "task",
+    ["conversation", "caption", "transcription", "render", "voice_design"],
+)
+def test_multiscene_endpointing_tiers_are_task_neutral(task: str):
+    """Switching `task` with the same ASR/VAD policy must produce identical
+    admission stop-frame tiers (no hidden task-based branching)."""
+    async def run():
+        services, _ = _build(realtime_speech_admission_enabled=True)
+
+        async def send(event):
+            return 1
+
+        session = OpenAIRealtimeSession(services, session_id=f"neutral-{task}", send=send)
+        update = session_update(
+            task=task,
+            endpointing=server_vad(silence_duration_ms=650, prefix_padding_ms=300),
+        )
+        update["session"]["speechrail"]["asr"] = {
+            "preview_interval_ms": 500,
+            "max_segment_ms": 14_000,
+            "finalization": "full_segment",
+        }
+        await session._update_session(update)
+        gate = session._asr_owner._speech_admission
+        assert gate is not None
+        assert gate._stop_frames == 21
+        assert gate._soft_max_samples == 7_700 * 16
+        assert gate._soft_stop_frames == 17
+        assert gate._clause_stop_frames == 8
+        assert gate._terminal_stop_frames == 4
+        await session.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    (
+        "preset_name",
+        "max_segment_ms",
+        "silence_ms",
+        "expected_stop",
+        "expected_soft",
+        "expected_clause",
+        "expected_terminal",
+    ),
+    [
+        ("assistant_turn_taking", 20_000, 1_200, 38, 32, 8, 4),
+        ("assistant_duplex", 20_000, 900, 29, 24, 8, 4),
+        ("meeting", 20_000, 900, 29, 24, 8, 4),
+        ("caption", 14_000, 650, 21, 17, 8, 4),
+        ("teleprompter", 8_000, 400, 13, 12, 8, 4),
+        ("short_budget", 6_000, 650, 21, None, None, None),
+        ("small_stop_frames", 14_000, 160, 5, None, None, None),
+    ],
+)
+def test_client_scene_presets_and_short_budgets_follow_neutral_tier_formula(
+    preset_name: str,
+    max_segment_ms: int,
+    silence_ms: int,
+    expected_stop: int,
+    expected_soft: int | None,
+    expected_clause: int | None,
+    expected_terminal: int | None,
+):
+    async def run():
+        services, _ = _build(realtime_speech_admission_enabled=True)
+
+        async def send(event):
+            return 1
+
+        session = OpenAIRealtimeSession(services, session_id=f"preset-{preset_name}", send=send)
+        update = session_update(
+            endpointing=server_vad(silence_duration_ms=silence_ms, prefix_padding_ms=300),
+        )
+        update["session"]["speechrail"]["asr"] = {
+            "preview_interval_ms": 500,
+            "max_segment_ms": max_segment_ms,
+            "finalization": "full_segment",
+        }
+        await session._update_session(update)
+        gate = session._asr_owner._speech_admission
+        assert gate is not None
+        assert gate._stop_frames == expected_stop
+        assert gate._soft_stop_frames == expected_soft
+        assert gate._clause_stop_frames == expected_clause
+        assert gate._terminal_stop_frames == expected_terminal
+        await session.close()
+
+    asyncio.run(run())
