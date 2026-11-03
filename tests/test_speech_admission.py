@@ -699,3 +699,64 @@ def test_soft_boundary_requires_vad_pause() -> None:
     d2 = gate.push(frame, start_sample=4608, probability=0.40)
     assert gate.state == "IDLE"
     assert d2[-1].kind == "end"
+
+
+def test_soft_zone_opportunistic_flush_requests_once_per_hangover_episode() -> None:
+    """In the soft watermark zone, when hangover reaches 2 consecutive frames (64ms)
+    and the latest hint watermark has not yet covered _last_speech_frame_end,
+    consume_soft_zone_flush_request() returns True exactly once per hangover episode."""
+    gate = SpeechAdmission(
+        threshold=0.5,
+        start_frames=1,
+        stop_frames=12,
+        prefix_samples=0,
+        frame_samples=512,
+        soft_max_samples=2048,  # 4 frames
+        soft_stop_frames=8,
+        terminal_stop_frames=4,
+        clause_stop_frames=6,
+    )
+    frame = bytes(1024)
+
+    # 1. Pre-soft-watermark hangover (1536 < 2048): must NOT request flush
+    gate.push(frame, start_sample=0, probability=0.9)
+    gate.push(frame, start_sample=512, probability=0.1)   # hangover 1 (end=1024)
+    assert not gate.consume_soft_zone_flush_request()
+    gate.push(frame, start_sample=1024, probability=0.1)  # hangover 2 (end=1536 < 2048)
+    assert not gate.consume_soft_zone_flush_request()
+
+    # 2. Resume speech past soft watermark (1536 -> 3072, _last_speech_frame_end = 3072)
+    gate.push(frame, start_sample=1536, probability=0.9)
+    gate.push(frame, start_sample=2048, probability=0.9)
+    gate.push(frame, start_sample=2560, probability=0.9)
+    assert not gate.consume_soft_zone_flush_request()
+
+    # 1st hangover frame (32ms dip): must NOT request flush
+    gate.push(frame, start_sample=3072, probability=0.1)
+    assert not gate.consume_soft_zone_flush_request()
+
+    # 2nd hangover frame (64ms pause) with stale watermark (< 3072): requests flush once!
+    gate.set_punctuation_boundary_hint("terminal", sample_watermark=2560)
+    gate.push(frame, start_sample=3584, probability=0.1)
+    assert gate.consume_soft_zone_flush_request() is True
+    assert gate.consume_soft_zone_flush_request() is False
+
+    # 3rd hangover frame in same episode: does NOT request again
+    gate.push(frame, start_sample=4096, probability=0.1)
+    assert gate.consume_soft_zone_flush_request() is False
+
+    # 3. Resume speech (4608 -> 5120) and immediately supply a fresh watermark covering 5120:
+    gate.push(frame, start_sample=4608, probability=0.9)
+    gate.set_punctuation_boundary_hint("clause", sample_watermark=5120)
+    gate.push(frame, start_sample=5120, probability=0.1)  # hangover 1
+    gate.push(frame, start_sample=5632, probability=0.1)  # hangover 2
+    assert gate.consume_soft_zone_flush_request() is False
+
+    # 4. If a subsequent partial clears sample_watermark=None (or out-of-bounds),
+    # _hint_watermark must also be cleared so a later hangover episode can request flush again:
+    gate.push(frame, start_sample=6144, probability=0.9)
+    gate.set_punctuation_boundary_hint(None, sample_watermark=None)
+    assert gate._hint_watermark is None
+    gate.push(frame, start_sample=6656, probability=0.1)  # hangover 1
+    gate.push(frame, start_sample=7168, probability=0.1)  # hangover 2
+    assert gate.consume_soft_zone_flush_request() is True

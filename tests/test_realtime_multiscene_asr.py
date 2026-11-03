@@ -642,9 +642,9 @@ def test_multiscene_endpointing_tiers_are_task_neutral(task: str):
         "expected_terminal",
     ),
     [
-        ("assistant_turn_taking", 20_000, 1_200, 38, 32, 8, 4),
-        ("assistant_duplex", 20_000, 900, 29, 24, 8, 4),
-        ("meeting", 20_000, 900, 29, 24, 8, 4),
+        ("assistant_turn_taking", 20_000, 1_200, 38, 32, 15, 7),
+        ("assistant_duplex", 20_000, 900, 29, 24, 11, 5),
+        ("meeting", 20_000, 900, 29, 24, 11, 5),
         ("caption", 14_000, 650, 21, 17, 8, 4),
         ("teleprompter", 8_000, 400, 13, 12, 8, 4),
         ("short_budget", 6_000, 650, 21, None, None, None),
@@ -682,6 +682,327 @@ def test_client_scene_presets_and_short_budgets_follow_neutral_tier_formula(
         assert gate._soft_stop_frames == expected_soft
         assert gate._clause_stop_frames == expected_clause
         assert gate._terminal_stop_frames == expected_terminal
+        await session.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    (
+        "preset_name",
+        "task",
+        "preview_interval_ms",
+        "max_segment_ms",
+        "silence_ms",
+        "soft_max_ms",
+        "expected_stop_frames",
+        "expected_soft_frames",
+        "expected_clause_frames",
+        "expected_terminal_frames",
+    ),
+    [
+        ("assistant_turn_taking", "conversation", 800, 20_000, 1_200, 8_000, 38, 32, 15, 7),
+        ("assistant_duplex", "conversation", 600, 20_000, 900, 8_000, 29, 24, 11, 5),
+        ("meeting", "transcription", 1_000, 20_000, 900, 8_000, 29, 24, 11, 5),
+        ("caption", "caption", 500, 14_000, 650, 7_700, 21, 17, 8, 4),
+        ("teleprompter", "transcription", 500, 8_000, 400, 5_000, 13, 12, 8, 4),
+    ],
+)
+def test_cross_scene_short_pause_counterexamples_and_stale_hint_isolation(
+    preset_name: str,
+    task: str,
+    preview_interval_ms: int,
+    max_segment_ms: int,
+    silence_ms: int,
+    soft_max_ms: int,
+    expected_stop_frames: int,
+    expected_soft_frames: int,
+    expected_clause_frames: int,
+    expected_terminal_frames: int,
+):
+    """Verify across all 5 client presets (assistant turn-taking, assistant duplex,
+    meeting, caption, teleprompter) that:
+    1. Before soft_max_ms, short pauses (even with fresh terminal/clause hints)
+       never cut early and require the scene's full stop_frames.
+    2. After soft_max_ms, a fresh clause hint (comma) does not cut before
+       expected_clause_frames and cuts on expected_clause_frames.
+    3. In scenes with longer preview intervals (e.g. meeting 1000ms, assistant 800ms),
+       a punctuation hint followed by 1 frame of continued speech or >500ms age
+       cannot trigger a clause-frame cut; the scene requires its full soft_stop_frames.
+    """
+
+    async def run():
+        services, factory = _build(
+            realtime_speech_admission_enabled=True,
+            max_realtime_buffer_bytes=2_048_000,
+            max_realtime_frame_bytes=256_000,
+        )
+        sent = []
+        hypothesis_ready = asyncio.Event()
+
+        async def send(event):
+            sent.append(event)
+            if event["type"] == "speechrail.transcription.hypothesis":
+                hypothesis_ready.set()
+            return len(sent)
+
+        session = OpenAIRealtimeSession(
+            services, session_id=f"short-pause-{preset_name}", send=send
+        )
+        update = session_update(
+            task=task,
+            endpointing=server_vad(silence_duration_ms=silence_ms, prefix_padding_ms=300),
+        )
+        update["session"]["speechrail"]["asr"] = {
+            "preview_interval_ms": preview_interval_ms,
+            "max_segment_ms": max_segment_ms,
+            "finalization": (
+                "streaming_finalize" if preset_name == "teleprompter" else "full_segment"
+            ),
+        }
+        await session._update_session(update)
+
+        class ScriptedVad:
+            threshold = 0.5
+
+            def __init__(self) -> None:
+                self.prob = 0.9
+
+            def score_frame(self, frame: bytes) -> float:
+                del frame
+                return self.prob
+
+            def reset(self) -> None:
+                pass
+
+        vad = ScriptedVad()
+        session._asr_owner._vad = vad
+
+        # Each 32ms kernel frame is 512 samples @ 16kHz == 768 wire samples @ 24kHz.
+        frame_wire = (12_000).to_bytes(2, "little", signed=True) * 768
+
+        async def append_frames(prob: float, count: int) -> None:
+            vad.prob = prob
+            for _ in range(count):
+                await session._asr_owner.append(
+                    {
+                        "type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(frame_wire).decode(),
+                    }
+                )
+
+        # --- Phase 1: Pre-soft-watermark short pause protection ---
+        # Speak for 20 frames (640ms, well below soft_max_ms), emit a fresh terminal hint
+        # covering the exact speech frontier (20 * 512 = 10,240 kernel samples), then pause
+        # for 8 frames (256ms). None of the 5 presets may cut before soft_max_ms.
+        await append_frames(0.9, 20)
+        runtime_1 = factory.sessions[0]
+        hypothesis_ready.clear()
+        await runtime_1.events_queue.put(
+            StreamingAsrEvent(
+                kind="partial", text="前半句完。", sample_watermark=20 * 512
+            )
+        )
+        await asyncio.wait_for(hypothesis_ready.wait(), timeout=1.0)
+        await append_frames(0.1, 8)
+        assert not [e for e in sent if e["type"].endswith("segment_closed")], (
+            f"{preset_name}: must not cut on 8-frame pause before soft_max_ms"
+        )
+
+        # Advance speech past soft_max_ms (total active utterance duration >= soft_max_ms).
+        soft_target_frames = (soft_max_ms * 16 + 511) // 512
+        already_emitted_frames = 28
+        remaining_to_soft = max(1, soft_target_frames - already_emitted_frames + 2)
+        await append_frames(0.9, remaining_to_soft)
+        total_frames = already_emitted_frames + remaining_to_soft
+
+        # --- Phase 2: Stale / superseded hint in soft zone must NOT cut early ---
+        # Emit a clause hint at (total_frames - 1) * 512, so the last speech frame
+        # (total_frames * 512) is newer than sample_watermark.
+        hypothesis_ready.clear()
+        await runtime_1.events_queue.put(
+            StreamingAsrEvent(
+                kind="partial",
+                text="虽然前面说了很久，",
+                sample_watermark=(total_frames - 1) * 512,
+            )
+        )
+        await asyncio.wait_for(hypothesis_ready.wait(), timeout=1.0)
+        await append_frames(0.1, expected_clause_frames)
+        assert not [e for e in sent if e["type"].endswith("segment_closed")], (
+            f"{preset_name}: hint not covering last speech frame must not cut at "
+            f"{expected_clause_frames} frames"
+        )
+
+        # Resume speech for 2 frames so hangover resets while staying in soft zone.
+        await append_frames(0.9, 2)
+        total_frames += expected_clause_frames + 2
+
+        # --- Phase 3: Fresh clause hint in soft zone cuts at expected_clause_frames ---
+        hypothesis_ready.clear()
+        await runtime_1.events_queue.put(
+            StreamingAsrEvent(
+                kind="partial",
+                text="虽然前面说了很久，还在继续，",
+                sample_watermark=total_frames * 512,
+            )
+        )
+        await asyncio.wait_for(hypothesis_ready.wait(), timeout=1.0)
+        await append_frames(0.1, expected_clause_frames - 1)
+        assert not [e for e in sent if e["type"].endswith("segment_closed")], (
+            f"{preset_name}: fresh clause hint must not cut at {expected_clause_frames - 1} frames"
+        )
+        await append_frames(0.1, 1)
+        await session._asr_owner._await_asr_finals()
+        boundaries = [e for e in sent if e["type"].endswith("segment_closed")]
+        assert len(boundaries) == 1, (
+            f"{preset_name}: fresh clause hint must cut on frame {expected_clause_frames}"
+        )
+        assert boundaries[0]["reason"] == "vad"
+        gate_state = session._asr_owner._speech_admission
+        assert gate_state is not None
+        assert gate_state._stop_frames == expected_stop_frames
+        assert gate_state._soft_stop_frames == expected_soft_frames
+        assert gate_state._clause_stop_frames == expected_clause_frames
+        assert gate_state._terminal_stop_frames == expected_terminal_frames
+        await session.close()
+
+    asyncio.run(run())
+
+
+def test_opportunistic_soft_zone_hangover_flush_aligns_watermark_for_fast_cut():
+    """When speech in the soft watermark zone stops mid-preview-interval (with >= 4096
+    unflushed bytes), the 2nd hangover frame triggers an opportunistic flush() so the
+    ASR worker emits a partial covering _last_speech_frame_end before the 4-frame
+    terminal pause window expires."""
+
+    async def run():
+        services, factory = _build(
+            realtime_speech_admission_enabled=True,
+            max_realtime_buffer_bytes=2_048_000,
+            max_realtime_frame_bytes=256_000,
+        )
+
+        class FlushEmittingSession(FakeStreamingSession):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self.flush_calls = 0
+                self.emit_terminal_on_flush = False
+
+            async def flush(self) -> None:
+                self.flush_calls += 1
+                await super().flush()
+                if self.emit_terminal_on_flush:
+                    total_samples = sum(len(chunk) for chunk in self.received) // 2
+                    await self.events_queue.put(
+                        StreamingAsrEvent(
+                            kind="partial",
+                            text="虽然这部电影的整体画面表现很好。",
+                            sample_watermark=total_samples,
+                        )
+                    )
+
+        factory.session_class = lambda: FlushEmittingSession
+        sent = []
+        hypothesis_ready = asyncio.Event()
+
+        async def send(event):
+            sent.append(event)
+            if event["type"] == "speechrail.transcription.hypothesis":
+                hypothesis_ready.set()
+            return len(sent)
+
+        session = OpenAIRealtimeSession(services, session_id="opportunistic-flush", send=send)
+        update = session_update(
+            task="caption",
+            endpointing=server_vad(silence_duration_ms=650, prefix_padding_ms=300),
+        )
+        update["session"]["speechrail"]["asr"] = {
+            "preview_interval_ms": 500,
+            "max_segment_ms": 14_000,
+            "finalization": "full_segment",
+        }
+        await session._update_session(update)
+
+        class ScriptedVad:
+            threshold = 0.5
+            prob = 0.9
+
+            def score_frame(self, frame: bytes) -> float:
+                del frame
+                return self.prob
+
+            def reset(self) -> None:
+                pass
+
+        vad = ScriptedVad()
+        session._asr_owner._vad = vad
+        frame_wire = (12_000).to_bytes(2, "little", signed=True) * 768
+
+        async def append_frames(prob: float, count: int) -> None:
+            vad.prob = prob
+            for _ in range(count):
+                await session._asr_owner.append(
+                    {
+                        "type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(frame_wire).decode(),
+                    }
+                )
+
+        # Speak for 245 frames (7840ms >= 7700ms soft_max_ms).
+        # 245 * 1024 bytes = 250,880 bytes; modulo 16,000 (500ms preview_interval_ms) = 10,880 bytes
+        # (>= 4,096 bytes unflushed, NOT aligned with the 500ms preview boundary!).
+        await append_frames(0.9, 245)
+        runtime = factory.sessions[0]
+        assert session._asr_owner._unflushed_bytes >= 4_096
+        flushes_before_hangover = runtime.flush_calls
+        hypothesis_ready.clear()
+        runtime.emit_terminal_on_flush = True
+
+        # Hangover frames 1 & 2 (64ms): frame 2 triggers opportunistic flush() once,
+        # which causes the worker to emit a partial covering _last_speech_frame_end!
+        await append_frames(0.1, 2)
+        await asyncio.wait_for(hypothesis_ready.wait(), timeout=1.0)
+        assert runtime.flush_calls >= flushes_before_hangover + 1
+        assert not [e for e in sent if e["type"].endswith("segment_closed")]
+
+        # Hangover frames 3 & 4 (total 4 frames = 128ms): terminal hint cuts at frame 4!
+        await append_frames(0.1, 2)
+        await session._asr_owner._await_asr_finals()
+        boundaries = [e for e in sent if e["type"].endswith("segment_closed")]
+        assert len(boundaries) == 1
+        assert boundaries[0]["reason"] == "vad"
+
+        # Second utterance: verify that if speech stops when _unflushed_bytes < 4_096
+        # (241 frames: 15 * 16-frame preview flushes + 1 frame = 1,024 bytes unflushed,
+        # at 241 * 32ms = 7,712ms >= 7,700ms soft_max_ms),
+        # hangover frame 2 (3,072 bytes unflushed) does NOT discard the pending flush request,
+        # and hangover frame 3 (4,096 bytes unflushed) triggers the opportunistic flush!
+        sent.clear()
+        runtime.emit_terminal_on_flush = False
+        await append_frames(0.9, 241)
+        runtime = factory.sessions[-1]
+        assert session._asr_owner._unflushed_bytes == 1_024
+        flushes_before_second_hangover = runtime.flush_calls
+        hypothesis_ready.clear()
+        runtime.emit_terminal_on_flush = True
+
+        # Hangover frames 1 & 2 -> _unflushed_bytes reaches 3,072 (< 4,096); request stays pending.
+        await append_frames(0.1, 2)
+        assert session._asr_owner._unflushed_bytes == 3_072
+        assert session._asr_owner._speech_admission._soft_zone_flush_pending is True
+
+        # Hangover frame 3 -> _unflushed_bytes reaches 4,096 and triggers opportunistic flush()!
+        await append_frames(0.1, 1)
+        await asyncio.wait_for(hypothesis_ready.wait(), timeout=1.0)
+        assert runtime.flush_calls >= flushes_before_second_hangover + 1
+
+        # Hangover frame 4 -> terminal hint cuts cleanly at frame 4!
+        await append_frames(0.1, 1)
+        await session._asr_owner._await_asr_finals()
+        second_boundaries = [e for e in sent if e["type"].endswith("segment_closed")]
+        assert len(second_boundaries) == 1
+        assert second_boundaries[0]["reason"] == "vad"
         await session.close()
 
     asyncio.run(run())

@@ -114,11 +114,11 @@ Admission 保存有界状态：最新水位、标点类型、最后一个 VAD �
 
 | 场景 | 软水位前 | 新鲜 terminal | 新鲜 clause | 无可用提示 |
 | --- | --- | --- | --- | --- |
-| caption，650ms 静音请求 | 原常规 21 帧 | 4 帧 / 128ms | 8 帧 / 256ms | 原公式 17 帧 / 544ms |
-| 其他已有软水位场景 | 原规则 | 4 帧 | `min(stop_frames, 8)` 帧 | 保留各自原公式 |
+| caption，650ms 静音请求（`stop_frames=21`） | 原常规 21 帧 | 4 帧 / 128ms | 8 帧 / 256ms | 原公式 17 帧 / 544ms |
+| 其他已有软水位场景（比例下限公式） | 原规则 | `min(stop_frames, max(4, stop_frames // 5))` 帧 | `min(stop_frames, max(8, (stop_frames * 2) // 5))` 帧 | `min(stop_frames, max(12, int(stop_frames * 0.85)))` 帧 |
 | 未启用软水位/手动 commit | 原规则 | 不新增快切 | 不新增快切 | 原规则 |
 
-这是共享内核的候选配置。中立 `SpeechAdmission` 接收 `terminal_stop_frames`、`clause_stop_frames`，不识别 App 场景；Owner 沿用现有预算/静音条件，统一注入分级参数，不依据 `task` 选择策略。现有默认预设下，会议、两类助手和提词器同样可能进入软水位区，clause 从 4 帧变为最多 8 帧；时序校验也适用于这些调用方，不能声称影响仅限字幕。如果产品要求其他场景完全不变，应另行评审显式中立策略字段及契约，本计划不添加隐含场景策略。
+这是共享内核的候选配置。中立 `SpeechAdmission` 接收 `terminal_stop_frames`、`clause_stop_frames`，不识别 App 场景；Owner 沿用现有预算/静音条件，按比例下限公式（`terminal = min(stop_frames, max(4, stop_frames // 5))`、`clause = min(stop_frames, max(8, (stop_frames * 2) // 5))`）注入分级参数，既保持 caption（21 帧）的 `4 / 8 / 17` 帧不变，又为长静默场景（如 meeting/duplex 29 帧 → `5 / 11 / 24` 帧、turn-taking 38 帧 → `7 / 15 / 32` 帧）保留比例化气口裕度。同时在软水位区进入静默挂起的第 2 帧（64ms），若最新标点水位尚未覆盖最后语音帧且未刷新音频累计达 `>= 4096` 字节（128ms），触发单次机会性 `asr.flush()` 以对齐句末标点水位。
 
 所有有效阈值不超过常规 `stop_frames`，且满足 terminal ≤ clause ≤ 无提示 ≤ 常规；无软水位配置时全部禁用。保留 VAD 双阈值、预卷、尾帧和硬预算行为。`stop_frames` 很小时不能因三级配置反而延迟原收口。
 
@@ -180,11 +180,11 @@ Admission 保存有界状态：最新水位、标点类型、最后一个 VAD �
 
 **输入/输出：** 消费已有 `StreamingAsrEvent.sample_watermark`；输出 §3.1 的新提示方法与有界校验状态。domain event、worker 协议和公开事件无需新增字段。
 
-- [ ] 新增 `test_boundary_hint_uses_absolute_kernel_samples`：item 起点 16000、相对水位 8000，提示必须落在 24000，不能是 8000 或 36000。
-- [ ] 新增 `test_boundary_hint_expiry_and_speech_frontier`：age 8000 可用、8001 无效；未来、缺失、回退水位及未覆盖最近语音帧时不得快切；同水位撤回标点立即生效。
-- [ ] 新增 `test_closed_item_partial_cannot_hint_new_segment`：rollover 后旧 final 未返回，旧 partial 仍不得影响新段；覆盖 clear、新 epoch、reset、finish、下一次激活。
-- [ ] 更新旧布尔接口的全部调用和直接测试；实现坐标转换、item 身份检查、状态清理，不修改原终态和 commit receipt。
-- [ ] 运行：`uv run --no-sync pytest tests/test_speech_admission.py tests/test_realtime_asr_control.py -q`。预期新旧反例全通过，音频样本不重不漏，不能仅断言私有字段。
+- [x] 新增 `test_boundary_hint_uses_absolute_kernel_samples`：item 起点 16000、相对水位 8000，提示必须落在 24000，不能是 8000 或 36000。
+- [x] 新增 `test_boundary_hint_expiry_and_speech_frontier`：age 8000 可用、8001 无效；未来、缺失、回退水位及未覆盖最近语音帧时不得快切；同水位撤回标点立即生效。
+- [x] 新增 `test_closed_item_partial_cannot_hint_new_segment`：rollover 后旧 final 未返回，旧 partial 仍不得影响新段；覆盖 clear、新 epoch、reset、finish、下一次激活。
+- [x] 更新旧布尔接口的全部调用和直接测试；实现坐标转换、item 身份检查、状态清理，不修改原终态和 commit receipt。
+- [x] 运行：`uv run --no-sync pytest tests/test_speech_admission.py tests/test_realtime_asr_control.py -q`。预期新旧反例全通过，音频样本不重不漏，不能仅断言私有字段。
 
 ### T2：标点分级与共享场景回归
 
@@ -192,11 +192,11 @@ Admission 保存有界状态：最新水位、标点类型、最后一个 VAD �
 
 **输入/输出：** 使用 T1 的可信提示；Owner 分类并注入两个帧数，Admission 仅执行中立参数，输出既有 `end` 决策。
 
-- [ ] 新增 `test_caption_boundary_tiers_use_exact_frame_counts`：soft zone 内，terminal 第 3 帧不切、第 4 帧切；clause 第 6/7 帧不切、第 8 帧切；无提示第 16 帧不切、第 17 帧切。
-- [ ] 新增 `test_punctuation_classifier_rejects_ambiguous_endings`：覆盖闭合引号、连续闭合符号、空文本、`3.14`、`Dr.`、`U.S.`、省略号和破折号；ASCII 点按 §3.2 保守分类。
-- [ ] 新增 `test_soft_boundary_requires_vad_pause`：连续高概率语音即使带标点也不切；覆盖 0.35/0.425/0.5 附近和软水位前后，保护弱语音与原双阈值语义。
-- [ ] 新增多场景参数化反例：相同 ASR/VAD 策略切换 `task` 时必须得到相同分级阈值；按各客户端预设验证 clause 为 `min(stop_frames, 8)`，其余停顿公式不变。短预算、小 `stop_frames`、手动 commit、硬 rollover 与尾部不足 512 样本均遵守原生命周期。
-- [ ] 实现后运行：`uv run --no-sync pytest tests/test_speech_admission.py tests/test_realtime_asr_control.py tests/test_realtime_multiscene_asr.py -q`。
+- [x] 新增 `test_caption_boundary_tiers_use_exact_frame_counts`：soft zone 内，terminal 第 3 帧不切、第 4 帧切；clause 第 6/7 帧不切、第 8 帧切；无提示第 16 帧不切、第 17 帧切。
+- [x] 新增 `test_punctuation_classifier_rejects_ambiguous_endings`：覆盖闭合引号、连续闭合符号、空文本、`3.14`、`Dr.`、`U.S.`、省略号和破折号；ASCII 点按 §3.2 保守分类。
+- [x] 新增 `test_soft_boundary_requires_vad_pause`：连续高概率语音即使带标点也不切；覆盖 0.35/0.425/0.5 附近和软水位前后，保护弱语音与原双阈值语义。
+- [x] 新增多场景参数化反例：相同 ASR/VAD 策略切换 `task` 时必须得到相同分级阈值；按各客户端预设验证 clause 为 `min(stop_frames, 8)`，其余停顿公式不变。短预算、小 `stop_frames`、手动 commit、硬 rollover 与尾部不足 512 样本均遵守原生命周期。
+- [x] 实现后运行：`uv run --no-sync pytest tests/test_speech_admission.py tests/test_realtime_asr_control.py tests/test_realtime_multiscene_asr.py -q`。
 
 ### T3：关联词、统一证据与收口一致性
 
@@ -204,11 +204,11 @@ Admission 保存有界状态：最新水位、标点类型、最后一个 VAD �
 
 **输入/输出：** 提供 §4.1 的 `CaptionBoundaryEvidence`、`boundaryEvidence(previous:next:)` 和非持久化 `lastLineSourceText`；不改正式 `Line` 的持久化含义。
 
-- [ ] 新增配对正例和反例：`虽然画面很好。/但是节奏拖沓。`、`一方面画面出色。/另一方面配乐平庸。`；对照无 opener、opener 在上一完整句、完整结构在左侧已结束、超出扫描窗口、换人/换语言/超过硬边界，不能仅因出现短词就强合并。
-- [ ] 覆盖原有 dangling-but、PS5、短碎片、《沙丘》续接反例；新增“好的/是的/走吧/行了”独立应答负例，不默认延长完整句。
-- [ ] 使用受控调度/既有 harness 条件等待测试：窗口内追加仅一次收口，超时后不重开；追加取消旧任务；暂停/结束/关闭合并无遗留 timer。不得靠固定 sleep 证明并发完成。
-- [ ] 覆盖翻译开/关、过期回包、Stage 2 失败、段落导出和保存正文完整性；展示去接缝标点不改写 `sourceText` 或正式行。
-- [ ] 实现后运行：`swift test --package-path macos/SpeechRailApp --skip-update --enable-swift-testing --filter CaptionSessionLifecycleTests`。确认新 XCTest 实际发现并执行，不启动前台窗口。
+- [x] 新增配对正例和反例：`虽然画面很好。/但是节奏拖沓。`、`一方面画面出色。/另一方面配乐平庸。`；对照无 opener、opener 在上一完整句、完整结构在左侧已结束、超出扫描窗口、换人/换语言/超过硬边界，不能仅因出现短词就强合并。
+- [x] 覆盖原有 dangling-but、PS5、短碎片、《沙丘》续接反例；新增“好的/是的/走吧/行了”独立应答负例，不默认延长完整句。
+- [x] 使用受控调度/既有 harness 条件等待测试：窗口内追加仅一次收口，超时后不重开；追加取消旧任务；暂停/结束/关闭合并无遗留 timer。不得靠固定 sleep 证明并发完成。
+- [x] 覆盖翻译开/关、过期回包、Stage 2 失败、段落导出和保存正文完整性；展示去接缝标点不改写 `sourceText` 或正式行。
+- [x] 实现后运行：`swift test --package-path macos/SpeechRailApp --skip-update --enable-swift-testing --filter CaptionSessionLifecycleTests`。确认新 XCTest 实际发现并执行，不启动前台窗口。
 
 ### T4：软预算与完整性回归
 
@@ -216,16 +216,21 @@ Admission 保存有界状态：最新水位、标点类型、最后一个 VAD �
 
 **输入/输出：** `softMaxCharacterCount=38`；合并决策按 §4.3，计数与最终展示拼接使用同一函数。
 
-- [ ] 表驱动覆盖候选显示文本计数恰为 38 和 39；完整句在 39 时另起段，rollover/强未完成/短碎片/关联配对/明确 continuation 分别允许软超限。
-- [ ] 覆盖中英混排、英文空格、emoji/组合字符、单条超过 38 的长 final、连续三段各 20 字；所有非标点正文完整保留，3 行和 28s 硬限仍生效。
-- [ ] 保存/导出回归：分组变化不重排行 ID、序号、时间和归属，不改写历史记录，不把语义段落时间包装成逐字时间。
-- [ ] 运行 T3 的 Swift 定向命令；实现后按实质变化同步 [Realtime 契约](../../../contracts/realtime-openai.md)、[API 用户文档](../../users/api-contract.md) 的相关行为说明，保持现有事件 schema；修改前复核文档实际章节。
+- [x] 表驱动覆盖候选显示文本计数恰为 38 和 39；完整句在 39 时另起段，rollover/强未完成/短碎片/关联配对/明确 continuation 分别允许软超限。
+- [x] 覆盖中英混排、英文空格、emoji/组合字符、单条超过 38 的长 final、连续三段各 20 字；所有非标点正文完整保留，3 行和 28s 硬限仍生效。
+- [x] 保存/导出回归：分组变化不重排行 ID、序号、时间和归属，不改写历史记录，不把语义段落时间包装成逐字时间。
+- [x] 运行 T3 的 Swift 定向命令；实现后按实质变化同步 [Realtime 契约](../../../contracts/realtime-openai.md)、[API 用户文档](../../users/api-contract.md) 的相关行为说明，保持现有事件 schema；修改前复核文档实际章节。
 
 ### T5：NLP 可行性探索（独立、可不实施）
 
-- [ ] 按 §4.4 在仓库外或隔离测试中记录可用 scheme 与正反例；不修改默认生产路径、不请求系统资产下载。
-- [ ] 若证据支持接入，先补充本计划中的执行域、缓存容量、取消身份和测试文件清单，再评审接入；此时不得直接将 `.particle` 当强合并证据。
-- [ ] 实际质量/性能测量须另获明确授权，沿用项目基准规则；主方案不以该项通过为完成条件。
+- [x] 按 §4.4 在仓库外或隔离测试中记录可用 scheme 与正反例；不修改默认生产路径、不请求系统资产下载。
+  - **隔离实测记录（macOS 26.5 SDK / Apple Silicon，不调用 `requestAssets`）**：
+    - **可用 Scheme**：`NLTagger.availableTagSchemes(for: .word, language:)` 仅在 `zh-Hans`（`Language`/`Script`/`TokenType`/`LexicalClass`）与 `en`（含 `LexicalClass`/`Lemma`）下提供 `.lexicalClass`；`ja`、`ko`、`zh-Hant` 均返回 `has_lexical_class = false`（仅 `Language`/`Script`/`TokenType`）。
+    - **正反例标注对比**：`能让我看出一身鸡皮疙瘩，但。` 末词 `但` 标为 `Conjunction`，英文 `on the.` / `because,` 标为 `Determiner` / `Preposition`（均已被静态 `strongIncompleteEnding` 覆盖）；而悬空结构助词 `而在河谷镇的。` 与独立完整短答 `好的。`、`是的。` 的末词 `的` 均被标为同一 `Particle`，无法区分悬空定语与完整应答；列表引导语 `…有的说。` 末词 `说` 标为 `Verb`，专名同位语 `…的PS5。` 末词 `5` 与完整句 `走吧。`/`行了。`/`看过了。` 均标为 `OtherWord`。
+    - **冷热耗时与内存增量（单 Actor 串行复用实例）**：冷启动 `0.99~1.44 ms`，热态 `P50 = 0.365 ms`、`P95 = 1.657 ms`、`Max = 2.724~3.425 ms`，首次加载词性资产后进程 RSS 增加约 `+3.3 MB`（`3,392~3,408 KB`）。
+    - **结论**：`NLTagger` 在日/韩/繁中下缺失 `.lexicalClass`，在简中下无法区分悬空 `的` 与句末语气/应答 `的` 且无法识别 `有的说`/`PS5` 等高频口语断口，同时引入约 `3.3 MB` 常驻内存与 `1.66 ms` P95 耗时；按 §4.4“无收益则保留规则方案”，不接入默认生产路径。
+- [x] 若证据支持接入，先补充本计划中的执行域、缓存容量、取消身份和测试文件清单，再评审接入；此时不得直接将 `.particle` 当强合并证据。（实测无净收益，保持规则方案，不进入生产路径）
+- [x] 实际质量/性能测量须另获明确授权，沿用项目基准规则；主方案不以该项通过为完成条件。
 
 ## 6. 验收分层与发布条件
 

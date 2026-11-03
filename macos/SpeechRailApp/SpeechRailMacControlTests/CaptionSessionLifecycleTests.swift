@@ -2716,6 +2716,134 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(savedRows.map(\.ordinal), [1])
     }
 
+    func testPreviewDrivenHoldKeepsCorrelativeParagraphOpenAcrossStreamingPartialsAndNormalizesSeamComma() async throws {
+        let fake = FakeTranslationClient()
+        fake.streamDeltas = ["虽然画面很好，但后半段叙事节奏拖沓。"]
+        let h = try await makeHarness()
+        h.session.makeTranslationClient = { fake }
+        h.session.translationEnabled = true
+        h.session.sourceLanguage = .english
+        let sessionID = try await start(h)
+
+        // 第 1 句定稿（带终结标点，默认基础收口窗口为 completeSentenceGraceMilliseconds = 200ms）
+        try await h.emit(.completed(itemID: "stream-corr-1", transcript: "虽然这部电影的整体画面表现很好。"))
+        try await h.settle { $0.session.lines.count == 1 && $0.session.hasOpenParagraph }
+
+        // 模拟真实说话过程：在第 1 句收口前（100ms），第 2 句的流式预览已经开始到达（"但是..."），
+        // 且说话持续了 450ms（远超原 200ms 窗口）才最终定稿。
+        try await Task.sleep(for: .milliseconds(100))
+        try await h.emit(.partialSnapshot(itemID: "stream-corr-2", revision: 1, text: "但是后半段"))
+        try await h.settle { $0.session.partialText == "但是后半段" }
+
+        try await Task.sleep(for: .milliseconds(220))
+        XCTAssertTrue(
+            h.session.hasOpenParagraph,
+            "当下一句的实时预览已呈现关联词承接关系时，应续期保持当前段落开放，不得在说话中途提前封存"
+        )
+        try await h.emit(.partialSnapshot(itemID: "stream-corr-2", revision: 2, text: "但是后半段的叙事节奏"))
+        try await h.settle { $0.session.partialText == "但是后半段的叙事节奏" }
+
+        try await Task.sleep(for: .milliseconds(180))
+        try await h.emit(.completed(itemID: "stream-corr-2", transcript: "但是后半段的叙事节奏实在太拖沓。"))
+        try await h.settle {
+            $0.session.lines.count == 2
+                && $0.session.paragraphs.count == 1
+                && $0.session.paragraphs.first?.lineIDs.count == 2
+                && !$0.session.hasOpenParagraph
+                && $0.session.paragraphs.first?.translatedText == "虽然画面很好，但后半段叙事节奏拖沓。"
+        }
+
+        XCTAssertEqual(
+            h.session.translationMetrics.finalRequests,
+            1,
+            "预览驱动续期合并后整段只应发起一次 Stage 2 精翻"
+        )
+        XCTAssertTrue(fake.lastSystemInstructions?.contains("【同段片段】") == true)
+        let expectedNormalizedDisplay = "虽然这部电影的整体画面表现很好，但是后半段的叙事节奏实在太拖沓。"
+        XCTAssertEqual(
+            h.session.paragraphs.first?.displaySourceText,
+            expectedNormalizedDisplay,
+            "完整分句间的关联词合并应将原句末句号归一为逗号，避免长句无标点粘连"
+        )
+
+        // 验证重复的相同 partial 文本不会重置/刷新 lastObservedAt，而推进中的 partial 会刷新 lastObservedAt
+        try await h.emit(.completed(itemID: "stream-corr-3", transcript: "一方面他希望完全忠于原著的叙事结构。"))
+        try await h.settle {
+            $0.session.lines.count == 3 && $0.session.hasOpenParagraph
+        }
+        try await h.emit(.partialSnapshot(itemID: "stream-corr-4", revision: 1, text: "另一方面"))
+        try await h.settle { $0.session.partialText == "另一方面" }
+        let observedAfterFirstPartial = try XCTUnwrap(h.session.paragraphs.last?.lastObservedAt)
+        try await Task.sleep(for: .milliseconds(30))
+        // 相同文本的重复快照不应推进 lastObservedAt
+        try await h.emit(.partialSnapshot(itemID: "stream-corr-4", revision: 2, text: "另一方面"))
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(h.session.paragraphs.last?.lastObservedAt, observedAfterFirstPartial)
+        // 新推进的 partial 应更新 lastObservedAt 并保持段落开放，随后流失败（无 recoveryNote）应释放 750ms 持锁并在常规宽限后收口
+        try await h.emit(.partialSnapshot(itemID: "stream-corr-4", revision: 3, text: "另一方面他又不得不"))
+        try await h.settle { $0.session.partialText == "另一方面他又不得不" }
+        XCTAssertGreaterThan(try XCTUnwrap(h.session.paragraphs.last?.lastObservedAt), observedAfterFirstPartial)
+        try await h.emit(.failed(itemID: "stream-corr-4", code: "asr_error", message: "dropped"))
+        try await h.settle {
+            !$0.session.hasOpenParagraph && !$0.session.hasPendingParagraphFlushTask
+        }
+
+        await h.session.finish()
+        let savedLines = try await h.store.lines(sessionID: sessionID)
+        let fetchedRecord = try await h.store.session(id: sessionID)
+        let record = try XCTUnwrap(fetchedRecord)
+        let exportedPlain = SessionExporter.export(
+            SessionExportPayload(record: record, lines: savedLines, captionDisplayMode: .originalOnly),
+            as: .plainText
+        )
+        XCTAssertTrue(
+            exportedPlain.contains(expectedNormalizedDisplay),
+            "导出文本必须与实时字幕共用同一套段落接缝标点归一规则"
+        )
+
+        // 同时验证纯拉丁/英文文本采用 84 Character 软预算，不会在 39..84 字符处提前拆断紧凑续句
+        let now = Date()
+        let latinLeft = CaptionParagraph(
+            line: makeLine("The visual effects are truly impressive.", start: 0, end: 2.0),
+            observedAt: now,
+            isTranslating: false
+        )
+        let latinRightWithin84 = makeLine("making the opening act unforgettable", start: 2.2, end: 4.0)
+        let latinCandidate = latinLeft.candidateDisplaySourceText(appending: latinRightWithin84.text)
+        XCTAssertGreaterThan(latinCandidate.count, CaptionParagraphAssembler.softMaxCharacterCount)
+        XCTAssertLessThanOrEqual(latinCandidate.count, CaptionParagraphAssembler.latinSoftMaxCharacterCount)
+        XCTAssertEqual(
+            CaptionParagraphAssembler.effectiveSoftMaxCharacterCount(for: latinCandidate),
+            CaptionParagraphAssembler.latinSoftMaxCharacterCount
+        )
+        XCTAssertTrue(
+            CaptionParagraphAssembler.shouldMerge(
+                latinLeft,
+                latinRightWithin84,
+                observedAt: now.addingTimeInterval(0.2)
+            )
+        )
+
+        // 验证三行段落导出与 CaptionParagraph.append 在接缝标点判定上逐字一致（仅检查上一行原文而非整段累计文本）
+        let line1 = makeLine("虽然这部电影的整体画面很好。", id: "l1", start: 0, end: 1.5, closeReason: .budgetRollover)
+        let line2 = makeLine("观众第一眼就会被吸引。", id: "l2", start: 1.5, end: 3.0, closeReason: .budgetRollover)
+        let line3 = makeLine("但是结局实在太仓促。", id: "l3", start: 3.0, end: 4.5)
+        var threeLineParagraph = CaptionParagraph(line: line1, observedAt: now, isTranslating: false)
+        threeLineParagraph.append(line2, observedAt: now.addingTimeInterval(0.1))
+        threeLineParagraph.append(line3, observedAt: now.addingTimeInterval(0.2))
+        let exportedThreeLines = SessionExporter.paragraphLines([
+            TranscriptLine(id: "l1", sessionID: "s1", ordinal: 1, role: .speaker, text: line1.text, source: .system, paragraphID: "p1"),
+            TranscriptLine(id: "l2", sessionID: "s1", ordinal: 2, role: .speaker, text: line2.text, source: .system, paragraphID: "p1"),
+            TranscriptLine(id: "l3", sessionID: "s1", ordinal: 3, role: .speaker, text: line3.text, source: .system, paragraphID: "p1")
+        ])
+        XCTAssertEqual(exportedThreeLines.count, 1)
+        XCTAssertEqual(
+            exportedThreeLines.first?.text,
+            threeLineParagraph.displaySourceText,
+            "三行段落导出必须基于紧邻上一行原文判定关联词接缝，与实时字幕段落展示逐字一致"
+        )
+    }
+
     private func makeLine(
         _ text: String,
         id: String = UUID().uuidString,

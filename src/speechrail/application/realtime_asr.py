@@ -541,8 +541,8 @@ class RealtimeAsrOwner:
                 if effective_ms >= 8_000 and stop_frames > 5:
                     soft_ms = min(8_000, max(5_000, int(effective_ms * 0.55)))
                     soft_max_samples = int(soft_ms * 16)
-                    terminal_stop_frames = min(stop_frames, 4)
-                    clause_stop_frames = min(stop_frames, 8)
+                    terminal_stop_frames = min(stop_frames, max(4, stop_frames // 5))
+                    clause_stop_frames = min(stop_frames, max(8, (stop_frames * 2) // 5))
                     # When NOT at punctuation boundary, preserve sufficient stop frames
                     # (>= 12 frames / 384ms) so natural mid-clause breath pauses
                     # (e.g. "叙事节奏" ... 180ms) are not split mid-sentence.
@@ -981,6 +981,15 @@ class RealtimeAsrOwner:
             )
             for dec in decisions:
                 await self._handle_admission_decision(dec, in_commit=in_commit)
+            if (
+                not in_commit
+                and self._asr is not None
+                and self._unflushed_bytes >= 4_096
+                and self._speech_admission.consume_soft_zone_flush_request()
+            ):
+                self._unflushed_bytes = 0
+                await self._asr.flush()
+                await asyncio.sleep(0)
 
     async def append(self, event: dict[str, Any]) -> None:
         if self._asr_input_error is not None:

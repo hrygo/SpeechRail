@@ -536,9 +536,32 @@ public final class CaptionSession {
             alreadyHeldOnce: &partialTailRollbackHeldOnce
         )
         displayedPartialItemID = itemID
-        if partialText != stabilized {
+        let didAdvance = (partialText != stabilized)
+        if didAdvance {
             partialText = stabilized
         }
+        if didAdvance, let stabilized {
+            holdOpenParagraphForActivePartialIfNeeded(stabilized)
+        }
+    }
+
+    private func holdOpenParagraphForActivePartialIfNeeded(_ partial: String) {
+        let now = Date()
+        guard let openID = openParagraphID,
+              let index = paragraphs.firstIndex(where: { $0.id == openID }),
+              CaptionParagraphAssembler.shouldHoldOpenParagraph(
+                  paragraphs[index],
+                  incomingPartial: partial,
+                  observedAt: now,
+                  assemblyEnabled: paragraphAssemblyEnabled
+              )
+        else { return }
+        paragraphs[index].lastObservedAt = now
+        scheduleParagraphFlush(
+            for: index,
+            deferImmediateFlush: true,
+            holdOverrideMilliseconds: CaptionParagraphAssembler.incompleteHoldMilliseconds
+        )
     }
 
     private func scheduleCurrentPartialTranslation(for text: String) {
@@ -1973,6 +1996,9 @@ public final class CaptionSession {
                     text: recoveryNote.text, itemID: itemID, identity: identity,
                     boundary: boundary, formal: false
                 )
+            } else if let openID = openParagraphID,
+                      let openIdx = paragraphs.firstIndex(where: { $0.id == openID }) {
+                scheduleParagraphFlush(for: openIdx)
             }
         case .attribution(let itemID, let units, _):
             await applyAttribution(itemID: itemID, units: units, identity: identity)
@@ -2307,14 +2333,15 @@ public final class CaptionSession {
                CaptionParagraphAssembler.shouldMerge(
                     paragraphs[index],
                     line,
-                    observedAt: observedAt
+                    observedAt: observedAt,
+                    evidence: evidence
                ) {
                 let paragraphID = paragraphs[index].id
                 line.paragraphID = paragraphID
                 line.translatedText = nil
                 transcriptPresentation.apply(line)
                 let hadPriorTranslation = paragraphs[index].translatedText != nil
-                paragraphs[index].append(line, observedAt: observedAt)
+                paragraphs[index].append(line, observedAt: observedAt, evidence: evidence)
                 if hadPriorTranslation {
                     transcriptPresentation.update(id: paragraphID) {
                         $0.translatedText = nil
@@ -2465,15 +2492,20 @@ public final class CaptionSession {
         }
     }
 
-    private func scheduleParagraphFlush(for index: Int, deferImmediateFlush: Bool = false) {
+    private func scheduleParagraphFlush(
+        for index: Int,
+        deferImmediateFlush: Bool = false,
+        holdOverrideMilliseconds: Int? = nil
+    ) {
         paragraphFlushTask?.cancel()
         paragraphFlushTask = nil
         guard paragraphs.indices.contains(index) else { return }
         let id = paragraphs[index].id
-        let hold = CaptionParagraphAssembler.flushDelayMilliseconds(
+        let baseHold = CaptionParagraphAssembler.flushDelayMilliseconds(
             for: paragraphs[index],
             assemblyEnabled: paragraphAssemblyEnabled
         )
+        let hold = holdOverrideMilliseconds.map { Swift.max(baseHold, $0) } ?? baseHold
         guard hold > 0 else {
             if !deferImmediateFlush {
                 flushOpenParagraph()
@@ -2630,6 +2662,16 @@ public final class CaptionSession {
               displayMode != .originalOnly,
               sourceLanguage != .chinese,
               makeTranslationClient?() != nil else { return }
+        if let openID = openParagraphID,
+           let openIdx = paragraphs.firstIndex(where: { $0.id == openID }),
+           CaptionParagraphAssembler.flushDelayMilliseconds(
+               for: paragraphs[openIdx],
+               assemblyEnabled: paragraphAssemblyEnabled
+           ) <= 0 {
+            paragraphFlushTask?.cancel()
+            paragraphFlushTask = nil
+            openParagraphID = nil
+        }
         let closedCandidates = paragraphs.filter {
             $0.id != openParagraphID && !$0.lineIDs.isEmpty
         }

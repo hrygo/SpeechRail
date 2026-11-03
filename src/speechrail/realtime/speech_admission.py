@@ -114,6 +114,8 @@ class SpeechAdmission:
         self._hint_kind: Literal["terminal", "clause"] | None = None
         self._hint_watermark: int | None = None
         self._last_speech_frame_end = 0
+        self._soft_zone_flush_pending = False
+        self._soft_zone_flush_triggered_in_hangover = False
 
     @property
     def state(self) -> Literal["IDLE", "CANDIDATE", "ACTIVE", "HANGOVER"]:
@@ -142,6 +144,15 @@ class SpeechAdmission:
         self._hint_kind = None
         self._hint_watermark = None
         self._last_speech_frame_end = baseline_sample
+        self._soft_zone_flush_pending = False
+        self._soft_zone_flush_triggered_in_hangover = False
+
+    def consume_soft_zone_flush_request(self) -> bool:
+        """Return True once per hangover episode when a soft-zone partial flush is needed."""
+        if not self._soft_zone_flush_pending:
+            return False
+        self._soft_zone_flush_pending = False
+        return True
 
     def reset(self, *, next_sample: int = 0) -> None:
         """Reset internal buffers and state machine to IDLE."""
@@ -179,17 +190,21 @@ class SpeechAdmission:
             return
         if sample_watermark is None or isinstance(sample_watermark, bool):
             self._hint_kind = None
+            self._hint_watermark = None
             return
         if (
             sample_watermark <= self._current_utterance_start_sample
             or sample_watermark > self._last_emitted_sample
         ):
             self._hint_kind = None
+            self._hint_watermark = None
             return
         if self._hint_watermark is not None and sample_watermark < self._hint_watermark:
             return
         self._hint_watermark = sample_watermark
         self._hint_kind = kind
+        if sample_watermark >= self._last_speech_frame_end:
+            self._soft_zone_flush_pending = False
 
     def _in_soft_watermark_zone(self, frame_end_sample: int) -> bool:
         return (
@@ -326,6 +341,8 @@ class SpeechAdmission:
             if is_speech:
                 self._hangover_count = 0
                 self._last_speech_frame_end = frame_end_sample
+                self._soft_zone_flush_pending = False
+                self._soft_zone_flush_triggered_in_hangover = False
                 decisions.append(
                     AdmissionDecision(
                         kind="audio",
@@ -338,6 +355,8 @@ class SpeechAdmission:
             else:
                 self._state = "HANGOVER"
                 self._hangover_count = 1
+                self._soft_zone_flush_pending = False
+                self._soft_zone_flush_triggered_in_hangover = False
                 decisions.append(
                     AdmissionDecision(
                         kind="audio",
@@ -355,6 +374,8 @@ class SpeechAdmission:
                 self._state = "ACTIVE"
                 self._hangover_count = 0
                 self._last_speech_frame_end = frame_end_sample
+                self._soft_zone_flush_pending = False
+                self._soft_zone_flush_triggered_in_hangover = False
                 decisions.append(
                     AdmissionDecision(
                         kind="audio",
@@ -375,6 +396,17 @@ class SpeechAdmission:
                     )
                 )
                 self._last_emitted_sample = frame_end_sample
+                if (
+                    self._hangover_count >= 2
+                    and not self._soft_zone_flush_triggered_in_hangover
+                    and self._in_soft_watermark_zone(frame_end_sample)
+                    and (
+                        self._hint_watermark is None
+                        or self._hint_watermark < self._last_speech_frame_end
+                    )
+                ):
+                    self._soft_zone_flush_pending = True
+                    self._soft_zone_flush_triggered_in_hangover = True
                 if self._hangover_count >= self._effective_stop_frames(frame_end_sample):
                     decisions.append(self._close_active(frame_end_sample))
 

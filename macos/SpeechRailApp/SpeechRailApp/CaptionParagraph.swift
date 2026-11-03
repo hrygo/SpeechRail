@@ -75,28 +75,93 @@ struct CaptionParagraph: Identifiable, Equatable, Sendable {
     }
 
     /// 构造候选追加后的段落展示文本；软预算计数与实际 `append` 共用同一函数。
-    func candidateDisplaySourceText(appending lineText: String) -> String {
-        let displayHead = CaptionParagraphAssembler
-            .trimTrailingPunctuation(displaySourceText)
-        let displayTail = lineText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return Self.joinedSource(displayHead, displayTail)
+    func candidateDisplaySourceText(
+        appending lineText: String,
+        evidence: CaptionBoundaryEvidence? = nil
+    ) -> String {
+        Self.joinedDisplaySegment(
+            displayHead: displaySourceText,
+            lastRawSegment: lastLineSourceText,
+            nextRawSegment: lineText,
+            evidence: evidence
+        )
     }
 
-    mutating func append(_ line: CaptionSession.Line, observedAt: Date) {
+    mutating func append(
+        _ line: CaptionSession.Line,
+        observedAt: Date,
+        evidence: CaptionBoundaryEvidence? = nil
+    ) {
         lineIDs.append(line.id)
         translatedText = nil
         initialStabilizedPrefix = nil
         let head = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         let tail = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
         sourceText = [head, tail].filter { !$0.isEmpty }.joined(separator: " ")
+        displaySourceText = candidateDisplaySourceText(appending: tail, evidence: evidence)
         lastLineSourceText = line.text
-        displaySourceText = candidateDisplaySourceText(appending: tail)
         if start == nil { start = line.start }
         if let end = line.end { self.end = end }
         if speakerLabel == nil { speakerLabel = line.speakerLabel }
         if sourceLanguage == nil { sourceLanguage = line.sourceLanguage }
         lastLineCloseReason = line.closeReason
         lastObservedAt = observedAt
+    }
+
+    /// 统一拼接段落内相邻分句的展示/导出文本：
+    /// - 常规词中/悬空截断伪影（如“但。”、“《霍比特人》一意外。”）直接剥除句末标点再拼接；
+    /// - 若上下两分句构成完整分句间的成对关联结构（如“虽然画面很好。” + “但是节奏拖沓。”），
+    ///   且前一句原带标点、非悬空残词、非短碎片，则将接缝处的句末标点归一为分句逗号（中文 `，` / 西文 `, `），
+    ///   避免长关联复句拼接后变成无标点连写。
+    static func joinedDisplaySegment(
+        displayHead: String,
+        lastRawSegment: String,
+        nextRawSegment: String,
+        evidence: CaptionBoundaryEvidence? = nil
+    ) -> String {
+        let strippedHead = CaptionParagraphAssembler.trimTrailingPunctuation(displayHead)
+        let displayTail = nextRawSegment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !strippedHead.isEmpty else { return displayTail }
+        guard !displayTail.isEmpty else { return strippedHead }
+
+        let trimmedRawLeft = lastRawSegment.trimmingCharacters(in: .whitespacesAndNewlines)
+        let leftHadPunctuation = CaptionParagraphAssembler.endsWithTerminalPunctuation(trimmedRawLeft)
+            || CaptionParagraphAssembler.endsWithClausePunctuation(trimmedRawLeft)
+        let resolvedEvidence = evidence
+            ?? CaptionParagraphAssembler.boundaryEvidence(previous: trimmedRawLeft, next: displayTail)
+        let shouldKeepClauseComma = leftHadPunctuation
+            && !resolvedEvidence.strongIncomplete
+            && !CaptionParagraphAssembler.isShortFragment(trimmedRawLeft)
+            && resolvedEvidence.correlativePair
+
+        if shouldKeepClauseComma {
+            if joinsWithoutSpace(strippedHead.last!), joinsWithoutSpace(displayTail.first!) {
+                return strippedHead + "，" + displayTail
+            }
+            return strippedHead + ", " + displayTail
+        }
+        return joinedSource(strippedHead, displayTail)
+    }
+
+    /// 供历史/导出视图与实时字幕共用同一段落接缝归一规则。
+    static func joinedDisplaySegments(_ parts: [String]) -> String {
+        var display = ""
+        var lastRaw = ""
+        for part in parts {
+            let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if display.isEmpty {
+                display = trimmed
+            } else {
+                display = joinedDisplaySegment(
+                    displayHead: display,
+                    lastRawSegment: lastRaw,
+                    nextRawSegment: trimmed
+                )
+            }
+            lastRaw = trimmed
+        }
+        return display
     }
 
     static func joinedSource(_ head: String, _ tail: String) -> String {
@@ -136,11 +201,29 @@ enum CaptionParagraphAssembler {
     static let maximumLines = 3
     static let maximumDuration: TimeInterval = 28
     static let softMaxCharacterCount = 38
+    static let latinSoftMaxCharacterCount = 84
     static let correlativeLeftWindowCharacters = 128
     static let correlativeRightWindowCharacters = 24
     static let standaloneReplies: Set<String> = ["好的", "是的", "走吧", "行了"]
     /// Display-only conversation state stays bounded even if the session runs for hours.
     static let maximumRetainedParagraphs = 500
+
+    /// 按字符集返回当前段落展示文本的软字符预算：含中日韩字符时采用 38 Character，纯拉丁/西文采用 84 Character。
+    static func effectiveSoftMaxCharacterCount(for text: String) -> Int {
+        containsCJKOrKanaOrHangul(text) ? softMaxCharacterCount : latinSoftMaxCharacterCount
+    }
+
+    private static func containsCJKOrKanaOrHangul(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF,
+                 0xF900...0xFAFF, 0xAC00...0xD7AF:
+                true
+            default:
+                false
+            }
+        }
+    }
 
     /// Pure retention policy, shared with the long-session regression test.
     static func retained(
@@ -240,10 +323,47 @@ enum CaptionParagraphAssembler {
         return closeGraceMilliseconds
     }
 
+    /// 当开放段落仍在宽限窗口内、且下一句的实时预览（partial/partialSnapshot）已经呈现出
+    /// 明确的承接关系（关联词成对、续接词头、被动截断或悬空词尾）时，允许续期收口等待窗口，
+    /// 避免后半句还在持续说话时前半句就因 200ms/320ms 定时器到期而提前封存。
+    static func shouldHoldOpenParagraph(
+        _ paragraph: CaptionParagraph,
+        incomingPartial: String,
+        observedAt: Date = Date(),
+        assemblyEnabled: Bool = true
+    ) -> Bool {
+        guard assemblyEnabled,
+              paragraph.lineIDs.count < maximumLines,
+              observedAt.timeIntervalSince(paragraph.startedAt) <= maximumDuration
+        else {
+            return false
+        }
+        let partial = incomingPartial.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !partial.isEmpty else { return false }
+        let prevText = paragraph.lastLineSourceText
+        let leftIsChinese = CaptionLanguageDetector.detect(for: prevText).isChinese
+        let rightIsChinese = CaptionLanguageDetector.detect(for: partial).isChinese
+        if leftIsChinese != rightIsChinese {
+            return false
+        }
+        if paragraph.lastLineCloseReason == .budgetRollover {
+            return true
+        }
+        let evidence = boundaryEvidence(previous: prevText, next: partial)
+        if evidence.standaloneReply {
+            return false
+        }
+        return evidence.strongIncomplete
+            || isShortFragment(prevText)
+            || evidence.correlativePair
+            || evidence.continuation
+    }
+
     static func shouldMerge(
         _ paragraph: CaptionParagraph,
         _ line: CaptionSession.Line,
-        observedAt: Date
+        observedAt: Date,
+        evidence: CaptionBoundaryEvidence? = nil
     ) -> Bool {
         guard paragraph.lineIDs.count < maximumLines else { return false }
         if let left = paragraph.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -272,8 +392,8 @@ enum CaptionParagraphAssembler {
             return false
         }
         let isRollover = paragraph.lastLineCloseReason == .budgetRollover
-        let evidence = boundaryEvidence(previous: previousText, next: line.text)
-        if !isRollover, evidence.standaloneReply {
+        let resolvedEvidence = evidence ?? boundaryEvidence(previous: previousText, next: line.text)
+        if !isRollover, resolvedEvidence.standaloneReply {
             return false
         }
         let mergeScore = score(
@@ -281,16 +401,20 @@ enum CaptionParagraphAssembler {
             next: line.text,
             gap: gap,
             previousCloseReason: paragraph.lastLineCloseReason,
-            evidence: evidence
+            evidence: resolvedEvidence
         )
-        let candidateDisplay = paragraph.candidateDisplaySourceText(appending: line.text)
-        if candidateDisplay.count > softMaxCharacterCount,
+        let candidateDisplay = paragraph.candidateDisplaySourceText(
+            appending: line.text,
+            evidence: resolvedEvidence
+        )
+        let softBudget = effectiveSoftMaxCharacterCount(for: candidateDisplay)
+        if candidateDisplay.count > softBudget,
            endsWithTerminalPunctuation(previousText),
            !isRollover,
            !isShortFragment(previousText),
-           !evidence.strongIncomplete,
-           !evidence.correlativePair,
-           !evidence.continuation {
+           !resolvedEvidence.strongIncomplete,
+           !resolvedEvidence.correlativePair,
+           !resolvedEvidence.continuation {
             return false
         }
         return mergeScore >= mergeScoreThreshold
