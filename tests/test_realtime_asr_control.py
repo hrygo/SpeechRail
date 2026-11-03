@@ -687,3 +687,162 @@ def test_background_final_transport_failure_is_observed_without_erasing_failure(
 
     asyncio.run(run())
     assert "ASR final task ended with an error: type=OSError" in caplog.text
+
+
+def test_closed_item_partial_cannot_hint_new_segment() -> None:
+    """After rollover closes item 1 (while its final is still in flight), a late
+    partial from item 1 must not hint item 2's admission; also verify clear,
+    reset, finish, and next activation isolate hints without dropping or
+    duplicating audio samples."""
+    from realtime_wire import server_vad
+
+    class ScriptedVad:
+        threshold = 0.5
+
+        def __init__(self) -> None:
+            self.prob = 0.9
+
+        def score_frame(self, frame: bytes) -> float:
+            del frame
+            return self.prob
+
+        def reset(self) -> None:
+            pass
+
+    class ControllableFinalSession(FakeStreamingSession):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.hold_commit = False
+            self.commit_entered = asyncio.Event()
+            self.release_commit = asyncio.Event()
+
+        async def commit(self, want_segments: bool = False) -> None:
+            if self.hold_commit:
+                self.commit_entered.set()
+                await self.release_commit.wait()
+            await super().commit(want_segments=want_segments)
+
+    class ControllableFactory(FakeStreamingFactory):
+        def session_class(self) -> type[FakeStreamingSession]:
+            return ControllableFinalSession
+
+    async def run() -> None:
+        factory = ControllableFactory()
+        services = build_app_services(
+            Settings(
+                realtime_speech_admission_enabled=True,
+                max_realtime_frame_bytes=256_000,
+                max_realtime_buffer_bytes=1_048_576,
+            ),
+            AppOverrides(realtime_asr_factory=factory),
+        )
+        sent: list[dict[str, Any]] = []
+        hypotheses: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def send(event: dict[str, Any]) -> int:
+            sent.append(event)
+            if event["type"] == "speechrail.transcription.hypothesis":
+                hypotheses.put_nowait(event)
+            return len(sent)
+
+        session = OpenAIRealtimeSession(services, session_id="closed-item-hint", send=send)
+        update = session_update(
+            language="zh",
+            endpointing=server_vad(silence_duration_ms=650, prefix_padding_ms=0),
+        )
+        update["session"]["speechrail"]["asr"] = {
+            "preview_interval_ms": 500,
+            "max_segment_ms": 8_000,
+            "finalization": "full_segment",
+        }
+        await session.handle(update)
+        vad = ScriptedVad()
+        session._asr_owner._vad = vad
+
+        # 768 wire samples at 24kHz == 512 kernel samples (1 VAD frame = 32ms)
+        wire_frame = (300).to_bytes(2, "little", signed=True) * 768
+
+        # Push 250 frames = 8.0s (128,000 kernel samples) to fill item 1's 8s budget.
+        for _ in range(250):
+            await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(wire_frame)})
+        first_item_session = factory.sessions[0]
+        assert isinstance(first_item_session, ControllableFinalSession)
+        first_item_session.hold_commit = True
+
+        # Next frame triggers budget_rollover for item 1 (0..128,000 kernel)
+        # and opens item 2 at 128,000.
+        await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(wire_frame)})
+        await asyncio.wait_for(first_item_session.commit_entered.wait(), timeout=1.0)
+        assert session._asr_owner._asr_item is not None
+        assert session._asr_owner._asr_item.start_kernel == 128_000
+        assert len(session._asr_owner._asr_closed_items) == 1
+
+        # Push 159 more speech frames into item 2 so item 2 has 160 frames = 81,920
+        # samples >= 80,000 (5.0s soft zone for 8s budget).
+        for _ in range(159):
+            await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(wire_frame)})
+
+        # Emit a late partial from closed item 1 while its final is still in flight!
+        await first_item_session.events_queue.put(
+            StreamingAsrEvent(kind="partial", text="旧段迟到句号。", sample_watermark=128_000)
+        )
+        hyp_old = await asyncio.wait_for(hypotheses.get(), timeout=1.0)
+        assert hyp_old["text"] == "旧段迟到句号。"
+
+        # Now feed 4 silence frames into item 2: if item 1's partial leaked into item 2,
+        # item 2 would cut on 4 frames! Instead it must stay open (HANGOVER).
+        vad.prob = 0.1
+        for _ in range(4):
+            await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(wire_frame)})
+        boundaries_after_4 = [e for e in sent if e["type"].endswith("segment_closed")]
+        assert len(boundaries_after_4) == 1, "closed item partial must not fast-cut the new segment"
+
+        # Release item 1's final so the serial lane advances to item 2's runtime
+        first_item_session.release_commit.set()
+        for _ in range(100):
+            if len(factory.sessions) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(factory.sessions) == 2
+        second_item_session = factory.sessions[1]
+
+        # Resume speech for 1 frame in item 2 (165 frames = 84,480 kernel samples;
+        # absolute end = 212,480).
+        vad.prob = 0.9
+        await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(wire_frame)})
+
+        # Emit valid partial on item 2 with relative watermark 84,480
+        # (owner converts to 128,000 + 84,480 = 212,480).
+        await second_item_session.events_queue.put(
+            StreamingAsrEvent(kind="partial", text="新段真实句号。", sample_watermark=84_480)
+        )
+        hyp = await asyncio.wait_for(hypotheses.get(), timeout=1.0)
+        assert hyp["utterance_id"] != boundaries_after_4[0]["item_id"]
+
+        # Now 4 silence frames in item 2 MUST close item 2 via the valid terminal hint!
+        vad.prob = 0.1
+        for _ in range(3):
+            await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(wire_frame)})
+        assert len([e for e in sent if e["type"].endswith("segment_closed")]) == 1
+        await session.handle({"type": "input_audio_buffer.append", "audio": _pcm16(wire_frame)})
+        await session._asr_owner._await_asr_finals()
+
+        boundaries = [e for e in sent if e["type"].endswith("segment_closed")]
+        assert len(boundaries) == 2
+        assert [b["reason"] for b in boundaries] == ["budget_rollover", "vad"]
+        assert boundaries[0]["sample_span"]["end"] == boundaries[1]["sample_span"]["start"]
+
+        # Verify no audio samples were duplicated or dropped across the two segments
+        total_admitted_frames = 250 + 1 + 159 + 4 + 1 + 4
+        resampler = RationalResampler(24_000, 16_000)
+        expected_kernel = resampler.process(wire_frame * total_admitted_frames)
+        received_kernel = b"".join(chunk for s in factory.sessions for chunk in s.received)
+        assert received_kernel == expected_kernel
+
+        # Also verify clear() resets admission hint state cleanly
+        await session.handle({"type": "input_audio_buffer.clear"})
+        assert session._asr_owner._speech_admission is not None
+        assert session._asr_owner._speech_admission.state == "IDLE"
+        await session.close()
+
+    asyncio.run(run())

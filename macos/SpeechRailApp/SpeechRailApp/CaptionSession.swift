@@ -434,6 +434,7 @@ public final class CaptionSession {
         public var speakerLabel: String?
         public var attributionUnits: [TranscriptAttributionUnit] = []
         public var speakerLabelIsManual = false
+        public var closeReason: TranscriptPreviewLedger.SegmentCloseReason?
         public var sourceLanguage: String?
         public var translatedText: String?
         public var paragraphID: String?
@@ -448,6 +449,7 @@ public final class CaptionSession {
             speakerLabel: String? = nil,
             attributionUnits: [TranscriptAttributionUnit] = [],
             speakerLabelIsManual: Bool = false,
+            closeReason: TranscriptPreviewLedger.SegmentCloseReason? = nil,
             sourceLanguage: String? = nil,
             translatedText: String? = nil,
             paragraphID: String? = nil,
@@ -461,6 +463,7 @@ public final class CaptionSession {
             self.speakerLabel = speakerLabel
             self.attributionUnits = attributionUnits
             self.speakerLabelIsManual = speakerLabelIsManual
+            self.closeReason = closeReason
             self.sourceLanguage = sourceLanguage
             self.translatedText = translatedText
             self.paragraphID = paragraphID
@@ -494,6 +497,7 @@ public final class CaptionSession {
     @ObservationIgnored private var partialTailRollbackHeldOnce = false
     /// Test/UI observation only; no persistence semantic.
     var hasOpenParagraph: Bool { openParagraphID != nil }
+    var hasPendingParagraphFlushTask: Bool { paragraphFlushTask != nil }
     /// 未定稿的增量累加结果。`nil` 表示这一轮还没开始出字。
     public private(set) var partialText: String? {
         didSet {
@@ -532,9 +536,32 @@ public final class CaptionSession {
             alreadyHeldOnce: &partialTailRollbackHeldOnce
         )
         displayedPartialItemID = itemID
-        if partialText != stabilized {
+        let didAdvance = (partialText != stabilized)
+        if didAdvance {
             partialText = stabilized
         }
+        if didAdvance, let stabilized {
+            holdOpenParagraphForActivePartialIfNeeded(stabilized)
+        }
+    }
+
+    private func holdOpenParagraphForActivePartialIfNeeded(_ partial: String) {
+        let now = Date()
+        guard let openID = openParagraphID,
+              let index = paragraphs.firstIndex(where: { $0.id == openID }),
+              CaptionParagraphAssembler.shouldHoldOpenParagraph(
+                  paragraphs[index],
+                  incomingPartial: partial,
+                  observedAt: now,
+                  assemblyEnabled: paragraphAssemblyEnabled
+              )
+        else { return }
+        paragraphs[index].lastObservedAt = now
+        scheduleParagraphFlush(
+            for: index,
+            deferImmediateFlush: true,
+            holdOverrideMilliseconds: CaptionParagraphAssembler.incompleteHoldMilliseconds
+        )
     }
 
     private func scheduleCurrentPartialTranslation(for text: String) {
@@ -1480,6 +1507,7 @@ public final class CaptionSession {
         if coordinator.occupancy?.kind == .captions {
             await coordinator.stopCapture(endingWith: .user)
         }
+        flushOpenParagraph()
         // The stop path flushes the last open paragraph. Give that final request a
         // bounded chance to finish before cancelling the queue, otherwise the last
         // translated paragraph is routinely discarded.
@@ -1545,6 +1573,9 @@ public final class CaptionSession {
 
     /// 把"正在跑"的那一套本地状态清掉，**保留已经定稿的字幕**。
     private func resetToIdleKeepingLines() {
+        paragraphFlushTask?.cancel()
+        paragraphFlushTask = nil
+        openParagraphID = nil
         phase = .idle
         level = 0
         partialText = nil
@@ -1965,6 +1996,9 @@ public final class CaptionSession {
                     text: recoveryNote.text, itemID: itemID, identity: identity,
                     boundary: boundary, formal: false
                 )
+            } else if let openID = openParagraphID,
+                      let openIdx = paragraphs.firstIndex(where: { $0.id == openID }) {
+                scheduleParagraphFlush(for: openIdx)
             }
         case .attribution(let itemID, let units, _):
             await applyAttribution(itemID: itemID, units: units, identity: identity)
@@ -2128,7 +2162,7 @@ public final class CaptionSession {
         let command = TranscriptPersistenceQueue.Command(
             sessionID: sessionID, connection: identity.connection, itemID: itemID,
             generation: identity.generation, text: text, source: audioTarget?.lineSource ?? .microphone, role: .speaker,
-            tStart: inputTimes?.start, tEnd: inputTimes?.end, formal: formal,
+            tStart: inputTimes?.start, tEnd: inputTimes?.end, closeReason: boundary?.reason, formal: formal,
             isInterrupted: false, timingQuality: .unavailable, observedAt: Date()
         )
         switch inputPersistence.enqueue(command) {
@@ -2221,6 +2255,7 @@ public final class CaptionSession {
             var line = Line(
                 id: lineID, ordinal: ordinal, text: sourceText,
                 start: command.tStart, end: command.tEnd, speakerLabel: command.speakerLabel,
+                closeReason: command.closeReason,
                 translatedText: initialDraftTranslation,
                 isTranslating: willTranslate
             )
@@ -2280,30 +2315,46 @@ public final class CaptionSession {
         initialStabilizedPrefix: String? = nil
     ) -> String {
         if let index = paragraphs.indices.last,
-           paragraphs[index].id == openParagraphID,
-           paragraphAssemblyEnabled,
-           CaptionParagraphAssembler.shouldMerge(
-                paragraphs[index],
-                line,
-                observedAt: observedAt
-           ) {
-            let paragraphID = paragraphs[index].id
-            line.paragraphID = paragraphID
-            line.translatedText = nil
-            transcriptPresentation.apply(line)
-            let hadSingleLineDraftOnly = paragraphs[index].translatedText == paragraphs[index].initialDraftTranslation
-            paragraphs[index].append(line, observedAt: observedAt)
-            if hadSingleLineDraftOnly {
-                transcriptPresentation.update(id: paragraphID) {
-                    $0.translatedText = nil
+           paragraphAssemblyEnabled {
+            let isOpen = (paragraphs[index].id == openParagraphID)
+            let prevText = paragraphs[index].lastLineSourceText
+            let evidence = CaptionParagraphAssembler.boundaryEvidence(
+                previous: prevText,
+                next: line.text
+            )
+            let isRollover = paragraphs[index].lastLineCloseReason == .budgetRollover
+            let canMergeClosed = isRollover
+                || (!evidence.standaloneReply && (
+                    evidence.strongIncomplete
+                    || CaptionParagraphAssembler.isShortFragment(prevText)
+                    || evidence.continuation
+                ))
+            if (isOpen || canMergeClosed),
+               CaptionParagraphAssembler.shouldMerge(
+                    paragraphs[index],
+                    line,
+                    observedAt: observedAt,
+                    evidence: evidence
+               ) {
+                let paragraphID = paragraphs[index].id
+                line.paragraphID = paragraphID
+                line.translatedText = nil
+                transcriptPresentation.apply(line)
+                let hadPriorTranslation = paragraphs[index].translatedText != nil
+                paragraphs[index].append(line, observedAt: observedAt, evidence: evidence)
+                if hadPriorTranslation {
+                    transcriptPresentation.update(id: paragraphID) {
+                        $0.translatedText = nil
+                    }
                 }
+                paragraphs[index].isTranslating = paragraphs[index].isTranslating || willTranslate
+                openParagraphID = paragraphID
+                pruneParagraphs()
+                if let currentIdx = paragraphs.firstIndex(where: { $0.id == paragraphID }) {
+                    scheduleParagraphFlush(for: currentIdx, deferImmediateFlush: true)
+                }
+                return paragraphID
             }
-            paragraphs[index].isTranslating = paragraphs[index].isTranslating || willTranslate
-            pruneParagraphs()
-            if let currentIdx = paragraphs.firstIndex(where: { $0.id == paragraphID }) {
-                scheduleParagraphFlush(for: currentIdx, deferImmediateFlush: true)
-            }
-            return paragraphID
         }
 
         // 新行已经证明上一段结束：不再等宽限，立刻收口并翻译。
@@ -2441,15 +2492,20 @@ public final class CaptionSession {
         }
     }
 
-    private func scheduleParagraphFlush(for index: Int, deferImmediateFlush: Bool = false) {
+    private func scheduleParagraphFlush(
+        for index: Int,
+        deferImmediateFlush: Bool = false,
+        holdOverrideMilliseconds: Int? = nil
+    ) {
         paragraphFlushTask?.cancel()
         paragraphFlushTask = nil
         guard paragraphs.indices.contains(index) else { return }
         let id = paragraphs[index].id
-        let hold = CaptionParagraphAssembler.flushDelayMilliseconds(
+        let baseHold = CaptionParagraphAssembler.flushDelayMilliseconds(
             for: paragraphs[index],
             assemblyEnabled: paragraphAssemblyEnabled
         )
+        let hold = holdOverrideMilliseconds.map { Swift.max(baseHold, $0) } ?? baseHold
         guard hold > 0 else {
             if !deferImmediateFlush {
                 flushOpenParagraph()
@@ -2606,6 +2662,16 @@ public final class CaptionSession {
               displayMode != .originalOnly,
               sourceLanguage != .chinese,
               makeTranslationClient?() != nil else { return }
+        if let openID = openParagraphID,
+           let openIdx = paragraphs.firstIndex(where: { $0.id == openID }),
+           CaptionParagraphAssembler.flushDelayMilliseconds(
+               for: paragraphs[openIdx],
+               assemblyEnabled: paragraphAssemblyEnabled
+           ) <= 0 {
+            paragraphFlushTask?.cancel()
+            paragraphFlushTask = nil
+            openParagraphID = nil
+        }
         let closedCandidates = paragraphs.filter {
             $0.id != openParagraphID && !$0.lineIDs.isEmpty
         }

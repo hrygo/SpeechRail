@@ -21,6 +21,13 @@ cd <path-to-SpeechRail>
 bash scripts/ci_quality_gate.sh --base-ref origin/main
 ```
 
+也可以直接使用一站式本地预检工具（自动按 Git 差异计算 CI Scope 并执行对应门禁）：
+
+```bash
+# 自动按变更范围执行 Quality Gates、Python 测试与 Swift 并发测试（支持 --fast / --full）
+bash scripts/ci_local_gate.sh --base-ref origin/main
+```
+
 该入口使用 `uv sync --locked --extra dev --extra mcp`，随后以 `--no-sync`
 执行 Ruff、Mypy、版本一致性、OpenAPI lint、用户文档、MCP、macOS 测试清单、macOS 路由契约及分人契约回归，
 任一步失败立即返回失败。质量检查不构建 native worker；真实制品仍由 Python 测试/打包门禁构建。

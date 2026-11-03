@@ -180,6 +180,7 @@ public enum SessionExporter {
     static func paragraphLines(_ source: [TranscriptLine]) -> [TranscriptLine] {
         var result: [TranscriptLine] = []
         var indexByParagraph: [String: Int] = [:]
+        var lastRawByIndex: [Int: String] = [:]
         for line in source {
             guard let paragraphID = line.paragraphID else {
                 result.append(line)
@@ -195,11 +196,19 @@ public enum SessionExporter {
                 if hasSpeakerConflict {
                     // Late diarization or manual speaker assignment proved a turn change
                     // inside the paragraph: split here so two speakers are never fused.
-                    indexByParagraph[paragraphID] = result.count
+                    let newIndex = result.count
+                    indexByParagraph[paragraphID] = newIndex
+                    lastRawByIndex[newIndex] = line.text
                     result.append(line)
                     continue
                 }
-                merged.text = joinedExportText([merged.text, line.text])
+                let previousRaw = lastRawByIndex[index] ?? merged.text
+                merged.text = CaptionParagraph.joinedDisplaySegment(
+                    displayHead: merged.text,
+                    lastRawSegment: previousRaw,
+                    nextRawSegment: line.text
+                )
+                lastRawByIndex[index] = line.text
                 if let end = line.tEnd { merged.tEnd = end }
                 if merged.sourceLanguage == nil { merged.sourceLanguage = line.sourceLanguage }
                 if (merged.speakerLabel?.isEmpty != false), let rightSpeaker, !rightSpeaker.isEmpty {
@@ -211,7 +220,9 @@ public enum SessionExporter {
                 merged.speakerLabelIsManual = true
                 result[index] = merged
             } else {
-                indexByParagraph[paragraphID] = result.count
+                let newIndex = result.count
+                indexByParagraph[paragraphID] = newIndex
+                lastRawByIndex[newIndex] = line.text
                 // Single-line paragraphs keep their original speaker runs; only a
                 // genuinely merged group has offsets that no longer address its text.
                 result.append(line)
@@ -221,38 +232,7 @@ public enum SessionExporter {
     }
 
     private static func joinedExportText(_ parts: [String]) -> String {
-        parts.reduce(into: "") { value, part in
-            let text = part.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return }
-            if value.isEmpty {
-                value = text
-            } else {
-                // The boundary punctuation is an ASR segmentation artifact. Remove it
-                // before joining, exactly like the live caption band does. The formal
-                // line rows keep their original punctuation in SQLite.
-                while let last = value.last, "。！？.!?;；,，:：、…".contains(last) {
-                    value.removeLast()
-                }
-                value = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let left = value.last, let right = text.first,
-                   joinsWithoutSpace(left), joinsWithoutSpace(right) {
-                    value += text
-                } else {
-                    value += " " + text
-                }
-            }
-        }
-    }
-
-    private static func joinsWithoutSpace(_ character: Character) -> Bool {
-        character.unicodeScalars.contains { scalar in
-            switch scalar.value {
-            case 0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF:
-                true
-            default:
-                false
-            }
-        }
+        CaptionParagraph.joinedDisplaySegments(parts)
     }
 
     // MARK: - Markdown

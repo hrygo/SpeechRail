@@ -80,13 +80,32 @@ GitHub Quality job 使用 Ubuntu 24.04、Python 3.14.7、uv 0.12.13 及锁定依
 本地使用：
 
 ```bash
+# 1. 运行本地一站式门禁（自动检测 Scope，全并发运行测试防范调度死锁或竞争）
+bash scripts/ci_local_gate.sh --base-ref origin/main
+
+# 2. 或手动分步运行
 bash scripts/ci_quality_gate.sh --base-ref origin/main
-swift test --package-path macos/SpeechRailApp --filter 'TeleprompterSessionLifecycleTests|SelectionLoadTests'
+swift test --package-path macos/SpeechRailApp --parallel
 bash scripts/macos_app_build.sh --configuration Debug
 ```
 
 `origin/main` 必须先同步；定向 Swift 测试只证明所选范围。完整 CI 结论仍须对应提交在
 GitHub 的全部选中 job 成功，不能由这些本地命令替代。
+
+## 并发调度与异步测试脆弱性防范（PR #447）
+
+2026-11-02 核验，PR #447（字幕软水位寻谷与续接）在 CI `Swift Package Tests` 中偶发失败于 `AppModelTests.testUnsavedPendingIsNotSilentlyDiscardedByANewGeneration`：
+```text
+XCTAssertEqual failed: ("nil") is not equal to ("Optional("第二段文稿。")")
+```
+
+### 根因与环境差异
+- **本地通过原因**：本地机器单核性能好、测试负载轻，`startSynthesisAndSave` 内部后台任务约 2–5ms 即可完成，代码中 `Task.sleep(for: .milliseconds(50))` 具有充足裕量，100% 稳定通过；
+- **CI 偶发失败原因**：CI 运行的是 `swift test --parallel`，各用例全核并发抢占线程池，后台派发的新 Task 偶发调度延迟超过 50ms，导致主测试线程的定时器先一步醒来读取到未完成的 `nil`。
+
+### 防御与本地检查改进
+1. **测试等待准则**：严禁在测试中用裸 `Task.sleep` 等待异步操作完成；必须使用状态机条件自旋轮询（如 `waitUntilDubbing`、`settle`）。只有测试“超时失效/宽限期到期”语义时才允许 sleep 跨过时间门限；
+2. **统一本地预检工具**：引入 `scripts/ci_local_gate.sh`，利用 `ci_changed_scope.py` 自动决策，并默认带 `--parallel` 跑 Swift 测试，使本地执行环境具有与 CI 相同的多任务调度竞争压力，在推送前暴露任何时序脆弱点。
 
 ## review bot 的两个应用缺陷
 

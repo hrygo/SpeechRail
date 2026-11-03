@@ -10,7 +10,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from starlette.websockets import WebSocketDisconnect
@@ -70,6 +70,56 @@ from speechrail.runtime.resource_governor import (
 from speechrail.runtime.window_pcm import PcmBudget
 
 logger = logging.getLogger(__name__)
+
+_CLOSING_WRAPPER_CHARS = frozenset("”’」』）》】)］]}\"' ")
+_TERMINAL_PUNCTUATION_CHARS = frozenset("。！？!?")
+_CLAUSE_PUNCTUATION_CHARS = frozenset(",，;；:：、")
+
+
+def _is_cjk_ideograph(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        0x4E00 <= codepoint <= 0x9FFF
+        or 0x3400 <= codepoint <= 0x4DBF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2EBEF
+    )
+
+
+def _is_explicit_chinese_language(language: object) -> bool:
+    if not isinstance(language, str):
+        return False
+    normalized = language.strip().lower().replace("_", "-")
+    if not normalized or normalized in ("auto", "und", "unknown"):
+        return False
+    return normalized == "zh" or normalized.startswith("zh-") or normalized == "chinese"
+
+
+def classify_punctuation_boundary(
+    text: str,
+    *,
+    language: object = None,
+) -> Literal["terminal", "clause"] | None:
+    """Classify the trailing punctuation of a pre-ITN ASR partial."""
+    end = len(text)
+    while end > 0 and (text[end - 1].isspace() or text[end - 1] in _CLOSING_WRAPPER_CHARS):
+        end -= 1
+    if end <= 0:
+        return None
+    last = text[end - 1]
+    if last in _TERMINAL_PUNCTUATION_CHARS:
+        return "terminal"
+    if last in _CLAUSE_PUNCTUATION_CHARS:
+        return "clause"
+    if last == ".":
+        if (
+            end >= 2
+            and _is_explicit_chinese_language(language)
+            and _is_cjk_ideograph(text[end - 2])
+        ):
+            return "terminal"
+        return None
+    return None
 
 
 @dataclass(slots=True)
@@ -396,6 +446,8 @@ class RealtimeAsrOwner:
         await self._stop_asr_reader()
         await self._close_asr_session()
         await self._release_asr()
+        if self._speech_admission is not None:
+            self._speech_admission.reset(next_sample=self._kernel_timeline.accepted_samples)
         if self._vad is not None:
             self._vad.reset()
         if self._shadow_vad is not None:
@@ -472,6 +524,29 @@ class RealtimeAsrOwner:
             if self._settings.realtime_speech_admission_enabled:
                 prefix_samples = int(prefix_padding * 16)
                 stop_frames = max(1, (silence_duration + 31) // 32)
+                candidate_policy = candidate.get("asr_policy")
+                if not isinstance(candidate_policy, ASRPolicy):
+                    candidate_policy = self.policy()
+                service_bytes = self._settings.max_realtime_buffer_bytes or 8_388_608
+                effective_ms = resolve_effective_max_segment_ms(
+                    candidate_policy,
+                    service_max_segment_ms=service_bytes // 64,
+                    capability_max_segment_ms=None,
+                    decoder_max_segment_ms=30_000,
+                )
+                soft_max_samples: int | None = None
+                soft_stop_frames: int | None = None
+                terminal_stop_frames: int | None = None
+                clause_stop_frames: int | None = None
+                if effective_ms >= 8_000 and stop_frames > 5:
+                    soft_ms = min(8_000, max(5_000, int(effective_ms * 0.55)))
+                    soft_max_samples = int(soft_ms * 16)
+                    terminal_stop_frames = min(stop_frames, max(4, stop_frames // 5))
+                    clause_stop_frames = min(stop_frames, max(8, (stop_frames * 2) // 5))
+                    # When NOT at punctuation boundary, preserve sufficient stop frames
+                    # (>= 12 frames / 384ms) so natural mid-clause breath pauses
+                    # (e.g. "叙事节奏" ... 180ms) are not split mid-sentence.
+                    soft_stop_frames = min(stop_frames, max(12, int(stop_frames * 0.85)))
                 candidate_admission = SpeechAdmission(
                     threshold=threshold,
                     # Silero already confirms speech; extra energy-VAD debounce
@@ -481,6 +556,10 @@ class RealtimeAsrOwner:
                     prefix_samples=prefix_samples,
                     frame_samples=512,
                     sample_rate=16_000,
+                    soft_max_samples=soft_max_samples,
+                    soft_stop_frames=soft_stop_frames,
+                    terminal_stop_frames=terminal_stop_frames,
+                    clause_stop_frames=clause_stop_frames,
                 )
                 # 与原实现一致: 只有 speech admission 接管时才重置采样游标与原始缓冲.
                 resets_vad_buffer = True
@@ -902,6 +981,15 @@ class RealtimeAsrOwner:
             )
             for dec in decisions:
                 await self._handle_admission_decision(dec, in_commit=in_commit)
+            if (
+                not in_commit
+                and self._asr is not None
+                and self._unflushed_bytes >= 4_096
+                and self._speech_admission.consume_soft_zone_flush_request()
+            ):
+                self._unflushed_bytes = 0
+                await self._asr.flush()
+                await asyncio.sleep(0)
 
     async def append(self, event: dict[str, Any]) -> None:
         if self._asr_input_error is not None:
@@ -1296,6 +1384,8 @@ class RealtimeAsrOwner:
         self._sync_asr_item()
         item = self._asr_item
         assert item is not None
+        if reason == "rollover" and self._speech_admission is not None:
+            self._speech_admission.advance_segment_start(item.end_kernel)
         item.commit_event_id = self._active_commit_event_id if reason == "client" else None
         item.close_reason = (
             "budget_rollover"
@@ -1411,6 +1501,8 @@ class RealtimeAsrOwner:
         self._item_end_sample = self._item_start_sample
         self._item_start_kernel = self._kernel_timeline.accepted_samples
         self._item_end_kernel = self._item_start_kernel
+        if self._speech_admission is not None:
+            self._speech_admission.advance_segment_start(self._item_start_kernel)
         self._reset_turn_observability()
         self._committed_input_generation = self._input_generation
         self._current_item_id = self._new_item_id()
@@ -1438,6 +1530,8 @@ class RealtimeAsrOwner:
         self._item_end_sample = self._wire_timeline.accepted_samples
         self._item_start_kernel = self._kernel_timeline.accepted_samples
         self._item_end_kernel = self._kernel_timeline.accepted_samples
+        if self._speech_admission is not None:
+            self._speech_admission.advance_segment_start(self._item_start_kernel)
         self._record_first_hypothesis("failed")
         self._reset_turn_observability()
         self._committed_input_generation = self._input_generation
@@ -1549,6 +1643,44 @@ class RealtimeAsrOwner:
             return CollapseResult(text=text)
         return collapse_repetitions(text, min_run=self._settings.asr_repetition_collapse_min_run)
 
+    def _update_punctuation_boundary_hint(
+        self,
+        item: _AsrItem,
+        *,
+        raw_text: str,
+        sample_watermark: int | None,
+    ) -> None:
+        admission = self._speech_admission
+        if admission is None:
+            return
+        if (
+            item.generation != self._asr_generation
+            or item is not self._asr_item
+            or item.close_reason is not None
+            or item.commit_started is not None
+            or item.item_id in self._asr_closed_items
+            or item.terminal
+        ):
+            return
+        item_samples = max(0, item.end_kernel - item.start_kernel)
+        if (
+            sample_watermark is None
+            or isinstance(sample_watermark, bool)
+            or sample_watermark <= 0
+            or sample_watermark > item_samples
+        ):
+            admission.set_punctuation_boundary_hint(None, sample_watermark=None)
+            return
+        absolute_end = item.start_kernel + sample_watermark
+        kind = classify_punctuation_boundary(
+            raw_text,
+            language=self._config.get("language"),
+        )
+        admission.set_punctuation_boundary_hint(
+            kind,
+            sample_watermark=absolute_end,
+        )
+
     async def _drain_asr_events(self, item: _AsrItem) -> None:
         asr = item.asr
         try:
@@ -1561,7 +1693,13 @@ class RealtimeAsrOwner:
                 if item.generation != self._asr_generation or item.terminal:
                     break
                 if event.kind == "partial":
-                    current_text = apply_light_itn(event.text)
+                    raw_text = event.text
+                    current_text = apply_light_itn(raw_text)
+                    self._update_punctuation_boundary_hint(
+                        item,
+                        raw_text=raw_text,
+                        sample_watermark=event.sample_watermark,
+                    )
                     if item.first_partial is None:
                         item.first_partial = time.monotonic()
                     item.preview_revision += 1
