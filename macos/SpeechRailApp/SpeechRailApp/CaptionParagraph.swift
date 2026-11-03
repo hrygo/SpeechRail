@@ -274,6 +274,7 @@ enum CaptionParagraphAssembler {
     /// 判断一段文本是否是短碎片（去除句末标点后中文/CJK <= 6字，或西文 <= 2个词）。
     /// 诸如“我们国内观众。”、“审美上, 可。”等短句，
     /// 即使末尾带句号，在实际连续语音中也绝非独立语义大段，往往是 ASR 截断伪影或句首状语/引子。
+    /// 中英混排时将西文单词折算为 2 个等效字符权重，避免长英文专名短语被误判为超短碎片。
     static func isShortFragment(_ text: String) -> Bool {
         if isStandaloneReply(text) { return false }
         let stripped = trimTrailingPunctuation(text).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -286,8 +287,18 @@ enum CaptionParagraphAssembler {
                 return false
             }
         }.count
+        let nonCJKWords = stripped.split(whereSeparator: { char in
+            guard let scalar = char.unicodeScalars.first else { return true }
+            switch scalar.value {
+            case 0x3040...0x30FF, 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF, 0xAC00...0xD7AF:
+                return true
+            default:
+                return char.isWhitespace || char.isPunctuation
+            }
+        }).count
         if cjkCount > 0 {
-            return cjkCount <= 6
+            let equivalentUnits = cjkCount + (nonCJKWords * 2)
+            return equivalentUnits <= 6
         }
         let words = stripped.split(whereSeparator: { $0.isWhitespace || $0.isPunctuation })
         return words.count <= 2
@@ -600,7 +611,7 @@ enum CaptionParagraphAssembler {
         return !closers.contains(where: { trailing.contains($0) })
     }
 
-    /// 强未完成结尾：去掉句末标点后，仍以连接词/介词/结构助词/列表引导语或书名号后孤立数词收束。
+    /// 强未完成结尾：去掉句末标点后，仍以连接词/介词/结构助词/列表引导语、引述动词、提示性短语或书名号后孤立数词收束。
     static func strongIncompleteEnding(_ text: String) -> Bool {
         if isStandaloneReply(text) { return false }
         let stripped = trimTrailingPunctuation(text).lowercased()
@@ -613,10 +624,26 @@ enum CaptionParagraphAssembler {
             "他说", "她说", "同时", "随后", "然后", "于是", "因此", "不过", "却",
             "的", "地", "得", "之", "在", "从", "向", "往", "把", "被", "对",
             "于", "由", "给", "与", "和", "跟", "同", "比", "为", "着", "名为",
-            "が", "を", "に", "は", "と", "で", "も", "から", "まで", "より",
+            "が", "を", "に", "は", "と", "で", "も", "从", "まで", "より",
             "ので", "けれど", "けど", "고", "서", "며", "지만", "는데", "를", "을",
         ]
         if suffixes.contains(where: { stripped.hasSuffix($0) }) { return true }
+
+        // 引述动词动态判定（如“员工说”、“专家指出”、“报道称”），排除自足词汇
+        let quoteVerbs = ["说", "道", "称", "表示", "认为", "指出", "解释", "强调"]
+        let selfContained = ["也就是说", "换句话说", "这么说", "怎么说", "所说", "听说", "传说", "胡说", "瞎说", "小说", "学说", "据说"]
+        if quoteVerbs.contains(where: { stripped.hasSuffix($0) }),
+           !selfContained.contains(where: { stripped.hasSuffix($0) }) {
+            return true
+        }
+
+        // 提示性下文引出短语（如“他得到一个结论”、“提出了一套方案”、“留下了一句话”）
+        if let range = stripped.range(
+            of: #"(?:得到|得出|提出|产生|发现|留下|给出|说了|留了)(?:了|过)?(?:一个|几个|几点|一套|这种)?(?:结论|想法|问题|答案|一句话|看法)$"#,
+            options: .regularExpression
+        ), !range.isEmpty {
+            return true
+        }
 
         // 书名号或引号闭合后紧跟孤立数词/破折号/短词被硬切（如“《霍比特人》一”、“《霍比特人》一意外”）
         if let range = stripped.range(
@@ -627,21 +654,41 @@ enum CaptionParagraphAssembler {
         }
 
         let english = [
-            "and", "but", "or", "because", "so", "if", "when", "which", "that",
+            "and", "but", "or", "because", "cause", "cuz", "so", "if", "when", "which", "that",
             "who", "whom", "whose", "to", "of", "in", "on", "for", "with",
             "as", "than", "then", "while", "although", "though", "unless",
             "until", "since", "including", "like", "such", "some", "others",
+            "i'm", "you're", "he's", "she's", "it's", "we're", "they're",
+            "i've", "you've", "we've", "they've",
+            "i'd", "you'd", "he'd", "she'd", "we'd", "they'd",
+            "i'll", "you'll", "he'll", "she'll", "we'll", "they'll",
+            "my", "your", "his", "her", "our", "their", "its",
+            "the", "a", "an",
         ]
         let lastToken = stripped.split(whereSeparator: {
             !$0.isLetter && $0 != "'"
         }).last.map(String.init) ?? ""
         if english.contains(lastToken) { return true }
 
-        return stripped.hasSuffix("such as") || stripped.hasSuffix("some say")
-            || stripped.hasSuffix("others say")
+        if stripped.hasSuffix("such as") || stripped.hasSuffix("some say")
+            || stripped.hasSuffix("others say") || stripped.hasSuffix("says that")
+            || stripped.hasSuffix("said that") || stripped.hasSuffix("stated that") {
+            return true
+        }
+
+        // 英文尾部分句悬空条件/状语从句（如“okay, now if you match all ten of these”）
+        let lastClause = stripped.split(separator: ",").last.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        } ?? stripped
+        let subordinateOpeners = ["if ", "when ", "while ", "although ", "unless ", "because ", "cause "]
+        if subordinateOpeners.contains(where: { lastClause.hasPrefix($0) || lastClause.contains(" " + $0) }) {
+            return true
+        }
+
+        return false
     }
 
-    /// 后一行以连接词、介词短语、连词结构（如“沉闷而无感”中的“而”）、后置复合词尾（如“之旅”“中心之一”）或小写英文开头，提示它仍在上一句里。
+    /// 后一行以连接词、顺承副词、承前省谓语、连词结构或小写英文开头，提示它仍在上一句里。
     static func continuationStart(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.first else { return false }
@@ -653,12 +700,14 @@ enum CaptionParagraphAssembler {
         let prefixes = [
             "而", "并且", "还有", "以及", "或者", "还是", "同时", "随后",
             "然后", "于是", "因此", "所以",
+            "先后", "一直", "陆续", "随之", "进而", "转而", "从而", "以便",
+            "成立了", "创建了", "建立了", "加入了", "组建了",
             "对于", "关于", "至于", "对", "在", "从", "向", "往", "由", "跟",
             "同", "随着", "为了", "因为", "由于", "正如", "比如", "例如",
             "也就是说", "换句话说", "包括", "特别是", "尤其是",
             "之旅", "之一", "之中", "之上", "之下", "之间", "之后", "之前",
             "之际", "之初", "中心之一", "必备",
-            "and ", "or ", "because ", "so ", "if ", "when ", "which ",
+            "and ", "or ", "because ", "cause ", "'cause ", "cuz ", "so ", "if ", "when ", "which ",
             "that ", "who ", "whom ", "whose ", "to ", "of ", "in ", "on ",
             "for ", "with ", "as ", "than ", "then ", "unless ",
             "until ", "since ", "including ", "such as ",
@@ -681,17 +730,27 @@ enum CaptionParagraphAssembler {
         return false
     }
 
+    private static let trailingClosers: Set<Character> = [
+        "”", "’", "\"", "'", "」", "』", "）", ")", "]", "］", "}", "｝", "〉", "》", "】"
+    ]
+
     static func endsWithTerminalPunctuation(_ text: String) -> Bool {
-        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else {
-            return false
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let last = trimmed.last, trailingClosers.contains(last) {
+            trimmed.removeLast()
+            trimmed = trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        guard let last = trimmed.last else { return false }
         return "。！？.!?…".contains(last)
     }
 
     static func endsWithClausePunctuation(_ text: String) -> Bool {
-        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else {
-            return false
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let last = trimmed.last, trailingClosers.contains(last) {
+            trimmed.removeLast()
+            trimmed = trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        guard let last = trimmed.last else { return false }
         return ",，;；:：、".contains(last)
     }
 
