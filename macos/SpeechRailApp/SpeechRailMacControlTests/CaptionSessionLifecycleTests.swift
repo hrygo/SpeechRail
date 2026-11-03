@@ -2303,9 +2303,8 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         try await h.emit(.completed(itemID: "hobbit-1", transcript: line1))
         try await h.settle { $0.session.lines.count == 1 }
 
-        // 模拟第 2 段在数秒后才定稿到达（此时第 1 段的 flush 宽限期早已到期，hasOpenParagraph 变为 false）
-        try await Task.sleep(for: .milliseconds(820))
-        XCTAssertFalse(h.session.hasOpenParagraph)
+        // 模拟第 2 段到达前，第 1 段的 flush 宽限期到期封口（hasOpenParagraph 变为 false）
+        try await h.settle { !$0.session.hasOpenParagraph }
 
         try await h.emit(.segmentClosed(
             itemID: "hobbit-2",
