@@ -244,6 +244,12 @@ public final class MeetingSession {
     /// 修订文本与输入区间按连接及 item 归属；final 到达时刻不参与声学时间。
     private var previewLedger = TranscriptPreviewLedger()
     private var previewIdentity: TranscriptPreviewLedger.Identity?
+    private var lastStabilizedPartialItemID: String?
+    private var partialRollbackHeldOnce = false
+    /// 用户在会中主动标记的重点行 ID（按会话持久化至 UserDefaults，不侵入 SQLite 表结构）。
+    public private(set) var bookmarkedLineIDs: Set<String> = []
+    /// 当首句尚在识别、尚未落定为正式行时按下「记重点」，预约标记下一条定稿行。
+    public private(set) var hasPendingBookmarkForNextLine = false
     public private(set) var windowCapture: TranscriptWindowCapture?
     private var retiredWindowCaptures: [TranscriptWindowCapture] = []
     private var windowFallbackNote: String?
@@ -798,6 +804,8 @@ public final class MeetingSession {
             currentOrdinal = 0
             lineByItem = .init()
             timingQualityApplied = []
+            bookmarkedLineIDs = Self.persistedBookmarkedLineIDs(for: record.id)
+            hasPendingBookmarkForNextLine = false
             epoch = 0
             coordinator.sessionDidStartRecording(id: record.id)
         } else {
@@ -836,7 +844,7 @@ public final class MeetingSession {
             captureTimelineOffsetSeconds: dependencies.clock.now().timeIntervalSince1970
         )
         beginWindowCapture(enabled: windowEnabled, identity: previewIdentity, captureStartedAt: dependencies.clock.now())
-        partialText = nil
+        resetPartialStabilization()
         isStoppingIntentionally = false
         isPaused = false
         // 静音状态与设备同生共死：`audio.start` 已经把闸门重置回"能说话"，这里的镜像跟上。
@@ -994,7 +1002,7 @@ public final class MeetingSession {
             uploadPump = nil
             client = nil
             level = 0
-            partialText = nil
+            resetPartialStabilization()
             isMicrophoneMuted = false
             isClosingCaptureTransport = false
         }
@@ -1008,7 +1016,9 @@ public final class MeetingSession {
         sessionID = nil
         startedAt = nil
         lines = []
-        partialText = nil
+        resetPartialStabilization()
+        bookmarkedLineIDs = []
+        hasPendingBookmarkForNextLine = false
         interruption = nil
         interruptedAt = nil
         interruptionNote = nil
@@ -1133,7 +1143,7 @@ public final class MeetingSession {
                 delta: delta,
                 eventID: envelope.metadata.eventID
             )
-            partialText = previewLedger.visiblePartial
+            applyStabilizedPartial(itemID: itemID, incoming: previewLedger.visiblePartial)
         case .partialSnapshot(let itemID, let revision, let text, _):
             guard windowCapture == nil else { return }
             _ = previewLedger.acceptSnapshot(
@@ -1143,7 +1153,7 @@ public final class MeetingSession {
                 text: text,
                 eventID: envelope.metadata.eventID
             )
-            partialText = previewLedger.visiblePartial
+            applyStabilizedPartial(itemID: itemID, incoming: previewLedger.visiblePartial)
         case .segmentClosed(let itemID, let sampleSpan, let reason, let commitEventID):
             guard windowCapture == nil else { return }
             guard let closeReason = TranscriptPreviewLedger.SegmentCloseReason(
@@ -1164,6 +1174,10 @@ public final class MeetingSession {
                 itemID: itemID,
                 transcript: transcript
             )
+            if lastStabilizedPartialItemID == itemID {
+                lastStabilizedPartialItemID = nil
+                partialRollbackHeldOnce = false
+            }
             partialText = previewLedger.visiblePartial
             guard case .commit(let committed) = outcome else { return }
             await commit(committed)
@@ -1173,6 +1187,10 @@ public final class MeetingSession {
             let recoveryNote = previewLedger.recoveryNote(identity: identity, itemID: itemID)
             let boundary = previewLedger.boundary(identity: identity, itemID: itemID)
             _ = previewLedger.resolveFailure(identity: identity, itemID: itemID)
+            if lastStabilizedPartialItemID == itemID {
+                lastStabilizedPartialItemID = nil
+                partialRollbackHeldOnce = false
+            }
             partialText = previewLedger.visiblePartial
             if let recoveryNote {
                 persistRecoveryMaterial(recoveryNote, boundary: boundary, identity: identity)
@@ -1410,6 +1428,11 @@ public final class MeetingSession {
         if sessionID == command.sessionID, command.formal {
             lineByItem[itemIdentity] = (lineID: command.lineID, ordinal: ordinal)
             currentOrdinal = max(currentOrdinal, ordinal)
+            if hasPendingBookmarkForNextLine {
+                hasPendingBookmarkForNextLine = false
+                bookmarkedLineIDs.insert(command.lineID)
+                Self.persistBookmarkedLineIDs(bookmarkedLineIDs, for: command.sessionID)
+            }
             transcriptPresentation.apply(Line(
                         id: command.lineID,
                         ordinal: ordinal,
@@ -1618,6 +1641,107 @@ public final class MeetingSession {
     public func completeTranscriptText() async throws -> String {
         guard let sessionID else { return "" }
         return try await coordinator.linesRange(sessionID: sessionID, ordinals: 1...Int.max).map(\.text).joined(separator: "\n")
+    }
+
+    // MARK: - 会中重点标记与流式预览稳定化
+
+    public enum BookmarkLatestOutcome: Equatable, Sendable {
+        case bookmarked(lineID: String, ordinal: Int)
+        case pendingNextLine
+        case unavailable
+    }
+
+    public func isBookmarked(lineID: String) -> Bool {
+        bookmarkedLineIDs.contains(lineID)
+    }
+
+    @discardableResult
+    public func toggleBookmark(lineID: String, forSessionID targetSessionID: String? = nil) -> Bool {
+        let resolvedSessionID = targetSessionID ?? sessionID
+        guard let resolvedSessionID, !lineID.isEmpty else { return false }
+        if resolvedSessionID == sessionID {
+            let nowBookmarked: Bool
+            if bookmarkedLineIDs.contains(lineID) {
+                bookmarkedLineIDs.remove(lineID)
+                nowBookmarked = false
+            } else {
+                bookmarkedLineIDs.insert(lineID)
+                nowBookmarked = true
+            }
+            Self.persistBookmarkedLineIDs(bookmarkedLineIDs, for: resolvedSessionID)
+            return nowBookmarked
+        } else {
+            var persisted = Self.persistedBookmarkedLineIDs(for: resolvedSessionID)
+            let nowBookmarked: Bool
+            if persisted.contains(lineID) {
+                persisted.remove(lineID)
+                nowBookmarked = false
+            } else {
+                persisted.insert(lineID)
+                nowBookmarked = true
+            }
+            Self.persistBookmarkedLineIDs(persisted, for: resolvedSessionID)
+            return nowBookmarked
+        }
+    }
+
+    @discardableResult
+    public func bookmarkLatestOrNextLine() -> BookmarkLatestOutcome {
+        if let latest = lines.last {
+            hasPendingBookmarkForNextLine = false
+            bookmarkedLineIDs.insert(latest.id)
+            if let sessionID {
+                Self.persistBookmarkedLineIDs(bookmarkedLineIDs, for: sessionID)
+            }
+            return .bookmarked(lineID: latest.id, ordinal: latest.ordinal)
+        }
+        guard phase.isLive else { return .unavailable }
+        hasPendingBookmarkForNextLine = true
+        return .pendingNextLine
+    }
+
+    public static func persistedBookmarkedLineIDs(
+        for sessionID: String,
+        defaults: UserDefaults = .standard
+    ) -> Set<String> {
+        guard !sessionID.isEmpty else { return [] }
+        let list = defaults.stringArray(forKey: bookmarkStorageKey(for: sessionID)) ?? []
+        return Set(list)
+    }
+
+    public static func persistBookmarkedLineIDs(
+        _ ids: Set<String>,
+        for sessionID: String,
+        defaults: UserDefaults = .standard
+    ) {
+        guard !sessionID.isEmpty else { return }
+        let key = bookmarkStorageKey(for: sessionID)
+        if ids.isEmpty {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(Array(ids).sorted(), forKey: key)
+        }
+    }
+
+    private static func bookmarkStorageKey(for sessionID: String) -> String {
+        "speechrail.meeting.bookmarks.\(sessionID)"
+    }
+
+    private func applyStabilizedPartial(itemID: String, incoming: String?) {
+        let sameItem = (lastStabilizedPartialItemID == itemID)
+        lastStabilizedPartialItemID = itemID
+        partialText = CaptionPartialStability.stabilizedDisplayPartial(
+            currentDisplayed: partialText,
+            incoming: incoming,
+            sameItem: sameItem,
+            alreadyHeldOnce: &partialRollbackHeldOnce
+        )
+    }
+
+    private func resetPartialStabilization() {
+        partialText = nil
+        lastStabilizedPartialItemID = nil
+        partialRollbackHeldOnce = false
     }
 
     // MARK: - 小工具

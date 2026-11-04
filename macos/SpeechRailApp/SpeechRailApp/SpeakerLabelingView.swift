@@ -59,16 +59,26 @@ public struct SpeakerLabelingPanel: View {
     /// 会中（记录已经在写）与会后（可以批量）的区别只有一处文案与拆出的可用性。
     public let isLive: Bool
     public let transcriptRevision: UInt64
+    public let initialEditingLabel: String?
 
     @State private var editingLabel: String?
     @State private var draftName = ""
     @State private var savedNote: String?
+    @State private var statistics: SpeakerTextStatistics?
+    @FocusState private var isNameFieldFocused: Bool
 
-    public init(labeling: SpeakerLabeling, sessionID: String, isLive: Bool, transcriptRevision: UInt64 = 0) {
+    public init(
+        labeling: SpeakerLabeling,
+        sessionID: String,
+        isLive: Bool,
+        transcriptRevision: UInt64 = 0,
+        initialEditingLabel: String? = nil
+    ) {
         self.labeling = labeling
         self.sessionID = sessionID
         self.isLive = isLive
         self.transcriptRevision = transcriptRevision
+        self.initialEditingLabel = initialEditingLabel
     }
 
     public var body: some View {
@@ -78,10 +88,33 @@ public struct SpeakerLabelingPanel: View {
             case .off: off
             case .active, .degraded: list
             }
-            SpeakerTextSharePanel(sessionID: sessionID, names: labeling.displayNames,
+            SpeakerTextSharePanel(
+                sessionID: sessionID,
+                names: labeling.displayNames,
                 displayOrdinals: SpeakerLabeling.displayOrdinals(for: labeling.labels),
-                revision: "\(transcriptRevision):\(labeling.attributionRevision)")
+                revision: "\(transcriptRevision):\(labeling.attributionRevision)",
+                onStatisticsLoaded: { statistics = $0 }
+            )
         }
+        .onAppear {
+            applyInitialEditingIfNeeded()
+        }
+        .onChange(of: initialEditingLabel) { _, _ in
+            applyInitialEditingIfNeeded()
+        }
+        .onChange(of: labeling.labels) { _, _ in
+            if editingLabel == nil {
+                applyInitialEditingIfNeeded()
+            }
+        }
+    }
+
+    private func applyInitialEditingIfNeeded() {
+        guard let target = initialEditingLabel,
+              labeling.labels.contains(target) else { return }
+        editingLabel = target
+        draftName = labeling.displayNames[target] ?? ""
+        isNameFieldFocused = true
     }
 
     private var unavailable: some View {
@@ -127,7 +160,7 @@ public struct SpeakerLabelingPanel: View {
                 }
 
                 if labeling.speakers.isEmpty {
-                    Text("当前尚未检测出独立的发言人。发言人区分需要持续的声纹特征积累；你也可以直接在左侧实时记录中点击「未标说话人」为句子指定说话人。")
+                    Text("当前尚未检测出独立的发言人。发言人区分需要持续的声纹特征积累；你也可以直接在左侧实时记录中点击「未确认说话人」为句子指定说话人。")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -159,6 +192,12 @@ public struct SpeakerLabelingPanel: View {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 SpeakerChip(label: speaker.label, displayName: labeling.displayText(for:speaker.label))
                 StatusPill(tone: speaker.displayName == nil ? .attention : .neutral, label: speaker.status)
+                if let firstTime = statistics?.firstTimestamp(for: speaker.label) {
+                    Text("首次 \(SpeechRailDisplayFormat.timecode(firstTime, rounding: .toNearestOrAwayFromZero))")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .monospacedDigit()
+                }
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                 Text("\(speaker.lineCount) 段")
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -166,11 +205,21 @@ public struct SpeakerLabelingPanel: View {
                 Button {
                     editingLabel = speaker.label
                     draftName = speaker.displayName ?? ""
+                    isNameFieldFocused = true
                 } label: {
                     RowActionGlyph(.edit)
                 }
                 .speechRailButton(.quiet)
                 .accessibilityLabel("改 \(labeling.displayText(for:speaker.label)) 的名字")
+            }
+
+            if let excerpt = statistics?.representativeExcerpt(for: speaker.label), !excerpt.isEmpty {
+                Text("代表句：「\(excerpt)」")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.hairline)
             }
 
             if editingLabel == speaker.label {
@@ -234,6 +283,7 @@ public struct SpeakerLabelingPanel: View {
                     .textFieldStyle(.plain)
                     .speechRailSingleLineInput(.regular)
                     .frame(minWidth: SpeechRailDesignTokens.Layout.speakerNameFieldMinimumWidth)
+                    .focused($isNameFieldFocused)
                     .onSubmit { Task { await save(speaker) } }
                 Button("保存") { Task { await save(speaker) } }
                     .buttonStyle(.borderedProminent)

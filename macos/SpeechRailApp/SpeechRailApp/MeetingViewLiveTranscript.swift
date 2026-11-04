@@ -6,19 +6,40 @@ import SwiftUI
 extension MeetingView {
     // MARK: - 录制中：转录流
 
+    private var displayedLiveLines: [MeetingSession.Line] {
+        guard showsLiveBookmarkedOnly, !meeting.bookmarkedLineIDs.isEmpty else {
+            return meeting.lines
+        }
+        return meeting.lines.filter { meeting.isBookmarked(lineID: $0.id) }
+    }
+
     var liveTranscript: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: 0) {
                 CardHead(
                     title: "实时记录",
                     detail: meeting.transcriptionStatusText
-                        ?? (meeting.labeling.isEnabled ? "点击发言人标签可重命名或合并" : nil)
+                        ?? (meeting.labeling.isEnabled ? "点击发言人标签可重命名或合并 · 点星标或按 ⌘B 标记重点" : "点星标或按 ⌘B 可随时标记重点")
                 ) {
                     // 稿 `screenMeetingRecording` 表头那一颗（`main.js:3642`）：会中人工标注的
                     // 入口必须看得见。点行上的标签是**第一条路**（就地改名 / 合并），这颗按钮是
                     // 同一件事的**第二条路**——会中不想在长长的转录里找标签时，从这里进来一次改完。
                     // `labeling.state` 三种（没开 / 不支持 / 在用）面板自己会说话，所以按钮常在；
                     // 会话还没建起来时不给（那时没有可标注的行）。
+                    if !meeting.bookmarkedLineIDs.isEmpty {
+                        Button {
+                            showsLiveBookmarkedOnly.toggle()
+                        } label: {
+                            Label(
+                                showsLiveBookmarkedOnly
+                                    ? "显示全部"
+                                    : "仅看重点 (\(meeting.bookmarkedLineIDs.count))",
+                                systemImage: showsLiveBookmarkedOnly ? "star.slash" : "star.fill"
+                            )
+                        }
+                        .speechRailButton(showsLiveBookmarkedOnly ? .secondary : .quiet)
+                        .help(showsLiveBookmarkedOnly ? "返回显示全部实时记录" : "仅筛选显示已标记为重点的发言")
+                    }
                     if meeting.sessionID != nil {
                         Button(
                             "复制全部文字",
@@ -45,6 +66,7 @@ extension MeetingView {
                     }
                     if meeting.sessionID != nil {
                         Button {
+                            initialEditingSpeakerLabel = nil
                             isLabelingSpeakers = true
                         } label: {
                             Label("标注说话人", systemImage: "person.2")
@@ -55,9 +77,16 @@ extension MeetingView {
                             SpeakerLabelingSheet(
                                 labeling: meeting.labeling,
                                 sessionID: meeting.sessionID,
-                                transcriptRevision: meeting.transcriptPresentation.revision
+                                transcriptRevision: meeting.transcriptPresentation.revision,
+                                initialEditingLabel: initialEditingSpeakerLabel
                             ) {
                                 isLabelingSpeakers = false
+                                initialEditingSpeakerLabel = nil
+                            }
+                        }
+                        .onChange(of: isLabelingSpeakers) { _, presented in
+                            if !presented {
+                                initialEditingSpeakerLabel = nil
                             }
                         }
                     }
@@ -68,7 +97,7 @@ extension MeetingView {
                 Group {
                     ScrollView(.vertical) {
                         LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                            if meeting.transcriptPresentation.hasEarlier {
+                            if meeting.transcriptPresentation.hasEarlier && !showsLiveBookmarkedOnly {
                                 Button(meeting.transcriptPresentation.isLoadingPage ? "正在读取…" : "载入更早记录") {
                                     Task { await loadEarlierTranscript(before: meeting.lines.first?.ordinal) }
                                 }
@@ -77,21 +106,29 @@ extension MeetingView {
                             }
                             if meeting.lines.isEmpty, meeting.partialText == nil {
                                 liveEmptyPrompt
+                            } else if displayedLiveLines.isEmpty && showsLiveBookmarkedOnly {
+                                Text("当前已加载的记录中没有重点标记。")
+                                    .font(SpeechRailDesignTokens.Typography.callout)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                    .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
                             }
-                            ForEach(meeting.lines) { line in
-                                if let before = meeting.transcriptPresentation.gapBefore(id: line.id) {
+                            ForEach(displayedLiveLines) { line in
+                                if !showsLiveBookmarkedOnly,
+                                   let before = meeting.transcriptPresentation.gapBefore(id: line.id) {
                                     Button("查看这之前的记录") { Task { await loadEarlierTranscript(before: before) } }
                                         .speechRailButton(.quiet)
                                         .disabled(meeting.transcriptPresentation.isLoadingPage)
                                 }
                                 liveLine(line).id(line.id)
                             }
-                            if let capture = meeting.windowCapture {
-                                ForEach(capture.visibleUnits, id: \.unitID) { unit in
-                                    partialLine(unit.text)
+                            if !showsLiveBookmarkedOnly {
+                                if let capture = meeting.windowCapture {
+                                    ForEach(capture.visibleUnits, id: \.unitID) { unit in
+                                        partialLine(unit.text)
+                                    }
+                                } else if let partial = meeting.partialText, !partial.isEmpty {
+                                    partialLine(partial)
                                 }
-                            } else if let partial = meeting.partialText, !partial.isEmpty {
-                                partialLine(partial)
                             }
                         }
                         .scrollTargetLayout()
@@ -242,7 +279,8 @@ extension MeetingView {
     }
 
     private func liveLine(_ line: MeetingSession.Line) -> some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+        let isBookmarked = meeting.isBookmarked(lineID: line.id)
+        return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
             let timecodeStr = TranscriptTimeWindow.timecodeColumn(
                 observed: line.start,
                 quality: line.timingQuality
@@ -296,9 +334,38 @@ extension MeetingView {
                     .help("系统在此处切换了音频输入设备，时间线与转录已自动连续对齐")
                 }
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+            Button {
+                toggleLineBookmark(lineID: line.id)
+            } label: {
+                Image(systemName: isBookmarked ? "star.fill" : "star")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(
+                        isBookmarked
+                            ? SpeechRailDesignTokens.Color.attention
+                            : SpeechRailDesignTokens.Color.inkTertiary.opacity(0.55)
+                    )
+                    .padding(SpeechRailDesignTokens.Spacing.tiny)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .speechRailPointerCursor()
+            .help(isBookmarked ? "取消重点标记" : "标记为会议重点")
+            .accessibilityLabel(isBookmarked ? "取消这句的重点标记" : "将这句标记为会议重点")
         }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
+        .background(
+            isBookmarked
+                ? SpeechRailDesignTokens.Color.attention.opacity(0.06)
+                : Color.clear,
+            in: SpeechRailDesignTokens.Corner.compactShape
+        )
         .contextMenu {
+            Button(isBookmarked ? "取消重点标记" : "标记为重点") {
+                toggleLineBookmark(lineID: line.id)
+            }
+            Divider()
             Button("复制这一句") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(line.text, forType: .string)
@@ -347,9 +414,10 @@ extension MeetingView {
         if let label {
             Menu {
                 Button {
+                    initialEditingSpeakerLabel = label
                     isLabelingSpeakers = true
                 } label: {
-                    Label("重命名或合并说话人…", systemImage: "pencil")
+                    Label("重命名说话人…", systemImage: "pencil")
                 }
                 Button {
                     Task { await meeting.markAsMe(label: label) }
@@ -382,6 +450,7 @@ extension MeetingView {
         } else if meeting.labeling.isEnabled {
             Menu {
                 Button {
+                    initialEditingSpeakerLabel = nil
                     isLabelingSpeakers = true
                 } label: {
                     Label("标注说话人…", systemImage: "pencil")

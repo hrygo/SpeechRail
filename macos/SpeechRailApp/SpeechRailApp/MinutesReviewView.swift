@@ -72,13 +72,17 @@ struct MinutesReviewView: View {
             width: SpeechRailDesignTokens.Layout.Sheet.regularWidth,
             alignment: .leading
         )
+        .onKeyPress(.escape) {
+            supplementSheetPresented = false
+            return .handled
+        }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
             // 说出处，不用让用户猜哪一段是模型写的。
             Text(model.originSummary)
-                .font(.callout)
+                .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             if model.originChanged {
                 // 改过之后出处变了，这句话必须跟着变。
@@ -164,7 +168,7 @@ struct MinutesReviewView: View {
             set: { model.update($0) }
         ))
         .focused($editorFocused)
-        .font(.body)
+        .font(SpeechRailDesignTokens.Typography.body)
         .scrollContentBackground(.hidden)
         .padding(SpeechRailDesignTokens.Spacing.md)
         .accessibilityLabel("纪要正文")

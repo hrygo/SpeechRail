@@ -71,16 +71,61 @@ extension MeetingView {
             facts: pageStatusPresentation.facts
         ) {
             if meeting.phase.isLive {
-                Button(meeting.isPaused ? "继续录制" : "暂停录制") {
-                    Task { await meeting.togglePause() }
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    if meeting.phase == .recording {
+                        bookmarkButton
+                    }
+
+                    Button(meeting.isPaused ? "继续录制" : "暂停录制") {
+                        Task { await meeting.togglePause() }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .speechRailPointerCursor()
+                    .help("只是暂时不把声音送进去；会话、文字记录都在，麦克风也还归这一场")
+                    .accessibilityLabel(meeting.isPaused ? "继续录制会议" : "暂停录制会议")
+                    .accessibilityValue(meeting.isPaused ? "已暂停" : "正在录制")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .speechRailPointerCursor()
-                .help("只是暂时不把声音送进去；会话、文字记录都在，麦克风也还归这一场")
-                .accessibilityLabel(meeting.isPaused ? "继续录制会议" : "暂停录制会议")
-                .accessibilityValue(meeting.isPaused ? "已暂停" : "正在录制")
             }
+        }
+    }
+
+    @ViewBuilder
+    private var bookmarkButton: some View {
+        let latestBookmarked = meeting.hasPendingBookmarkForNextLine
+            || (meeting.lines.last.map { meeting.isBookmarked(lineID: $0.id) } ?? false)
+        let button = Button {
+            guard !ReviewShortcutPolicy.suppressesSessionShortcuts(isTextInputFocused: isTextInputFocused) else { return }
+            triggerQuickBookmark()
+        } label: {
+            Label(
+                meeting.hasPendingBookmarkForNextLine ? "已预约重点" : "记重点",
+                systemImage: latestBookmarked ? "star.fill" : "star"
+            )
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .speechRailPointerCursor()
+        .help("将当前最新一句（或正在说的这一句）标记为会议重点（⌘B），会后筛选与生成纪要时重点关注")
+        .accessibilityLabel("标记当前发言为会议重点")
+
+        if ReviewShortcutPolicy.suppressesSessionShortcuts(isTextInputFocused: isTextInputFocused) {
+            button
+        } else {
+            button.keyboardShortcut("b", modifiers: .command)
+        }
+    }
+
+    func triggerQuickBookmark() {
+        switch meeting.bookmarkLatestOrNextLine() {
+        case .bookmarked(_, let ordinal):
+            bookmarkNoticeID = UUID()
+            bookmarkNotice = "已将第 \(ordinal) 段发言标为重点"
+        case .pendingNextLine:
+            bookmarkNoticeID = UUID()
+            bookmarkNotice = "已预约：当前正在说的这一句定稿后将自动标为重点"
+        case .unavailable:
+            break
         }
     }
 
@@ -199,6 +244,9 @@ extension MeetingView {
             facts.append("\(meeting.labeling.labels.count) 位发言人")
         }
         facts.append("\(meeting.storedLineCount) 段对话已记录")
+        if !meeting.bookmarkedLineIDs.isEmpty {
+            facts.append("\(meeting.bookmarkedLineIDs.count) 处重点")
+        }
         if meeting.gapCount > 0 { facts.append("音频衔接补偿 \(meeting.gapCount) 次") }
         if meeting.isMicrophoneMuted && !meeting.isPaused { facts.append("麦克风已静音") }
         if meeting.reconnectedSources > 0 {

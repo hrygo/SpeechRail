@@ -37,7 +37,9 @@ extension MeetingView {
     /// 不是"后台还开着的那一场"。逐行读的都是这一场自己的读数（`reviewRecord` /
     /// `reviewLines` / `reviewSpeakerNames` / `reviewMinutes`），没有一处回读 `meeting`。
     private func reviewInspectorCard(_ record: SessionRecord) -> some View {
-        CardSurface {
+        _ = reviewBookmarkRevision
+        let bookmarkCount = MeetingSession.persistedBookmarkedLineIDs(for: record.id).count
+        return CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 CardHead(title: "历史会议信息") {
                     Button("返回当前会议") { closeReview() }
@@ -54,6 +56,9 @@ extension MeetingView {
                         record.startedAt.speechRailFormatted()
                     )
                     inspectorRow("文字记录", "\(reviewLines.count) 段")
+                    if bookmarkCount > 0 {
+                        inspectorRow("重点标记", "\(bookmarkCount) 处")
+                    }
                     inspectorRow(
                         "说话人",
                         reviewSpeakerNames.isEmpty ? "还没有" : "\(reviewSpeakerNames.count) 位"
@@ -87,6 +92,9 @@ extension MeetingView {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                     inspectorRow("时长", SessionCoordinator.formatted(meeting.elapsed))
                     inspectorRow("文字记录", "\(meeting.storedLineCount) 段")
+                    if !meeting.bookmarkedLineIDs.isEmpty {
+                        inspectorRow("重点标记", "\(meeting.bookmarkedLineIDs.count) 处")
+                    }
                     inspectorRow(
                         "发言人数",
                         meeting.labeling.labels.isEmpty
