@@ -17,6 +17,7 @@ struct SpeakerLabelingSheet: View {
     let labeling: SpeakerLabeling
     let sessionID: String?
     let transcriptRevision: UInt64
+    var initialEditingLabel: String? = nil
     let onClose: () -> Void
 
     var body: some View {
@@ -29,7 +30,13 @@ struct SpeakerLabelingSheet: View {
             )
             if let sessionID {
                 ScrollView(.vertical) {
-                    SpeakerLabelingPanel(labeling: labeling, sessionID: sessionID, isLive: true, transcriptRevision: transcriptRevision)
+                    SpeakerLabelingPanel(
+                        labeling: labeling,
+                        sessionID: sessionID,
+                        isLive: true,
+                        transcriptRevision: transcriptRevision,
+                        initialEditingLabel: initialEditingLabel
+                    )
                 }
                 .scrollBounceBehavior(.basedOnSize)
             }

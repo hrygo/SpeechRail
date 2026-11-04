@@ -656,9 +656,9 @@ public struct InnerOSDrawer: View {
         let sentences = InnerOSSession.selectableSentences(in: exchange.answerText ?? "")
         return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             Text("选择要写进纪要的句子")
-                .font(.headline)
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
             Text("只勾你想要的句子。没勾的不会进纪要，也不会写进这次会议的存档。")
-                .font(.callout)
+                .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             ScrollView {
@@ -671,7 +671,7 @@ public struct InnerOSDrawer: View {
                             }
                         )) {
                             Text(sentence)
-                                .font(.body)
+                                .font(SpeechRailDesignTokens.Typography.body)
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -696,7 +696,15 @@ public struct InnerOSDrawer: View {
             }
         }
         .padding(SpeechRailDesignTokens.Layout.contentPadding)
-        .frame(minWidth: SpeechRailDesignTokens.Layout.Sheet.compactWidth, minHeight: 320, alignment: .leading)
+        .frame(
+            minWidth: SpeechRailDesignTokens.Layout.Sheet.compactWidth,
+            minHeight: SpeechRailDesignTokens.Layout.Sheet.regularMinimumHeight,
+            alignment: .leading
+        )
+        .onKeyPress(.escape) {
+            pickingSentencesFor = nil
+            return .handled
+        }
     }
 
     private func labelled(_ title: String, _ body: String) -> some View {

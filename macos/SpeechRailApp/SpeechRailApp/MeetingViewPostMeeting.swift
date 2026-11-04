@@ -6,6 +6,15 @@ import SwiftUI
 extension MeetingView {
     // MARK: - 会后
 
+    var currentBookmarkedLineIDs: Set<String> {
+        _ = reviewBookmarkRevision
+        guard let id = pageSessionID else { return [] }
+        if id == meeting.sessionID {
+            return meeting.bookmarkedLineIDs
+        }
+        return MeetingSession.persistedBookmarkedLineIDs(for: id)
+    }
+
     var postMeeting: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: 0) {
@@ -21,6 +30,18 @@ extension MeetingView {
                         .accessibilityLabel("会后视图切换")
 
                         if postTab == .minutes, let body = displayedMinutesBody, !body.isEmpty {
+                            if let editableVersion = displayedMinutesVersion {
+                                Button {
+                                    editingMinutesVersion = editableVersion
+                                } label: {
+                                    Label("核对与修改…", systemImage: "pencil.line")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .speechRailPointerCursor()
+                                .help("核对、编辑纪要正文或补充说明（另存为新版本，不覆盖原稿）")
+                            }
+
                             Button {
                                 copyMinutesToPasteboard(body)
                             } label: {
@@ -33,6 +54,29 @@ extension MeetingView {
                             .controlSize(.small)
                             .speechRailPointerCursor()
                             .help("复制纪要全文至剪贴板")
+
+                            if !reviewLines.isEmpty {
+                                Menu {
+                                    Button("复制纪要全文") {
+                                        copyMinutesToPasteboard(body)
+                                    }
+                                    Button("复制纪要 + 完整文字记录") {
+                                        copyMinutesToPasteboard(body + "\n\n---\n\n" + formattedAllTranscriptForCopy)
+                                    }
+                                    if !currentBookmarkedLineIDs.isEmpty {
+                                        Button("复制纪要 + 重点发言记录") {
+                                            copyMinutesToPasteboard(body + "\n\n---\n\n" + formattedBookmarkedTranscriptForCopy)
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "ellipsis.circle")
+                                        .font(SpeechRailDesignTokens.Typography.callout)
+                                }
+                                .menuStyle(.borderlessButton)
+                                .fixedSize()
+                                .help("更多复制选项（含纪要加文字记录组合复制）")
+                                .accessibilityLabel("更多复制选项")
+                            }
                         } else if postTab == .transcript, !filteredReviewLines.isEmpty {
                             Button {
                                 copyMinutesToPasteboard(formattedTranscriptForCopy)
@@ -71,16 +115,18 @@ extension MeetingView {
     }
 
     private var postDetail: String? {
+        let bookmarks = currentBookmarkedLineIDs.count
+        let bookmarkSuffix = bookmarks > 0 ? " · \(bookmarks) 处重点" : ""
         if reviewRecord != nil {
-            return "正在查看历史会议 · 共 \(reviewLines.count) 段发言"
+            return "正在查看历史会议 · 共 \(reviewLines.count) 段发言\(bookmarkSuffix)"
         }
         guard meeting.sessionID != nil else { return nil }
         let count = reviewLines.count
         let speakerCount = Set(reviewLines.flatMap(\.speakerLabels)).count
         if speakerCount > 0 {
-            return "共 \(count) 段发言 · \(speakerCount) 位说话人"
+            return "共 \(count) 段发言 · \(speakerCount) 位说话人\(bookmarkSuffix)"
         }
-        return "共 \(count) 段发言"
+        return "共 \(count) 段发言\(bookmarkSuffix)"
     }
 
     private var minutesBody: some View {
@@ -171,6 +217,35 @@ extension MeetingView {
             case .ready:
                 EmptyView()
             }
+            if !meeting.minutes.isBusy,
+               meeting.minutes.sessionID == pageSessionID,
+               meeting.minutes.retryableWindowCount > 0,
+               let targetSessionID = pageSessionID {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Image(systemName: "arrow.triangle.2.circlepath.circle")
+                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                        .accessibilityHidden(true)
+                    Text("有 \(meeting.minutes.retryableWindowCount) 个分窗片段尚未完成整理，已完成部分已保留。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                    Button("重试未完成片段") {
+                        Task {
+                            await meeting.minutes.retryFailedWindows(
+                                sessionID: targetSessionID,
+                                resolvedConfiguration: preferences.resolvedLLMConfiguration(for: .minutes)
+                            )
+                            await reloadPostMeeting()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .speechRailPointerCursor()
+                    .help("仅重新整理未成功的分窗片段，直接复用已完成的窗口结果")
+                }
+                .padding(SpeechRailDesignTokens.Spacing.sm)
+                .background(SpeechRailDesignTokens.Color.recessedField, in: SpeechRailDesignTokens.Corner.controlShape)
+            }
             // 「在看哪一版」是一个**有落点的状态**：点了版本列表里的旧版就必须换正文，
             // 否则那一行按下去什么都不会发生（而这正是"旧版一直可看"的承诺）。
             if let viewing = selectedMinutesVersion, viewing.id != latestVersionID {
@@ -216,35 +291,151 @@ extension MeetingView {
         }
     }
 
-    /// 文字记录搜索过滤栏。
+    /// 文字记录搜索与说话人快捷过滤栏。
     private var transcriptFilterBar: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Image(systemName: "magnifyingglass")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-            TextField("按关键词或说话人筛选文字记录…", text: $transcriptSearchText)
-                .textFieldStyle(.plain)
-                .accessibilityLabel("按关键词或说话人筛选文字记录")
-            if !transcriptSearchText.isEmpty {
-                Button {
-                    transcriptSearchText = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
+        let bookmarks = currentBookmarkedLineIDs
+        let speakerOrder = orderedReviewSpeakerLabels
+        let names = reviewSpeakerDisplayNames
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Image(systemName: "magnifyingglass")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    TextField("按关键词或说话人筛选文字记录…", text: $transcriptSearchText)
+                        .textFieldStyle(.plain)
+                        .accessibilityLabel("按关键词或说话人筛选文字记录")
+                    if !transcriptSearchText.isEmpty {
+                        Button {
+                            transcriptSearchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        }
+                        .buttonStyle(.plain)
+                        .speechRailPointerCursor()
+                        .help("清除转写筛选")
+                        .accessibilityLabel("清除转写筛选")
+                    }
+                    Text("\(filteredReviewLines.count) / \(reviewLines.count) 段")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 }
-                .buttonStyle(.plain)
-                .speechRailPointerCursor()
-                .help("清除转写筛选")
-                .accessibilityLabel("清除转写筛选")
+                .speechRailSingleLineInput(.compact)
+
+                if !bookmarks.isEmpty {
+                    Button {
+                        showsPostBookmarkedOnly.toggle()
+                    } label: {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                            Image(systemName: showsPostBookmarkedOnly ? "star.fill" : "star")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(showsPostBookmarkedOnly ? SpeechRailDesignTokens.Color.attention : SpeechRailDesignTokens.Color.inkSecondary)
+                            Text("仅看重点 (\(bookmarks.count))")
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                .foregroundStyle(showsPostBookmarkedOnly ? SpeechRailDesignTokens.Color.ink : SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.compact)
+                        .background(
+                            showsPostBookmarkedOnly
+                                ? SpeechRailDesignTokens.Color.attention.opacity(0.14)
+                                : SpeechRailDesignTokens.Color.recessedField,
+                            in: SpeechRailDesignTokens.Corner.controlShape
+                        )
+                        .overlay(
+                            SpeechRailDesignTokens.Corner.controlShape
+                                .strokeBorder(
+                                    showsPostBookmarkedOnly
+                                        ? SpeechRailDesignTokens.Color.attention.opacity(0.45)
+                                        : SpeechRailDesignTokens.Surface.border,
+                                    lineWidth: SpeechRailDesignTokens.Stroke.hairline
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .speechRailPointerCursor()
+                    .help(showsPostBookmarkedOnly ? "取消仅看重点过滤，恢复显示全部文字记录" : "只看已标星的重点发言")
+                    .accessibilityLabel("仅看重点发言")
+                    .accessibilityValue(showsPostBookmarkedOnly ? "已开启" : "未开启")
+                }
             }
-            Text("\(filteredReviewLines.count) / \(reviewLines.count) 段")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+            if speakerOrder.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        speakerFilterChip(title: "全部发言人", isSelected: selectedPostSpeakerFilter == nil) {
+                            selectedPostSpeakerFilter = nil
+                        }
+                        ForEach(speakerOrder, id: \.self) { label in
+                            let displayName = names[label] ?? "说话人 \(label)"
+                            speakerFilterChip(
+                                title: displayName,
+                                isSelected: selectedPostSpeakerFilter == label
+                            ) {
+                                selectedPostSpeakerFilter = (selectedPostSpeakerFilter == label) ? nil : label
+                            }
+                        }
+                    }
+                }
+            }
         }
-        .speechRailSingleLineInput(.compact)
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .padding(.top, SpeechRailDesignTokens.Spacing.sm)
+    }
+
+    private func speakerFilterChip(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(isSelected ? SpeechRailDesignTokens.Typography.captionMedium : SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(isSelected ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkSecondary)
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
+                .background(
+                    isSelected
+                        ? SpeechRailDesignTokens.Color.rail.opacity(0.12)
+                        : SpeechRailDesignTokens.Color.recessedField,
+                    in: Capsule()
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(
+                            isSelected
+                                ? SpeechRailDesignTokens.Color.rail.opacity(0.35)
+                                : SpeechRailDesignTokens.Surface.border,
+                            lineWidth: SpeechRailDesignTokens.Stroke.hairline
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .speechRailPointerCursor()
+        .accessibilityValue(isSelected ? "已选中" : "未选中")
+    }
+
+    private var orderedReviewSpeakerLabels: [String] {
+        let labels = reviewLines.flatMap(\.speakerLabels)
+        let ordinals = SpeakerLabeling.displayOrdinals(for: labels)
+        return ordinals.keys.sorted { (ordinals[$0] ?? .max) < (ordinals[$1] ?? .max) }
+    }
+
+    private var emptyFilteredTranscriptMessage: String {
+        let keyword = transcriptSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !keyword.isEmpty {
+            return "没有匹配「\(keyword)」的记录。"
+        }
+        if showsPostBookmarkedOnly, let speaker = selectedPostSpeakerFilter {
+            let name = reviewSpeakerDisplayNames[speaker] ?? "该说话人"
+            return "「\(name)」还没有标记为重点的发言。"
+        }
+        if showsPostBookmarkedOnly {
+            return "当前没有标记为重点的发言。"
+        }
+        if let speaker = selectedPostSpeakerFilter {
+            let name = reviewSpeakerDisplayNames[speaker] ?? "该说话人"
+            return "没有找到「\(name)」的发言记录。"
+        }
+        return "当前没有符合筛选条件的记录。"
     }
 
     private var reviewSpeakerDisplayNames: [String: String] {
@@ -256,10 +447,18 @@ extension MeetingView {
     }
 
     private var filteredReviewLines: [TranscriptLine] {
+        let bookmarks = currentBookmarkedLineIDs
+        var baseLines = reviewLines
+        if showsPostBookmarkedOnly, !bookmarks.isEmpty {
+            baseLines = baseLines.filter { bookmarks.contains($0.id) }
+        }
+        if let speakerFilter = selectedPostSpeakerFilter {
+            baseLines = baseLines.filter { $0.speakerLabels.contains(speakerFilter) }
+        }
         let keyword = transcriptSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !keyword.isEmpty else { return reviewLines }
+        guard !keyword.isEmpty else { return baseLines }
         let names = reviewSpeakerDisplayNames
-        return reviewLines.filter { line in
+        return baseLines.filter { line in
             let speakerMatches = line.speakerLabels.contains { label in
                 (names[label] ?? label).localizedCaseInsensitiveContains(keyword)
             }
@@ -298,6 +497,26 @@ extension MeetingView {
         return meeting.minutes.versions.first { $0.id == selectedMinutesVersionID }
     }
 
+    /// 当前展示的纪要版本对象（用于直接拉起核对与修改面板）。
+    private var displayedMinutesVersion: MinutesVersion? {
+        guard meeting.minutes.sessionID == pageSessionID else {
+            if let reviewMinutes, reviewMinutes.status == .ready, !(reviewMinutes.body ?? "").isEmpty {
+                return reviewMinutes
+            }
+            return nil
+        }
+        if let selectedMinutesVersion, selectedMinutesVersion.status == .ready, !(selectedMinutesVersion.body ?? "").isEmpty {
+            return selectedMinutesVersion
+        }
+        if let accepted = meeting.minutes.versions.first(where: \.isAccepted),
+           accepted.status == .ready, !(accepted.body ?? "").isEmpty {
+            return accepted
+        }
+        return meeting.minutes.versions
+            .filter { $0.status == .ready && !($0.body ?? "").isEmpty }
+            .max(by: { $0.version < $1.version })
+    }
+
     /// 正文只在这一处决定：选了旧版就显示旧版，否则是当前展示版
     /// （采用版优先，其次最新可用候选；`latestBody` 只作为版本列表还没刷出来时的兜底）。
     private var displayedMinutesBody: String? {
@@ -319,18 +538,20 @@ extension MeetingView {
 
     private var transcriptBody: some View {
         let names = reviewSpeakerDisplayNames
+        let bookmarks = currentBookmarkedLineIDs
         return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             if reviewLines.isEmpty {
                 Text("这一场还没有文字记录。")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
             } else if filteredReviewLines.isEmpty {
-                Text("没有匹配「\(transcriptSearchText)」的记录。")
+                Text(emptyFilteredTranscriptMessage)
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
             }
             ForEach(filteredReviewLines) { line in
+                let isBookmarked = bookmarks.contains(line.id)
                 let text = TranscriptSpeakerRun.formattedText(line.displaySpeakerRuns, names: names,
                     showUnknown: !line.attributionUnits.isEmpty)
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -342,10 +563,28 @@ extension MeetingView {
                         ForEach(line.displaySpeakerRuns, id: \.textStart) { run in
                             HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
                                 if run.speakerLabel != nil || !line.attributionUnits.isEmpty {
-                                    Text(run.speakerLabel.map { names[$0] ?? "说话人 \($0)" } ?? "未确认说话人")
-                                        .font(SpeechRailDesignTokens.Typography.caption)
-                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                        .frame(width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth, alignment: .leading)
+                                    if let runLabel = run.speakerLabel {
+                                        Button {
+                                            selectedPostSpeakerFilter = (selectedPostSpeakerFilter == runLabel) ? nil : runLabel
+                                        } label: {
+                                            Text(names[runLabel] ?? "说话人 \(runLabel)")
+                                                .font(SpeechRailDesignTokens.Typography.caption)
+                                                .foregroundStyle(
+                                                    selectedPostSpeakerFilter == runLabel
+                                                        ? SpeechRailDesignTokens.Color.rail
+                                                        : SpeechRailDesignTokens.Color.inkSecondary
+                                                )
+                                                .frame(width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth, alignment: .leading)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .speechRailPointerCursor()
+                                        .help(selectedPostSpeakerFilter == runLabel ? "取消按该说话人筛选" : "点击只看该说话人的发言")
+                                    } else {
+                                        Text("未确认说话人")
+                                            .font(SpeechRailDesignTokens.Typography.caption)
+                                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                            .frame(width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth, alignment: .leading)
+                                    }
                                 }
                                 Text(run.text)
                                     .font(SpeechRailDesignTokens.Typography.body)
@@ -354,11 +593,40 @@ extension MeetingView {
                             }
                         }
                     }
-                    Spacer(minLength: 0)
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                    Button {
+                        toggleLineBookmark(lineID: line.id, forSessionID: pageSessionID)
+                    } label: {
+                        Image(systemName: isBookmarked ? "star.fill" : "star")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(
+                                isBookmarked
+                                    ? SpeechRailDesignTokens.Color.attention
+                                    : SpeechRailDesignTokens.Color.inkTertiary.opacity(0.55)
+                            )
+                            .padding(SpeechRailDesignTokens.Spacing.tiny)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .speechRailPointerCursor()
+                    .help(isBookmarked ? "取消重点标记" : "标记为会议重点（重新生成纪要时将重点参考）")
+                    .accessibilityLabel(isBookmarked ? "取消这句的重点标记" : "将这句标记为会议重点")
                 }
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.tiny)
+                .background(
+                    isBookmarked
+                        ? SpeechRailDesignTokens.Color.attention.opacity(0.06)
+                        : Color.clear,
+                    in: SpeechRailDesignTokens.Corner.compactShape
+                )
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("\(Self.timecode(line.tStart ?? 0)) \(text)")
                 .contextMenu {
+                    Button(isBookmarked ? "取消重点标记" : "标记为重点") {
+                        toggleLineBookmark(lineID: line.id, forSessionID: pageSessionID)
+                    }
+                    Divider()
                     Button("复制这一句") {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(line.text, forType: .string)
@@ -381,6 +649,25 @@ extension MeetingView {
         }.joined(separator: "\n")
     }
 
+    private var formattedAllTranscriptForCopy: String {
+        let names = reviewSpeakerDisplayNames
+        return reviewLines.map { line in
+            let text = TranscriptSpeakerRun.formattedText(line.displaySpeakerRuns, names: names,
+                showUnknown: !line.attributionUnits.isEmpty)
+            return "[\(Self.timecode(line.tStart ?? 0))] \(text)"
+        }.joined(separator: "\n")
+    }
+
+    private var formattedBookmarkedTranscriptForCopy: String {
+        let names = reviewSpeakerDisplayNames
+        let bookmarks = currentBookmarkedLineIDs
+        return reviewLines.filter { bookmarks.contains($0.id) }.map { line in
+            let text = TranscriptSpeakerRun.formattedText(line.displaySpeakerRuns, names: names,
+                showUnknown: !line.attributionUnits.isEmpty)
+            return "★ [\(Self.timecode(line.tStart ?? 0))] \(text)"
+        }.joined(separator: "\n")
+    }
+
     private func reviewBody(_ record: SessionRecord) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -400,9 +687,21 @@ extension MeetingView {
                 MinutesMarkdownView(body)
             } else {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Text("这场历史会议尚未生成纪要，以下为当时的文字记录。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        Text("这场历史会议尚未生成纪要，以下为当时的文字记录。")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                        if !meeting.minutes.isBusy, !reviewLines.isEmpty {
+                            Button("整理纪要") {
+                                Task { await regenerateMinutes(for: record.id) }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .speechRailPointerCursor()
+                            .help("基于这场历史会议的文字记录生成结构化纪要")
+                        }
+                    }
                     transcriptBody
                 }
             }
