@@ -167,10 +167,16 @@ extension MeetingView {
             .buttonStyle(.plain)
             .speechRailPointerCursor()
             .help(usesMicrophone ? "已开启麦克风录制（点击可关闭）" : "麦克风已关闭（点击开启）")
+            .accessibilityLabel("麦克风收音")
+            .accessibilityValue(usesMicrophone ? "已开启" : "已关闭")
 
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
+                if reduceMotion {
                     showsSourceOptions.toggle()
+                } else {
+                    withAnimation(SpeechRailDesignTokens.Motion.smoothTransition) {
+                        showsSourceOptions.toggle()
+                    }
                 }
             } label: {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -196,6 +202,12 @@ extension MeetingView {
             .buttonStyle(.plain)
             .speechRailPointerCursor()
             .help("勾选正在发声的 App（如腾讯会议、音乐等）进行自动混音录制")
+            .accessibilityLabel("录制应用声音")
+            .accessibilityValue(
+                systemApps.isEmpty
+                    ? (showsSourceOptions ? "未选择，列表已展开" : "未选择，列表已收起")
+                    : "已选 \(systemApps.count) 个应用"
+            )
         }
     }
 

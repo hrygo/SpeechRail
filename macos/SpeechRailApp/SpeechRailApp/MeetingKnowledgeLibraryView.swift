@@ -79,9 +79,21 @@ struct MeetingKnowledgeLibraryView: View {
         let title: String
     }
 
-    public init(coordinator: SessionCoordinator) {
+    enum InitialSheet: Sendable {
+        case prep
+        case ask
+        case openItems
+    }
+
+    private let initialSheet: InitialSheet?
+
+    public init(coordinator: SessionCoordinator, initialSheet: InitialSheet? = nil) {
         self.coordinator = coordinator
+        self.initialSheet = initialSheet
         _model = State(initialValue: MeetingLibraryModel(coordinator: coordinator))
+        _askPresented = State(initialValue: initialSheet == .ask)
+        _prepPresented = State(initialValue: initialSheet == .prep)
+        _openItemsPresented = State(initialValue: initialSheet == .openItems)
     }
 
     public var body: some View {
@@ -278,6 +290,9 @@ struct MeetingKnowledgeLibraryView: View {
             // 只在点开时才查的话，标题永远是"未完成事项"没有数字。
             await model.loadOpenItems(offset: 0)
             await model.loadConflicts()
+            if initialSheet == .prep {
+                await model.loadPrepDraft()
+            }
             if model.selectedDocumentID == nil, let firstID = model.rows.first?.id {
                 await model.select(firstID)
             }
@@ -315,12 +330,11 @@ struct MeetingKnowledgeLibraryView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             HStack(alignment: .firstTextBaseline) {
                 Text("会议知识库")
-                    .font(.title2)
-                    .fontWeight(.bold)
+                    .font(SpeechRailDesignTokens.Typography.windowTitle)
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Text(subtitle)
-                    .font(.caption)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             searchField
@@ -340,8 +354,7 @@ struct MeetingKnowledgeLibraryView: View {
                                 Image(systemName: "checklist")
                                     .font(SpeechRailDesignTokens.Typography.chipIcon)
                                 Text("\(model.openItemCounts.total) 项未完成")
-                                    .font(.caption2)
-                                    .fontWeight(.medium)
+                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                             }
                             .padding(.horizontal, SpeechRailDesignTokens.Spacing.compact)
                             .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
@@ -360,8 +373,7 @@ struct MeetingKnowledgeLibraryView: View {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .font(SpeechRailDesignTokens.Typography.chipIcon)
                                 Text("\(model.conflicts.count) 处冲突")
-                                    .font(.caption2)
-                                    .fontWeight(.medium)
+                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                             }
                             .padding(.horizontal, SpeechRailDesignTokens.Spacing.compact)
                             .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
@@ -465,26 +477,26 @@ struct MeetingKnowledgeLibraryView: View {
     private func openItemRow(_ item: KnowledgeEvidence) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
             Text(item.text)
-                .font(.body)
+                .font(SpeechRailDesignTokens.Typography.body)
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 // 没记录过进度时显示"未完成"而不是"不知道"：会上定了就是定了。
                 Text(item.execution?.status.title ?? ActionExecutionStatus.open.title)
-                    .font(.caption)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(
                         item.execution?.status == .blocked
                             ? SpeechRailDesignTokens.Color.attention
                             : SpeechRailDesignTokens.Color.inkSecondary
                     )
                 if let owner = item.execution?.ownerText {
-                    Text("· \(owner)").font(.caption).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Text("· \(owner)").font(SpeechRailDesignTokens.Typography.caption).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
                 if let due = item.execution?.dueText ?? item.execution?.dueDate.map(Self.dateText) {
-                    Text("· \(due)").font(.caption).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Text("· \(due)").font(SpeechRailDesignTokens.Typography.caption).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
                 Spacer()
                 if let occurredAt = item.occurredAt {
                     Text(occurredAt.speechRailFormatted(.date))
-                        .font(.caption)
+                        .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
                 Spacer()
@@ -555,7 +567,7 @@ struct MeetingKnowledgeLibraryView: View {
     private func conflictRow(_ conflict: KnowledgeChangeProposal) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
             Text(conflict.summary)
-                .font(.callout)
+                .font(SpeechRailDesignTokens.Typography.callout)
             if let previous = conflict.previousText {
                 labelledDecision(previous, tag: "早那场")
             }
@@ -564,7 +576,7 @@ struct MeetingKnowledgeLibraryView: View {
             }
             if let detail = conflict.detail {
                 Text(detail)
-                    .font(.caption)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             Button("后一条取代前一条…") { pendingSupersession = conflict }
@@ -580,11 +592,11 @@ struct MeetingKnowledgeLibraryView: View {
     private func labelledDecision(_ text: String, tag: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
             Text(tag)
-                .font(.caption)
+                .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .frame(width: SpeechRailDesignTokens.Layout.labelledDecisionTagWidth, alignment: .leading)
             Text(text)
-                .font(.body)
+                .font(SpeechRailDesignTokens.Typography.body)
             Spacer()
         }
     }
@@ -645,9 +657,9 @@ struct MeetingKnowledgeLibraryView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text(event.status.title)
-                    .font(.callout)
+                    .font(SpeechRailDesignTokens.Typography.callout)
                 Text(event.validFrom.speechRailFormatted())
-                    .font(.caption)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 Spacer()
             }
@@ -655,11 +667,11 @@ struct MeetingKnowledgeLibraryView: View {
             let facts = Self.executionFacts(event)
             if let facts {
                 Text(facts)
-                    .font(.caption)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             if let note = event.note {
-                Text(note).font(.caption).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text(note).font(SpeechRailDesignTokens.Typography.caption).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
@@ -811,21 +823,21 @@ struct MeetingKnowledgeLibraryView: View {
                 // 拒答要说清是**哪一种**。三句话的语气完全不同：
                 // "没记录"不是"你问错了"，也不是"这件事没发生过"。
                 Text(refusal.message)
-                    .font(.callout)
+                    .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(Array(answer.draft.segments.enumerated()), id: \.offset) { _, segment in
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.hairline) {
                     Text(segment.text)
-                        .font(.body)
+                        .font(SpeechRailDesignTokens.Typography.body)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                     ForEach(segment.evidenceIDs, id: \.self) { id in
                         if let evidence = answer.retrieval.evidence.first(where: { $0.id == id }) {
                             // 出处要看得见原话。只给"来自第 2 场会"等于让用户回去自己找。
                             Text("「\(evidence.text)」")
-                                .font(.caption)
+                                .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -836,12 +848,12 @@ struct MeetingKnowledgeLibraryView: View {
             if answer.stoppedAtPageLimit {
                 // 翻页有上限，而"以为翻到底了"是这类列表问题最坏的失败形态。
                 Text("已经翻到这次检索的上限，可能还有更早的记录没被列进来。")
-                    .font(.caption)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.attention)
             }
         } else if !model.isAsking {
             Text("问一句，答案会标出依据的是哪几场会的哪几条。没有依据时它会直说没有，而不是编一段。")
-                .font(.callout)
+                .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -941,11 +953,11 @@ struct MeetingKnowledgeLibraryView: View {
     private func prepRow(_ item: KnowledgeEvidence) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
             Text(item.text)
-                .font(.body)
+                .font(SpeechRailDesignTokens.Typography.body)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text(item.status.summary)
-                    .font(.caption)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(
                         item.isEstablishedFact
                             ? SpeechRailDesignTokens.Color.inkSecondary
@@ -953,14 +965,14 @@ struct MeetingKnowledgeLibraryView: View {
                     )
                 if let occurredAt = item.occurredAt {
                     Text("· \(occurredAt.speechRailFormatted(.date))")
-                        .font(.caption)
+                        .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
             }
             ForEach(item.anchors) { anchor in
                 if let quote = anchor.quote, !quote.isEmpty {
                     Text("「\(quote)」")
-                        .font(.caption)
+                        .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -998,7 +1010,7 @@ struct MeetingKnowledgeLibraryView: View {
             // 说清当前筛在哪儿，否则用户不知道列表为什么少了。
             Label(model.projectID.flatMap { id in model.projects.first { $0.id == id }?.name }
                 ?? "全部项目", systemImage: "folder")
-                .font(.callout)
+                .font(SpeechRailDesignTokens.Typography.callout)
         }
         .menuStyle(.borderlessButton)
         .controlSize(.small)
@@ -1015,7 +1027,7 @@ struct MeetingKnowledgeLibraryView: View {
             set: { value in Task { await model.setIncludesArchived(value) } }
         )) {
             Text("连归档的一起列")
-                .font(.caption)
+                .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
         .toggleStyle(.checkbox)
@@ -1032,7 +1044,7 @@ struct MeetingKnowledgeLibraryView: View {
     private var searchField: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             Image(systemName: "magnifyingglass")
-                .font(.callout)
+                .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .accessibilityHidden(true)
             TextField("搜索标题、项目或会议里说过的话", text: $searchText)
@@ -1058,7 +1070,7 @@ struct MeetingKnowledgeLibraryView: View {
         if model.listError != nil {
             // 故障只说当前问题和一个有效出口，不堆一串可能的原因。
             VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Text("读不了会议列表").font(.headline)
+                Text("读不了会议列表").font(SpeechRailDesignTokens.Typography.sectionTitle)
                 Button("重试") { Task { await model.reload() } }
             }
             .padding(SpeechRailDesignTokens.Layout.contentPadding)
@@ -1125,7 +1137,7 @@ struct MeetingKnowledgeLibraryView: View {
                             Task { await model.loadMore() }
                         }
                         .buttonStyle(.link)
-                        .font(.callout)
+                        .font(SpeechRailDesignTokens.Typography.callout)
                         .accessibilityHint("列表按时间倒序排列，翻页不会重复或漏掉会议")
                         Spacer()
                     }
@@ -1151,7 +1163,7 @@ struct MeetingKnowledgeLibraryView: View {
     private var detailColumn: some View {
         if model.detailError != nil {
             VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Text("读不了这场会议").font(.headline)
+                Text("读不了这场会议").font(SpeechRailDesignTokens.Typography.sectionTitle)
                 Button("重试") { Task { await model.open(documentID: model.selectedDocumentID ?? "") } }
             }
             .padding(SpeechRailDesignTokens.Layout.contentPadding)
@@ -1211,15 +1223,13 @@ struct MeetingKnowledgeLibraryView: View {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Text(snapshot.title)
-                            .font(.title2)
-                            .fontWeight(.bold)
+                            .font(SpeechRailDesignTokens.Typography.windowTitle)
                             .textSelection(.enabled)
                             .accessibilityAddTraits(.isHeader)
 
                         if snapshot.status != .active {
                             Text(snapshot.status.title)
-                                .font(.caption2)
-                                .fontWeight(.medium)
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
                                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.compact)
                                 .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                                 .background(SpeechRailDesignTokens.Color.recessedField, in: SpeechRailDesignTokens.Corner.compactShape)
@@ -1231,10 +1241,10 @@ struct MeetingKnowledgeLibraryView: View {
                         if let date = snapshot.occurredAt {
                             HStack(spacing: SpeechRailDesignTokens.Spacing.tiny) {
                                 Image(systemName: "calendar")
-                                    .font(.caption2)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
                                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                                 Text(date.speechRailFormatted())
-                                    .font(.caption)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
                                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             }
                         }
@@ -1242,16 +1252,16 @@ struct MeetingKnowledgeLibraryView: View {
                            let project = model.projects.first(where: { $0.id == projectID }) {
                             HStack(spacing: SpeechRailDesignTokens.Spacing.tiny) {
                                 Image(systemName: "folder")
-                                    .font(.caption2)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
                                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                                 Text(project.name)
-                                    .font(.caption)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
                                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             }
                         }
                         ForEach(model.documentTags, id: \.self) { tag in
                             Text("#\(tag)")
-                                .font(.caption2)
+                                .font(SpeechRailDesignTokens.Typography.caption)
                                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.compact)
                                 .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                                 .background(SpeechRailDesignTokens.Color.recessedField, in: SpeechRailDesignTokens.Corner.compactShape)
@@ -1279,7 +1289,7 @@ struct MeetingKnowledgeLibraryView: View {
                         }
                     } label: {
                         Image(systemName: "trash")
-                            .font(.callout)
+                            .font(SpeechRailDesignTokens.Typography.callout)
                             .foregroundStyle(SpeechRailDesignTokens.Color.critical)
                     }
                     .buttonStyle(.borderless)
@@ -1319,21 +1329,21 @@ struct MeetingKnowledgeLibraryView: View {
         if let hint = model.changeProposalsHint {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text(hint)
-                    .font(.callout)
+                    .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.attention)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } else if !model.changeProposals.isEmpty {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text(model.changeProposalsHeadline)
-                    .font(.headline)
+                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
                     .accessibilityAddTraits(.isHeader)
                 ForEach(model.changeProposals) { proposal in
                     changeProposalRow(proposal)
                 }
                 // 说清它是建议：**系统没有因为这份清单改过任何东西**。
                 Text("这些只是候选差异。系统没有替你改任何一条，要不要算同一条由你定。")
-                    .font(.caption)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             Divider()
@@ -1345,7 +1355,7 @@ struct MeetingKnowledgeLibraryView: View {
     private func changeProposalRow(_ proposal: KnowledgeChangeProposal) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             Text(proposal.title)
-                .font(.callout)
+                .font(SpeechRailDesignTokens.Typography.callout)
             if let previous = proposal.previousText {
                 labelledDecision(previous, tag: "上一版")
             }
@@ -1354,7 +1364,7 @@ struct MeetingKnowledgeLibraryView: View {
             }
             if let detail = proposal.detail {
                 Text(detail)
-                    .font(.caption)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
         }
@@ -1497,9 +1507,9 @@ struct MeetingKnowledgeLibraryView: View {
 
     private func archiveCount(_ label: String, _ value: Int) -> some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(label).font(.callout).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            Text(label).font(SpeechRailDesignTokens.Typography.callout).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             Spacer()
-            Text("\(value)").font(.callout).monospacedDigit()
+            Text("\(value)").font(SpeechRailDesignTokens.Typography.technicalValue)
         }
     }
 
@@ -1706,7 +1716,7 @@ struct MeetingKnowledgeLibraryView: View {
         if let body = snapshot.minutesBody, !body.isEmpty {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Text(body)
-                    .font(.body)
+                    .font(SpeechRailDesignTokens.Typography.body)
                     .textSelection(.enabled)
                     .lineSpacing(5)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1715,13 +1725,13 @@ struct MeetingKnowledgeLibraryView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Image(systemName: "doc.text")
-                        .font(.title3)
+                        .font(SpeechRailDesignTokens.Typography.sheetTitle)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                         Text("这场会议还没有整理出纪要")
-                            .font(.headline)
+                            .font(SpeechRailDesignTokens.Typography.sectionTitle)
                         Text("录音原始转录已完整留存。你可以直接查看转录，或删除这场记录。")
-                            .font(.caption)
+                            .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
                 }
@@ -1749,7 +1759,7 @@ struct MeetingKnowledgeLibraryView: View {
             Divider()
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
             Text("结论与待办")
-                .font(.headline)
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
                 .accessibilityAddTraits(.isHeader)
             ForEach(snapshot.items) { item in
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -1767,19 +1777,18 @@ struct MeetingKnowledgeLibraryView: View {
 
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tiny) {
                         Text(item.text)
-                            .font(.body)
+                            .font(SpeechRailDesignTokens.Typography.body)
                             .textSelection(.enabled)
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Text(item.kind)
-                                .font(.caption2)
+                                .font(SpeechRailDesignTokens.Typography.caption)
                                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
                                 .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                                 .background(SpeechRailDesignTokens.Color.recessedField, in: SpeechRailDesignTokens.Corner.compactShape)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             if item.status.needsReview {
                                 Text("待核对")
-                                    .font(.caption2)
-                                    .fontWeight(.medium)
+                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
                                     .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                                     .background(SpeechRailDesignTokens.Surface.attentionTint, in: SpeechRailDesignTokens.Corner.compactShape)
@@ -1787,8 +1796,7 @@ struct MeetingKnowledgeLibraryView: View {
                             }
                             if item.status.isDisputed {
                                 Text("有分歧")
-                                    .font(.caption2)
-                                    .fontWeight(.medium)
+                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
                                     .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                                     .background(SpeechRailDesignTokens.Surface.criticalTint, in: SpeechRailDesignTokens.Corner.compactShape)
@@ -1796,7 +1804,7 @@ struct MeetingKnowledgeLibraryView: View {
                             }
                             if !item.status.isCurrent {
                                 Text("历史版本")
-                                    .font(.caption2)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
                                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             }
                         }
@@ -1812,13 +1820,13 @@ struct MeetingKnowledgeLibraryView: View {
     private func transcriptSection(_ snapshot: MeetingReviewSnapshot) -> some View {
         if snapshot.transcriptLines.isEmpty {
             Text("这场会没有留存转录。")
-                .font(.callout)
+                .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         } else {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 HStack {
                     Text("录音完整转录（共 \(snapshot.transcriptLines.count) 句）")
-                        .font(.caption)
+                        .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     Spacer()
                     Button {
@@ -1827,7 +1835,7 @@ struct MeetingKnowledgeLibraryView: View {
                         NSPasteboard.general.setString(fullTranscript, forType: .string)
                     } label: {
                         Label("复制全文", systemImage: "doc.on.doc")
-                            .font(.caption)
+                            .font(SpeechRailDesignTokens.Typography.caption)
                     }
                     .buttonStyle(.link)
                 }
@@ -1836,13 +1844,12 @@ struct MeetingKnowledgeLibraryView: View {
                 ForEach(Array(snapshot.transcriptLines.enumerated()), id: \.offset) { index, line in
                     HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
                         Text("\(index + 1)")
-                            .font(.caption2)
-                            .monospacedDigit()
+                            .font(SpeechRailDesignTokens.Typography.technical)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                             .frame(width: SpeechRailDesignTokens.Layout.transcriptLineNumberWidth, alignment: .trailing)
 
                         Text(line)
-                            .font(.body)
+                            .font(SpeechRailDesignTokens.Typography.body)
                             .textSelection(.enabled)
                             .lineSpacing(SpeechRailDesignTokens.Spacing.micro)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1875,19 +1882,19 @@ struct MeetingLibraryRowView: View {
 
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tiny) {
                 Text(row.title)
-                    .font(.body.weight(.medium))
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     if let date = row.occurredAt {
                         Text(date.speechRailFormatted(.date))
-                            .font(.caption)
+                            .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
                     if let project = row.projectName {
                         Text(project)
-                            .font(.caption2)
+                            .font(SpeechRailDesignTokens.Typography.caption)
                             .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
                             .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                             .background(SpeechRailDesignTokens.Color.recessedField, in: SpeechRailDesignTokens.Corner.compactShape)
@@ -1895,8 +1902,7 @@ struct MeetingLibraryRowView: View {
                     }
                     if row.needsReviewCount > 0 {
                         Text("\(row.needsReviewCount) 条待核对")
-                            .font(.caption2)
-                            .fontWeight(.medium)
+                            .font(SpeechRailDesignTokens.Typography.captionMedium)
                             .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
                             .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                             .background(SpeechRailDesignTokens.Surface.attentionTint, in: SpeechRailDesignTokens.Corner.compactShape)
@@ -1904,20 +1910,20 @@ struct MeetingLibraryRowView: View {
                     }
                     if !row.hasMinutes {
                         Text("未整理")
-                            .font(.caption2)
+                            .font(SpeechRailDesignTokens.Typography.caption)
                             .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
                             .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                             .background(SpeechRailDesignTokens.Color.recessedField, in: SpeechRailDesignTokens.Corner.compactShape)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
                     ForEach(row.tags, id: \.self) { tag in
-                        Text("#\(tag)").font(.caption).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        Text("#\(tag)").font(SpeechRailDesignTokens.Typography.caption).foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
                 }
 
                 if let excerpt = row.matchExcerpt {
                     Text(excerpt)
-                        .font(.caption)
+                        .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .lineLimit(2)
                         .textSelection(.disabled)

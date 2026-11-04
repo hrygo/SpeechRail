@@ -50,6 +50,7 @@ public struct MeetingView: View {
     /// 完整会议知识库（MA-12）。这一段只快取最近几场，
     /// 「查看全部」才是完整分页列表——静默截断到 8 场会让人以为其余的没了（MC-52）。
     @State var showsKnowledgeLibrary = false
+    @State var knowledgeLibraryInitialSheet: MeetingKnowledgeLibraryView.InitialSheet?
     @State var reviewRecord: SessionRecord?
     @State var reviewLines: [TranscriptLine] = []
     @State var reviewSpeakerNames: [String: String] = [:]
@@ -60,12 +61,27 @@ public struct MeetingView: View {
     /// 纪要一键复制反馈。
     @State var copiedNotice: String?
     @State var copiedNoticeID = UUID()
+    @State var bookmarkNotice: String?
+    @State var bookmarkNoticeID = UUID()
     @State var operationError: String?
     @State var recoveryFeedback: OperationFeedback?
     /// 文字记录搜索过滤关键字。
     @State var transcriptSearchText = ""
+    /// 会后文字记录按单个说话人快速筛选（nil = 全部说话人）。
+    @State var selectedPostSpeakerFilter: String?
+    /// 会中与会后「仅看重点」过滤开关。
+    @State var showsLiveBookmarkedOnly = false
+    @State var showsPostBookmarkedOnly = false
+    /// 历史会议重点标记变更计数（驱动非当前录制会话的 SwiftUI 视图刷新）。
+    @State var reviewBookmarkRevision: UInt64 = 0
+    /// 会后主工作区直接打开「核对与修改纪要」面板的目标版本。
+    @State var editingMinutesVersion: MinutesVersion?
     /// 录制中打开「标注说话人」面板（稿 `screenMeetingRecording` 表头那一颗）。
     @State var isLabelingSpeakers = false
+    /// 行内点击说话人标签直达改名时预选的标签。
+    @State var initialEditingSpeakerLabel: String?
+    /// 文本编辑控件是否正持有焦点（MC-73 快捷键抑制守卫）。
+    @State var isTextInputFocused = false
 
     /// 空态里「想连电脑里的声音一起记」那一行可选项的展开态。
     @State var showsSourceOptions = false
@@ -298,9 +314,18 @@ public struct MeetingView: View {
             }
         }
         .onChange(of: pageSessionID) { _, newValue in
-            // 换一场会就复位：上一场的回看位置不该带过来。
+            // 换一场会就复位：上一场的回看位置与筛选开关不该带过来。
             transcriptFollow = transcriptFollow.reset()
+            showsLiveBookmarkedOnly = false
+            showsPostBookmarkedOnly = false
+            selectedPostSpeakerFilter = nil
+            editingMinutesVersion = nil
             Task { await meeting.innerOS.bind(sessionID: newValue) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .speechRailTextInputFocusChanged)) { notification in
+            if let focused = notification.object as? Bool {
+                isTextInputFocused = focused
+            }
         }
         .confirmationDialog(
             "结束这一场会议？",
@@ -312,19 +337,58 @@ public struct MeetingView: View {
         } message: {
             Text("麦克风同一时刻只能由一个会话使用。结束后文字记录会留着，接着开始整理纪要。")
         }
-        .sheet(isPresented: $showsKnowledgeLibrary) {
-            MeetingKnowledgeLibraryView(coordinator: session)
+        .sheet(
+            isPresented: $showsKnowledgeLibrary,
+            onDismiss: { knowledgeLibraryInitialSheet = nil }
+        ) {
+            MeetingKnowledgeLibraryView(
+                coordinator: session,
+                initialSheet: knowledgeLibraryInitialSheet
+            )
+            .frame(
+                minWidth: SpeechRailDesignTokens.Layout.meetingLibraryMinimumWidth,
+                idealWidth: SpeechRailDesignTokens.Layout.meetingLibraryIdealWidth,
+                minHeight: SpeechRailDesignTokens.Layout.meetingLibraryMinimumHeight,
+                idealHeight: SpeechRailDesignTokens.Layout.meetingLibraryIdealHeight
+            )
+        }
+        .sheet(
+            item: $editingMinutesVersion,
+            onDismiss: { Task { await reloadPostMeeting() } }
+        ) { version in
+            if let targetSessionID = pageSessionID {
+                SpeechRailSheetScaffold(
+                    title: "核对与修改纪要",
+                    subtitle: "修改或补充内容将另存为新版本，AI 原始生成版本始终保留可查。",
+                    onClose: { editingMinutesVersion = nil }
+                ) {
+                    MinutesReviewView(
+                        coordinator: session,
+                        sessionID: targetSessionID,
+                        version: version
+                    )
+                } footer: {
+                    Spacer(minLength: 0)
+                    Button("完成") { editingMinutesVersion = nil }
+                        .speechRailButton(.primary)
+                        .keyboardShortcut(.defaultAction)
+                }
                 .frame(
-                    minWidth: SpeechRailDesignTokens.Layout.meetingLibraryMinimumWidth,
-                    idealWidth: SpeechRailDesignTokens.Layout.meetingLibraryIdealWidth,
-                    minHeight: SpeechRailDesignTokens.Layout.meetingLibraryMinimumHeight,
-                    idealHeight: SpeechRailDesignTokens.Layout.meetingLibraryIdealHeight
+                    minWidth: SpeechRailDesignTokens.Layout.Sheet.prominentWidth,
+                    minHeight: SpeechRailDesignTokens.Layout.Sheet.regularHeight
                 )
+                .onKeyPress(.escape) {
+                    editingMinutesVersion = nil
+                    return .handled
+                }
+            }
         }
         .operationFeedback([
             recoveryFeedback,
             OperationFeedback(operationError, onDismiss: { operationError = nil }),
             OperationFeedback(adoptConflictNotice, title: "纪要未采用", onDismiss: { adoptConflictNotice = nil }),
+            OperationFeedback(bookmarkNotice, tone: .healthy, title: "重点标记", id: bookmarkNoticeID.uuidString, autoDismiss: true,
+                              onDismiss: { bookmarkNotice = nil }),
             OperationFeedback(transcriptCopyMessage,
                               tone: transcriptCopyMessage == "已复制全文" ? .healthy : .critical,
                               title: transcriptCopyMessage == "已复制全文" ? "已复制" : "复制未完成",
@@ -338,6 +402,23 @@ public struct MeetingView: View {
 
     private var shouldShowInnerOSDrawer: Bool {
         meeting.phase != .idle || pageSessionID != nil
+    }
+
+    func toggleLineBookmark(lineID: String, forSessionID targetSessionID: String? = nil) {
+        let resolvedID = targetSessionID ?? pageSessionID ?? meeting.sessionID
+        meeting.toggleBookmark(lineID: lineID, forSessionID: resolvedID)
+        reviewBookmarkRevision &+= 1
+        if meeting.bookmarkedLineIDs.isEmpty {
+            showsLiveBookmarkedOnly = false
+        }
+        if let resolvedID {
+            let remaining = (resolvedID == meeting.sessionID)
+                ? meeting.bookmarkedLineIDs
+                : MeetingSession.persistedBookmarkedLineIDs(for: resolvedID)
+            if remaining.isEmpty {
+                showsPostBookmarkedOnly = false
+            }
+        }
     }
 
     // MARK: - 版面契约（右栏收起）

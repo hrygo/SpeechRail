@@ -149,11 +149,13 @@ public final class MinutesGenerator {
                 state = .failed("这一场没有可整理的正文。")
                 return
             }
-            // MC-43/MC-35/MC-36：快照输入 = 转录终稿 + 已校验的用户补充。
+            // MC-43/MC-35/MC-36：快照输入 = 转录终稿 + 已校验的用户补充 + 会中重点标记。
             // 未逐字命中的引文整条丢弃，不进入 prompt。
-            let supplements = Self.userSupplements(
+            let supplements = Self.combinedSupplements(
                 exchanges: (try? await coordinator.innerOSExchanges(sessionID: sessionID)) ?? [],
-                verifiedExchangeIDs: await Self.verifiedSupplementIDs(coordinator: coordinator, sessionID: sessionID)
+                verifiedExchangeIDs: await Self.verifiedSupplementIDs(coordinator: coordinator, sessionID: sessionID),
+                units: units,
+                bookmarkedLineIDs: MeetingSession.persistedBookmarkedLineIDs(for: sessionID)
             )
             // MA-07：配置与来源快照在**排队这一刻**冻下来（MC-20/MC-32）。
             // 任务跑着的时候改设置，当前任务不跟着换；新配置从下一次任务生效。
@@ -282,9 +284,11 @@ public final class MinutesGenerator {
                 return
             }
             // MC-43/MC-35/MC-36：恢复续跑同样走快照输入，已校验的用户补充才带入。
-            let supplements = Self.userSupplements(
+            let supplements = Self.combinedSupplements(
                 exchanges: (try? await coordinator.innerOSExchanges(sessionID: row.sessionID)) ?? [],
-                verifiedExchangeIDs: await Self.verifiedSupplementIDs(coordinator: coordinator, sessionID: row.sessionID)
+                verifiedExchangeIDs: await Self.verifiedSupplementIDs(coordinator: coordinator, sessionID: row.sessionID),
+                units: units,
+                bookmarkedLineIDs: MeetingSession.persistedBookmarkedLineIDs(for: row.sessionID)
             )
             versions = try await coordinator.minutesVersions(sessionID: row.sessionID)
             versionsNeedingReview = await Self.reviewIDs(coordinator: coordinator, sessionID: row.sessionID)
@@ -464,12 +468,14 @@ public final class MinutesGenerator {
                 state = .failed("这一场没有可整理的正文。")
                 return
             }
-            let supplements = Self.userSupplements(
+            let supplements = Self.combinedSupplements(
                 exchanges: (try? await coordinator.innerOSExchanges(sessionID: sessionID)) ?? [],
                 verifiedExchangeIDs: await Self.verifiedSupplementIDs(
                     coordinator: coordinator,
                     sessionID: sessionID
-                )
+                ),
+                units: units,
+                bookmarkedLineIDs: MeetingSession.persistedBookmarkedLineIDs(for: sessionID)
             )
             // 重试认的是**原来那次任务**冻结的配置：换了端点的结果
             // 不能混进同一版里（MC-32）。
@@ -1037,18 +1043,49 @@ public final class MinutesGenerator {
         )
     }
 
+    /// 将用户在会中主动标星的重点发言格式化为补充提示；当无重点标记时返回空串，保证既有 `inputFingerprint` 幂等。
+    public static func bookmarkedSupplementsSection(
+        units: [MinutesSourceUnit],
+        bookmarkedLineIDs: Set<String>
+    ) -> String {
+        guard !bookmarkedLineIDs.isEmpty else { return "" }
+        let matched = units.filter { bookmarkedLineIDs.contains($0.lineID) }
+        guard !matched.isEmpty else { return "" }
+        let lines = matched.map { unit in
+            "- [\(unit.id)] \(unit.speakerText)"
+        }.joined(separator: "\n")
+        return "【用户标记的本场重点发言（若包含决议、待办或未决问题请优先提炼，引用时须使用对应 [uX] 编号）】\n\(lines)"
+    }
+
+    static func combinedSupplements(
+        exchanges: [InnerOSExchange],
+        verifiedExchangeIDs: Set<String>,
+        units: [MinutesSourceUnit],
+        bookmarkedLineIDs: Set<String>
+    ) -> String {
+        let base = userSupplements(exchanges: exchanges, verifiedExchangeIDs: verifiedExchangeIDs)
+        let bookmarks = bookmarkedSupplementsSection(units: units, bookmarkedLineIDs: bookmarkedLineIDs)
+        if bookmarks.isEmpty { return base }
+        if base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return bookmarks }
+        return base + "\n\n" + bookmarks
+    }
+
     /// Prompt。三条硬要求：**只依据转录与已校验的用户补充**、
     /// **不知道就写不知道**（与内心 OS 同一条规矩）、**用户补充不升级成会议事实**。
     /// 第四条是 MA-08 加的：**每条结论都要指明依据哪几个来源单元**，
     /// 并把"是建议还是有条件"如实写进 modality —— 验证器会拿这些去核对转录。
     static func prompt(transcript: String, supplements: String = "") -> [LLMMessage] {
         let userText: String
-        if supplements.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let trimmedSupplements = supplements.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedSupplements.isEmpty {
             userText = "下面是这一场的转录：\n\n\(transcript)"
+        } else if trimmedSupplements.hasPrefix("【用户标记的本场重点发言") {
+            userText = "下面是这一场的转录：\n\n\(transcript)"
+                + "\n\n\(trimmedSupplements)"
         } else {
             userText = "下面是这一场的转录：\n\n\(transcript)"
                 + "\n\n下面是用户明确选择写进纪要的私密问答补充（标为用户选择的 AI 补充，"
-                + "不得当成会议现场的发言或决定）：\n\n\(supplements)"
+                + "不得当成会议现场的发言或决定；若末尾附有【用户标记的本场重点发言】，则该部分属于会议现场发言，请优先提炼）：\n\n\(supplements)"
         }
         return [
             LLMMessage(

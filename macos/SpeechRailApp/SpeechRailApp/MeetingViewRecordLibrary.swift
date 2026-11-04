@@ -13,20 +13,41 @@ extension MeetingView {
                     title: "会议记录库",
                     detail: recent.isEmpty ? "最近会议" : "最近 \(min(recent.count, Self.quickAccessMeetingLimit)) 场 · 共 \(recent.count) 场"
                 ) {
-                    Button {
-                        showsKnowledgeLibrary = true
-                    } label: {
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                            Text("全部知识库")
-                                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                            Image(systemName: "chevron.right")
-                                .font(SpeechRailDesignTokens.Typography.chipIcon)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        if !recent.isEmpty {
+                            Button {
+                                knowledgeLibraryInitialSheet = .prep
+                                showsKnowledgeLibrary = true
+                            } label: {
+                                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                                    Image(systemName: "doc.text")
+                                        .font(SpeechRailDesignTokens.Typography.chipIcon)
+                                    Text("会前准备稿")
+                                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                }
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            }
+                            .buttonStyle(.plain)
+                            .speechRailPointerCursor()
+                            .help("汇总往期会议的未决问题与待办事项，辅助本次会前准备")
                         }
-                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+
+                        Button {
+                            knowledgeLibraryInitialSheet = nil
+                            showsKnowledgeLibrary = true
+                        } label: {
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                                Text("全部知识库")
+                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                Image(systemName: "chevron.right")
+                                    .font(SpeechRailDesignTokens.Typography.chipIcon)
+                            }
+                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        }
+                        .buttonStyle(.plain)
+                        .speechRailPointerCursor()
+                        .help("打开完整的会议知识库，包含跨会议问答、项目分类和未完成事项")
                     }
-                    .buttonStyle(.plain)
-                    .speechRailPointerCursor()
-                    .help("打开完整的会议知识库，包含跨会议问答、项目分类和未完成事项")
                 }
                 if recent.isEmpty {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -56,6 +77,7 @@ extension MeetingView {
                                 SessionHairline()
                                     .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
                                 Button {
+                                    knowledgeLibraryInitialSheet = nil
                                     showsKnowledgeLibrary = true
                                 } label: {
                                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {

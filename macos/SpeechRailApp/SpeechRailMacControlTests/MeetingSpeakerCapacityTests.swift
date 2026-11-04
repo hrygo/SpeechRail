@@ -195,4 +195,162 @@ struct MeetingSpeakerCapacityTests {
         await store.close()
     }
 
+    @Test func representativeExcerptPrefersSubstantiveStatementOverShortGreetings() {
+        let lines = [
+            TranscriptLine(
+                id: "greeting",
+                sessionID: "record",
+                ordinal: 1,
+                role: .speaker,
+                speakerLabel: "S1",
+                text: "喂，大家听得到吗？",
+                tStart: 3.0,
+                source: .microphone
+            ),
+            TranscriptLine(
+                id: "substantive",
+                sessionID: "record",
+                ordinal: 2,
+                role: .speaker,
+                speakerLabel: "S1",
+                text: "本周灰度发布定在周四下午五点前完成联调。",
+                tStart: 18.0,
+                source: .microphone
+            ),
+            TranscriptLine(
+                id: "ack",
+                sessionID: "record",
+                ordinal: 3,
+                role: .speaker,
+                speakerLabel: "S1",
+                text: "好的明白",
+                tStart: 32.0,
+                source: .microphone
+            )
+        ]
+        let stats = SpeakerTextStatistics(lines: lines)
+        #expect(stats.firstTimestamp(for: "S1") == 3.0)
+        #expect(stats.representativeExcerpt(for: "S1") == "本周灰度发布定在周四下午五点前完成联调。")
+    }
+
+    @MainActor @Test func bookmarkedSupplementsPreserveEmptyFingerprintAndFormatMarkedLines() throws {
+        let lines = [
+            TranscriptLine(
+                id: "line-1",
+                sessionID: "record",
+                ordinal: 1,
+                role: .speaker,
+                speakerLabel: "S1",
+                text: "开场寒暄",
+                tStart: 5.0,
+                source: .microphone
+            ),
+            TranscriptLine(
+                id: "line-2",
+                sessionID: "record",
+                ordinal: 2,
+                role: .speaker,
+                speakerLabel: "S2",
+                text: "核心接口需要在周五前冻结",
+                tStart: 65.0,
+                source: .microphone
+            )
+        ]
+        let units = MinutesGenerator.sourceUnits(lines: lines, names: ["S1": "张工", "S2": "李工"])
+        let windows = MinutesWindowPlanner.plan(units: units, budget: MinutesGenerator.windowBudget)
+        let baselineFingerprint = try MinutesGenerator.inputFingerprint(
+            units: units,
+            windows: windows,
+            supplements: ""
+        )
+        let emptyBookmarksSection = MinutesGenerator.bookmarkedSupplementsSection(
+            units: units,
+            bookmarkedLineIDs: []
+        )
+        #expect(emptyBookmarksSection.isEmpty)
+        let combinedWhenEmpty = MinutesGenerator.combinedSupplements(
+            exchanges: [],
+            verifiedExchangeIDs: [],
+            units: units,
+            bookmarkedLineIDs: []
+        )
+        #expect(
+            try MinutesGenerator.inputFingerprint(
+                units: units,
+                windows: windows,
+                supplements: combinedWhenEmpty
+            ) == baselineFingerprint
+        )
+
+        let markedSection = MinutesGenerator.bookmarkedSupplementsSection(
+            units: units,
+            bookmarkedLineIDs: ["line-2"]
+        )
+        #expect(markedSection.contains("核心接口需要在周五前冻结"))
+        #expect(markedSection.contains("李工"))
+        let combinedWithBookmark = MinutesGenerator.combinedSupplements(
+            exchanges: [],
+            verifiedExchangeIDs: [],
+            units: units,
+            bookmarkedLineIDs: ["line-2"]
+        )
+        #expect(
+            try MinutesGenerator.inputFingerprint(
+                units: units,
+                windows: windows,
+                supplements: combinedWithBookmark
+            ) != baselineFingerprint
+        )
+    }
+
+    @MainActor @Test func bookmarkLatestOrNextLineMarksPendingLineWhenTranscriptIsEmpty() async throws {
+        let suiteName = "meeting-bookmark-test-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        MeetingSession.persistBookmarkedLineIDs(["line-a", "line-b"], for: "session-1", defaults: defaults)
+        let loaded = MeetingSession.persistedBookmarkedLineIDs(for: "session-1", defaults: defaults)
+        #expect(loaded == ["line-a", "line-b"])
+
+        MeetingSession.persistBookmarkedLineIDs([], for: "session-1", defaults: defaults)
+        #expect(MeetingSession.persistedBookmarkedLineIDs(for: "session-1", defaults: defaults).isEmpty)
+
+        let h = try await MeetingSessionLifecycleTests.Harness.make()
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true))
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(5)
+        while clock.now < deadline, h.phase != .recording {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(h.phase == .recording)
+
+        // 1. Bookmark before any line is committed -> queues pendingNextLine
+        let pendingOutcome = h.session.bookmarkLatestOrNextLine()
+        #expect(pendingOutcome == .pendingNextLine)
+        #expect(h.session.hasPendingBookmarkForNextLine)
+
+        // 2. Partial rollback stabilization holds single-frame shrinkage
+        try await h.emit(.partialSnapshot(itemID: "item-1", revision: 1, text: "周四下午五点前完成联调"))
+        try await h.emit(.partialSnapshot(itemID: "item-1", revision: 2, text: "周四下午五点前完成"))
+        let settleDeadline1 = clock.now + .seconds(5)
+        while clock.now < settleDeadline1, h.session.partialText?.isEmpty ?? true {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(h.session.partialText == "周四下午五点前完成联调")
+
+        // 3. Committing item-1 automatically fulfills pendingNextLine bookmark
+        try await h.emit(.completed(itemID: "item-1", transcript: "周四下午五点前完成联调。"))
+        let settleDeadline2 = clock.now + .seconds(5)
+        while clock.now < settleDeadline2, h.session.lines.count < 1 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let firstLine = try #require(h.session.lines.first)
+        #expect(h.session.isBookmarked(lineID: firstLine.id))
+        #expect(!h.session.hasPendingBookmarkForNextLine)
+
+        await h.clients.all.last?.finishEventsOnClose()
+        await h.session.stopCapture()
+        await h.store.close()
+    }
 }
