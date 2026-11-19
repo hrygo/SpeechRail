@@ -16,7 +16,7 @@ import SwiftUI
 //   `MeetingViewLiveTranscript.swift`  录制中：转录流、滚动测量与转录行的时间码。
 //   `MeetingViewSpeakerLabeling.swift` 录制中打开的「标注说话人」面板。
 //   `MeetingViewPostMeeting.swift`     会后：纪要 / 文字记录两个页签、导出与看旧记录的导航。
-//   `MeetingViewInspector.swift`       会议信息栏（360pt）：这一场的事实、中断出口、纪要版本。
+//   `MeetingViewInspector.swift`       会议信息栏（360pt）：这一场的事实、中断说明、纪要版本。
 //   `MeetingViewRecordLibrary.swift`   空态下方的会议记录库快捷入口。
 // 同一份 `@State` 被这些文件共用，所以跨文件复用的成员是 internal 而不是 private。
 
@@ -133,16 +133,16 @@ public struct MeetingView: View {
                     )
                 }
                 if meeting.phase == .processing, !meeting.minutes.isBusy,
-                   let id = meeting.sessionID, let failure = meeting.lastFailure {
+                   meeting.sessionID != nil, let failure = meeting.lastFailure {
                     CardSurface {
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                             Text("这场会议尚未完成收尾")
                                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
                             Text(failure).fixedSize(horizontal: false, vertical: true)
                             HStack {
-                                if session.captureCompletionFailure(recordID: id) != nil {
-                                    Button("按中断结束") { Task { await meeting.finishIncompleteCapture() } }
-                                        .help("保留已保存的文字，按中断归档，不生成完整纪要")
+                                if meeting.canFinishIncompleteCapture {
+                                    Button("按中断结束") { confirmingFinish = true }
+                                        .help("保留已保存的文字，按中断归档")
                                 } else {
                                     Button("重试结束并整理") { Task { await meeting.requestFinish() } }
                                 }
@@ -221,31 +221,26 @@ public struct MeetingView: View {
                     }
                 }
                 if meeting.phase == .interrupted {
-                    // 中断板（稿 `screenClosureMeetingInterrupted`）：页头两件是「打开数据目录」与
-                    // 「继续这一段」；结束这一场仍在中断卡里（那里它叫「结束并整理」，与卡片自己的
-                    // 说明在同一处看），所以页头不再重复第三个按钮。
-                    PageActionButton(
-                        title: "打开数据目录",
-                        systemImage: "folder",
-                        helpText: "在访达里选中记录库文件；它一直在本机，随时可以复制走"
-                    ) {
-                        NSWorkspace.shared.activateFileViewerSelecting([session.libraryURL])
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        PageActionButton(
+                            title: "打开数据目录",
+                            systemImage: "folder",
+                            helpText: "在访达里选中记录库文件；它一直在本机，随时可以复制走"
+                        ) {
+                            NSWorkspace.shared.activateFileViewerSelecting([session.libraryURL])
+                        }
+                        PageActionButton(
+                            title: "继续录制",
+                            systemImage: "play.fill",
+                            helpText: "重新连接音频来源并接着本场继续录制；中断期间未录到的内容无法补回"
+                        ) {
+                            Task { await meeting.continueAfterInterruption() }
+                        }
+                        finishMeetingButton
                     }
-                    PageActionButton(
-                        title: "继续录制",
-                        systemImage: "play.fill",
-                        helpText: "重新连接音频来源并接着本场继续录制；中断期间未录到的内容无法补回"
-                    ) {
-                        Task { await meeting.continueAfterInterruption() }
-                    }
+                    .layoutPriority(1)
                 } else {
-                    PageActionButton(
-                        title: "结束会议",
-                        systemImage: "stop.circle",
-                        helpText: "结束这一场；文字记录会留下，接着开始整理纪要"
-                    ) {
-                        confirmingFinish = true
-                    }
+                    finishMeetingButton
                 }
             } else if meeting.minutes.isBusy {
                 // 整理中（稿 `screenClosureMeetingProcessing`）：页头两件。
@@ -333,10 +328,16 @@ public struct MeetingView: View {
             isPresented: $confirmingFinish,
             titleVisibility: .visible
         ) {
-            Button("结束并整理") { Task { await meeting.requestFinish() } }
+            if meeting.canFinishIncompleteCapture {
+                Button("按中断结束", role: .destructive) { Task { await meeting.finishIncompleteCapture() } }
+            } else {
+                Button("结束并整理", role: .destructive) { Task { await meeting.requestFinish() } }
+            }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("麦克风同一时刻只能由一个会话使用。结束后文字记录会留着，接着开始整理纪要。")
+            Text(meeting.canFinishIncompleteCapture
+                ? "本场将按中断归档。已保存的文字仍可回看和导出。"
+                : "结束后会保留文字记录，并开始整理纪要。")
         }
         .sheet(
             isPresented: $showsKnowledgeLibrary,
@@ -399,6 +400,16 @@ public struct MeetingView: View {
             OperationFeedback(copiedNotice, tone: .healthy, title: "已复制", id: copiedNoticeID.uuidString, autoDismiss: true,
                               onDismiss: { copiedNotice = nil })
         ])
+    }
+
+    private var finishMeetingButton: some View {
+        PageActionButton(
+            title: "结束会议",
+            systemImage: "stop.circle",
+            helpText: "结束当前会议并保留已保存的文字"
+        ) {
+            confirmingFinish = true
+        }
     }
 
     private var shouldShowInnerOSDrawer: Bool {

@@ -173,6 +173,52 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertFalse(h.session.minutes.isBusy)
     }
 
+    func testFinishAfterConnectionLossArchivesWithoutReconnecting() async throws {
+        let h = try await makeHarness()
+        let id = try await startRecording(h)
+        try await h.emit(.completed(itemID: "saved", transcript: "断线前的记录"))
+        try await h.settle { $0.session.lines.count == 1 }
+        try await h.emit(.closed(code: 1006))
+        try await h.settle { $0.phase == .interrupted }
+
+        await h.session.requestFinish()
+
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.state, .archived)
+        XCTAssertEqual(record?.endReason, .user)
+        XCTAssertEqual(h.session.phase, .archived)
+        XCTAssertNil(h.coordinator.occupancy)
+        XCTAssertEqual(h.clients.all.count, 1)
+        let saved = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(saved.map(\.text), ["断线前的记录"])
+    }
+
+    func testFinishIncompleteFromInterruptedStateArchivesWithoutMinutes() async throws {
+        let h = try await makeHarness()
+        let id = try await startRecording(h)
+        let client = try XCTUnwrap(h.clients.all.last)
+        await client.finishEventsOnClose()
+        await client.failDrain()
+        try await h.emit(.completed(itemID: "saved", transcript: "已保存的记录"))
+        try await h.settle { $0.session.lines.count == 1 }
+        h.audio.fail(.sourceLost)
+        try await h.settle { $0.phase == .interrupted }
+        XCTAssertNotNil(h.coordinator.captureCompletionFailure(recordID: id))
+
+        let finished = await h.session.finishIncompleteCapture()
+
+        XCTAssertTrue(finished)
+        let record = try await h.store.session(id: id)
+        XCTAssertEqual(record?.state, .archived)
+        XCTAssertEqual(record?.endReason, .interrupted)
+        XCTAssertEqual(h.session.phase, .archived)
+        XCTAssertNil(h.coordinator.occupancy)
+        XCTAssertEqual(h.clients.all.count, 1)
+        XCTAssertFalse(h.session.minutes.isBusy)
+        let saved = try await h.store.lines(sessionID: id)
+        XCTAssertEqual(saved.map(\.text), ["已保存的记录"])
+    }
+
     func testFinishDoesNotResetTheDrainBudgetBeforeTheRealArchive() async throws {
         let h = try await makeHarness(drainTimeout: .milliseconds(300), archiveDelay: .milliseconds(200))
         let id = try await startRecording(h)

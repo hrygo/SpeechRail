@@ -578,11 +578,19 @@ public final class MeetingSession {
         await finishAndSummarize()
     }
 
-    /// 收尾证明丢失时只允许用户明确按中断归档，不生成完整纪要。
+    var canFinishIncompleteCapture: Bool {
+        guard phase == .interrupted || phase == .processing, let id = sessionID else { return false }
+        return coordinator.captureCompletionFailure(recordID: id) != nil
+    }
+
+    /// 收尾证明丢失时，经用户确认后保留已保存的文字并按中断归档。
     @discardableResult
     public func finishIncompleteCapture() async -> Bool {
-        guard phase == .processing, let id = sessionID,
-              coordinator.captureCompletionFailure(recordID: id) != nil else { return false }
+        guard !isFinishing, canFinishIncompleteCapture, let id = sessionID else { return false }
+        isFinishing = true
+        defer { isFinishing = false }
+        phase = .processing
+        lastFailure = nil
         let deadline = SessionDrainDeadline(timeout: windowCapture == nil ? dependencies.drainTimeout : .seconds(30))
         let saved = await deadline.wait(stage: .persistence) {
             let report = await self.waitForPendingSaves(recordID: id)
@@ -590,9 +598,23 @@ public final class MeetingSession {
                 throw SessionDrainFailure(stage: .persistence, message: "请先重试保存或保留未保存的文字。")
             }
         }
-        guard saved else { return false }
+        guard saved else {
+            if sessionID == id {
+                lastFailure = deadline.failure?.message ?? "部分文字尚未保存，请处理后重试结束。"
+            }
+            return false
+        }
         let result = await coordinator.sealMeeting(id: id, reason: .interrupted, completionDeadline: deadline)
-        guard case .sealed(recordID: id) = result else { return false }
+        guard case .sealed(recordID: id) = result else {
+            if sessionID == id {
+                if case .failed(_, let reason) = result {
+                    lastFailure = reason
+                } else {
+                    lastFailure = "会议尚未归档，请重试结束。"
+                }
+            }
+            return false
+        }
         if sessionID == id {
             phase = .archived
             lastFailure = "本场已按中断结束，已保存的文字仍在，未生成完整纪要。"
