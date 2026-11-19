@@ -52,10 +52,22 @@ public struct MeetingView: View {
     /// 「查看全部」才是完整分页列表——静默截断到 8 场会让人以为其余的没了（MC-52）。
     @State var showsKnowledgeLibrary = false
     @State var knowledgeLibraryInitialSheet: MeetingKnowledgeLibraryView.InitialSheet?
-    @State var reviewRecord: SessionRecord?
-    @State var reviewLines: [TranscriptLine] = []
-    @State var reviewSpeakerNames: [String: String] = [:]
-    @State var reviewMinutes: MinutesVersion?
+    typealias HistoryReview = (record: SessionRecord, transcript: MeetingTranscriptReview, minutes: MinutesVersion?)
+    @State var historyReview: HistoryReview?
+    @State var historyReviewLoad = SpeechRailSelectionLoad<HistoryReview>()
+    @State var currentReview: (sessionID: String, transcript: MeetingTranscriptReview)?
+    @State var currentReviewLoad = SpeechRailSelectionLoad<MeetingTranscriptReview>()
+
+    var reviewRecord: SessionRecord? { historyReview?.record }
+    var reviewMinutes: MinutesVersion? { historyReview?.minutes }
+    var reviewTranscript: MeetingTranscriptReview {
+        if let historyReview { return historyReview.transcript }
+        guard let currentReview, currentReview.sessionID == meeting.sessionID else { return .empty }
+        return currentReview.transcript
+    }
+    var reviewLines: [TranscriptLine] { reviewTranscript.lines }
+    var reviewSpeakerNames: [String: String] { reviewTranscript.speakerNames }
+    var recoveryLines: [TranscriptLine] { reviewTranscript.recoveryLines }
     /// 采用哪一版时的冲突提示（MC-31）：两个窗口基于同一旧版改采用时，
     /// 后返回的那个不覆盖，改为提示刷新。
     @State var adoptConflictNotice: String?
@@ -90,11 +102,6 @@ public struct MeetingView: View {
     /// 当前纪要各条结论的核对结论（MA-21 审阅轴）。
     /// 没有依据可核的条目**不计入**——"没核过"不是"核过了"。
     @State var reviewVerdicts: [MinutesEvidenceValidator.Verdict] = []
-
-    /// 空 final 留下的恢复材料（MA-02 / MC-11）。默认读库口径不返回它们，
-    /// 所以要单独按 `includePartial: true` 取——用户提示里说了"已保留"，
-    /// 就必须真能取回来。
-    @State var recoveryLines: [TranscriptLine] = []
 
     /// 转录流的粘底状态（MA-10）：用户离开底部后不许被新句子拽走。
     @State var transcriptFollow = TranscriptFollowState()
@@ -298,6 +305,9 @@ public struct MeetingView: View {
             await reloadPostMeeting()
         }
         .onChange(of: meeting.phase) { _, phase in
+            if phase != .idle, reviewRecord == nil, historyReviewLoad.isLoading {
+                historyReviewLoad.reset()
+            }
             if phase == .archived, reviewRecord == nil {
                 postTab = .minutes
                 selectedMinutesVersionID = nil
@@ -305,9 +315,16 @@ public struct MeetingView: View {
             Task { await reloadPostMeeting() }
         }
         .onChange(of: meeting.transcriptPresentation.revision) { _, _ in
-            if meeting.phase == .archived || meeting.phase == .processing || reviewRecord != nil {
-                Task { await reloadPostMeeting() }
+            if let reviewRecord {
+                guard reviewRecord.id == meeting.sessionID else { return }
+            } else {
+                guard meeting.phase == .archived || meeting.phase == .processing else { return }
             }
+            Task { await reloadPostMeeting() }
+        }
+        .onDisappear {
+            historyReviewLoad.reset()
+            currentReviewLoad.reset()
         }
         .onChange(of: pageSessionID) { _, newValue in
             // 换一场会就复位：上一场的回看位置与筛选开关不该带过来。
@@ -388,6 +405,11 @@ public struct MeetingView: View {
         .operationFeedback([
             recoveryFeedback,
             OperationFeedback(operationError, onDismiss: { operationError = nil }),
+            OperationFeedback(historyReviewLoad.failure.map { _ in "无法打开这场会议。请重试。" },
+                              onDismiss: { historyReviewLoad.reset() }),
+            OperationFeedback(reviewRecord == nil && currentReviewLoad.failure != nil
+                              ? "无法读取会议文字记录。请重试。" : nil,
+                              onDismiss: { currentReviewLoad.reset() }),
             OperationFeedback(adoptConflictNotice, title: "纪要未采用", onDismiss: { adoptConflictNotice = nil }),
             OperationFeedback(bookmarkNotice, tone: .healthy, title: "重点标记", id: bookmarkNoticeID.uuidString, autoDismiss: true,
                               onDismiss: { bookmarkNotice = nil }),

@@ -6,6 +6,34 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1))) @MainActor
 struct TranscriptPresentationTests {
+    @Test func meetingReviewKeepsTheFullTranscriptAndFiltersMixedSpeakerRows() async throws {
+        var lines = (1...600).map { ordinal in
+            TranscriptLine(id: "line-\(ordinal)", sessionID: "meeting", ordinal: ordinal,
+                role: .speaker, speakerLabel: "A", text: "会议发言", source: .microphone)
+        }
+        lines[459].text = "甲😀，乙"
+        lines[459].attributionUnits = [
+            .init(id: "first", textStart: 0, textEnd: 2, speakerLabel: "d1:S1"),
+            .init(id: "second", textStart: 3, textEnd: 4, speakerLabel: "d1:S2"),
+        ]
+        lines[599].text = "末尾目标"
+        let recovery = TranscriptLine(id: "recovery", sessionID: "meeting", ordinal: 601,
+            role: .speaker, speakerLabel: "C", text: "待恢复", source: .microphone, status: .partial)
+
+        let review = try await MeetingTranscriptReview.prepare(
+            lines: lines + [recovery], speakerNames: ["d1:S2": "Reviewer"])
+
+        #expect(review.filteredLines(matching: "  ") == lines)
+        #expect(review.recoveryLines == [recovery])
+        #expect(review.orderedSpeakerLabels == ["A", "d1:S1", "d1:S2"])
+        #expect(review.speakerDisplayNames["d1:S1"] == "说话人 2")
+        #expect(review.filteredLines(matching: "目标") == [lines[599]])
+        #expect(review.filteredLines(matching: "reviewer", speaker: "d1:S1") == [lines[459]])
+        #expect(review.filteredLines(matching: "", bookmarkedLineIDs: [lines[599].id, lines[459].id])
+            == [lines[459], lines[599]])
+        #expect(review.filteredLines(matching: "reviewer", bookmarkedLineIDs: [lines[599].id]).isEmpty)
+    }
+
     @Test func testClientRetirementExistsEvenWithoutDiarizationAndLiveIndexDoesNotGrow() {
         var state = RealtimeEventState(), index = LiveTranscriptItemIndex()
         let generation = UUID(), now = ContinuousClock.now
