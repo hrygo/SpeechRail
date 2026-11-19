@@ -28,6 +28,27 @@ public enum DiarizationPacketCodec {
         return number.boolValue
     }
 
+    public enum ActivitySource { case rendered, evidence, gap }
+
+    public static func activityWithinHeaderBudget(
+        _ frames: [[String: Any]],
+        evidence: () -> [[String: Any]],
+        header: [String: Any],
+        replacingFrom start: Int,
+        through end: Int
+    ) throws -> (frames: [[String: Any]], source: ActivitySource) {
+        func fits(_ frames: [[String: Any]]) throws -> Bool {
+            var response = header
+            response["frames"] = frames
+            return try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys]).count <= maxHeaderBytes
+        }
+
+        if try fits(frames) { return (frames, .rendered) }
+        let original = evidence()
+        if try fits(original) { return (original, .evidence) }
+        return ([["start": start, "end": end, "active_slots": [Int](), "reason": "activity_gap"]], .gap)
+    }
+
     public static func encode(header: [String: Any], payload: Data = Data()) throws -> Data {
         let headerData = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])
         guard headerData.count <= maxHeaderBytes, payload.count <= maxPayloadBytes else {
