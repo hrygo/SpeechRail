@@ -177,8 +177,12 @@ def test_realtime_alignment_failure_has_a_reason_counter_and_safe_log(
         metrics = Metrics()
         owner = RealtimeAuxiliaryOwner(
             ports=RealtimeAuxiliaryPorts(
-                Aligner(), None, AlignmentAdmission(), DiarizationAdmission(),
-                metrics, lambda: True, lambda: "ready",
+                aligner=Aligner(),
+                alignment_admission=AlignmentAdmission(),
+                diarization_admission=DiarizationAdmission(),
+                metrics=metrics,
+                engine_for_backend=lambda _: None,
+                backend_status=lambda _: {"ready": False, "message": "not enabled"},
             ),
             settings=Settings(qwen3_model_dir=None, qwen3_python=None),
             task_id="task",

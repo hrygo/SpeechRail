@@ -133,12 +133,14 @@ class _Harness:
         self.owner = RealtimeAuxiliaryOwner(
             ports=RealtimeAuxiliaryPorts(
                 aligner=aligner,
-                engine=self.engine,
                 alignment_admission=AlignmentAdmission(),
                 diarization_admission=DiarizationAdmission(),
                 metrics=Metrics(),
-                ready=lambda: True,
-                status_message=lambda: "ready",
+                engine_for_backend=lambda backend: self.engine if backend == "sortformer" else None,
+                backend_status=lambda backend: {
+                    "ready": backend == "sortformer",
+                    "message": f"{backend} status for test",
+                },
             ),
             settings=Settings(qwen3_model_dir=None, qwen3_python=None),
             session_id="session",

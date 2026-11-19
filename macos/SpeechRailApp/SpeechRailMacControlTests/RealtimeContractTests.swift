@@ -2237,6 +2237,36 @@ final class RealtimeContractTests: XCTestCase {
         await client.close()
     }
 
+    func testMeetingHandshakeRequiresTheSelectedSpeakerBackend() async throws {
+        for backend: SpeechRailDiarizationBackend in [.sortformer, .meetingDynamic] {
+            for matchingEcho in [true, false] {
+                let transport = TestRealtimeASRTransport(
+                    sessionUpdateEcho: matchingEcho ? nil : .wrongDiarizationBackend
+                )
+                let client = RealtimeASRClient(
+                    scenePreset: .meeting, diarizationEnabled: true, diarizationBackend: backend
+                )
+                do {
+                    try await client.connect(using: transport)
+                    XCTAssertTrue(matchingEcho)
+                } catch RealtimeASRClient.Failure.serverError(let code, _) {
+                    XCTAssertFalse(matchingEcho)
+                    XCTAssertEqual(code, "invalid_diarization_capability")
+                    let isClosed = await transport.isClosed()
+                    XCTAssertTrue(isClosed)
+                }
+                await client.close()
+                let messages = await transport.sentMessages()
+                let request = try XCTUnwrap(messages.first)
+                let event = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(request.utf8)) as? [String: Any])
+                let session = try XCTUnwrap(event["session"] as? [String: Any])
+                let speechrail = try XCTUnwrap(session["speechrail"] as? [String: Any])
+                let diarization = try XCTUnwrap(speechrail["diarization"] as? [String: Any])
+                XCTAssertEqual(diarization["backend"] as? String, backend.rawValue)
+            }
+        }
+    }
+
     /// Gap1 的判据：只有分人单项不可用的两个码才触发降级续跑。
     ///
     /// `diarization_not_available`（分人引擎不可用）与 `backend_not_ready`
@@ -2417,6 +2447,7 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
         case wrongLanguage
         /// Echo everything except `audio.input.transcription.language`.
         case missingLanguage
+        case wrongDiarizationBackend
     }
 
     private var frames: [RealtimeASRSocketFrame] = []
@@ -2464,6 +2495,15 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
             "effective_max_segment_ms": requestedPolicy["max_segment_ms"] ?? 20_000
         ]
         var echoedSpeechRail: [String: Any] = ["asr": echoedPolicy]
+        if let diarization = requestSpeechRail["diarization"] as? [String: Any],
+           let backend = diarization["backend"] as? String {
+            echoedSpeechRail["diarization"] = [
+                "enabled": diarization["enabled"] ?? false,
+                "backend": backend,
+                "max_speakers": diarization["max_speakers"] ?? 4,
+                "system_cap": 4
+            ]
+        }
         switch sessionUpdateEcho {
         case .some(.wrongPreviewInterval):
             echoedPolicy["preview_interval_ms"] = 200
@@ -2479,6 +2519,12 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
                 : "zh"
         case .some(.missingLanguage):
             echoedTranscription["language"] = nil
+        case .some(.wrongDiarizationBackend):
+            if var diarization = echoedSpeechRail["diarization"] as? [String: Any] {
+                diarization["backend"] = diarization["backend"] as? String == "sortformer"
+                    ? "meeting_dynamic" : "sortformer"
+                echoedSpeechRail["diarization"] = diarization
+            }
         case .none:
             break
         }
@@ -2487,6 +2533,7 @@ private actor TestRealtimeASRTransport: RealtimeASRTransport {
                 jsonText([
                     "type": "session.updated",
                     "session": [
+                        "id": "test-session",
                         "audio": ["input": ["transcription": echoedTranscription]],
                         "speechrail": echoedSpeechRail
                     ]

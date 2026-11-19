@@ -102,16 +102,11 @@ class OpenAIRealtimeSession:
         self._auxiliary_owner = RealtimeAuxiliaryOwner(
             ports=RealtimeAuxiliaryPorts(
                 aligner=cast(AlignTextPort, services.text_aligner),
-                engine=services.diarization_engine,
                 alignment_admission=services.alignment_admission,
                 diarization_admission=services.diarization_admission,
                 metrics=services.metrics,
-                ready=lambda: services.diarization_ready,
-                status_message=lambda: str(services.diarization_status["message"]),
                 engine_for_backend=services.diarization_engine_for,
-                backend_ready=lambda backend: bool(
-                    services.diarization_backend_status(backend)["ready"]
-                ),
+                backend_status=services.diarization_backend_status,
             ),
             settings=self._settings,
             session_id=session_id,
@@ -348,7 +343,6 @@ class OpenAIRealtimeSession:
                     "diarization_not_available",
                     "requested identity budget exceeds certified capacity",
                 )
-        backend_engine = self._services.diarization_engine_for(requested_backend)
         if candidate.get("diarization_explicit"):
             requested_diarization = bool(candidate.get("diarization_enabled", False))
             if requested_diarization != self._auxiliary_owner.diarization_enabled:
@@ -357,16 +351,19 @@ class OpenAIRealtimeSession:
                         "invalid_state",
                         "diarization can only be enabled before the first audio",
                     )
-                if requested_diarization and (
-                    not self._services.diarization_backend_status(requested_backend)["ready"]
-                    or backend_engine is None
-                    or not bool(getattr(backend_engine, "supports_stream", False))
-                    or self._services.text_aligner is None
-                ):
-                    raise RealtimeAdapterError(
-                        "diarization_not_available",
-                        str(self._services.diarization_status["message"]),
-                    )
+                if requested_diarization:
+                    backend_engine = self._services.diarization_engine_for(requested_backend)
+                    backend_status = self._services.diarization_backend_status(requested_backend)
+                    if (
+                        not backend_status["ready"]
+                        or backend_engine is None
+                        or not bool(getattr(backend_engine, "supports_stream", False))
+                        or self._services.text_aligner is None
+                    ):
+                        raise RealtimeAdapterError(
+                            "diarization_not_available",
+                            str(backend_status["message"]),
+                        )
         candidate["effective_max_segment_ms"] = resolve_effective_max_segment_ms(
             candidate["asr_policy"],
             service_max_segment_ms=(self._settings.max_realtime_buffer_bytes or 8_388_608) // 64,
