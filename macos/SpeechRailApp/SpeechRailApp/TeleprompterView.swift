@@ -9,6 +9,9 @@ public struct TeleprompterView: View {
     @Environment(SessionPreferences.self) private var preferences
 
     @State private var documents: [TeleprompterDocument] = []
+    @State private var unavailableDocuments: [TeleprompterV2DocumentListItem] = []
+    @State private var documentDirectoryRevision = 0
+    @State private var hasLoadedDocumentDirectory = false
     @State private var isImporterPresented = false
     @State private var isAIDataFlowDisclosurePresented = false
     @State private var operationMessage: String?
@@ -51,6 +54,7 @@ public struct TeleprompterView: View {
     public init() {}
 
     public var body: some View {
+        let revision = documentDirectoryRevision
         PageScaffold(
             route: .teleprompter,
             layout: .fill(
@@ -68,12 +72,15 @@ public struct TeleprompterView: View {
                     )
                 }
 
-                if documents.isEmpty {
+                if !hasLoadedDocumentDirectory {
+                    ProgressView("正在读取稿件…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if documents.isEmpty {
                     welcomeHub
                 } else {
                     populatedWorkspace
                 }
-                if !session.unavailableDocuments.isEmpty {
+                if !unavailableDocuments.isEmpty {
                     unavailableDocumentsNotice
                 }
             }
@@ -90,8 +97,8 @@ public struct TeleprompterView: View {
                 onDismiss: { operationMessage = nil }
             )
         ])
-        .task {
-            reloadDocuments()
+        .task(id: revision) {
+            await readDocumentDirectory(revision: revision)
         }
         .onDisappear { session.cancelDocumentSelection() }
         .onChange(of: session.document) { previous, document in
@@ -100,7 +107,7 @@ public struct TeleprompterView: View {
             if let document {
                 if let index = documents.firstIndex(where: { $0.id == document.id }) {
                     documents[index] = document
-                } else {
+                } else if previous?.id != document.id {
                     reloadDocuments()
                 }
             }
@@ -166,6 +173,7 @@ public struct TeleprompterView: View {
             Button("删除", role: .destructive) {
                 do {
                     try session.deleteDocument(documentID: doc.id)
+                    documents.removeAll { $0.id == doc.id }
                     showOperationMessage(nil)
                     reloadDocuments()
                 } catch {
@@ -185,6 +193,7 @@ public struct TeleprompterView: View {
             Button("删除", role: .destructive) {
                 do {
                     try session.deleteDocument(documentID: item.id)
+                    unavailableDocuments.removeAll { $0.id == item.id }
                     unavailableDocumentToDelete = nil
                     reloadDocuments()
                 } catch {
@@ -676,7 +685,7 @@ public struct TeleprompterView: View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Label {
-                    Text("有 \(session.unavailableDocuments.count) 份稿件无法打开，未影响其他稿件。可以删除后重新导入原稿重建。")
+                    Text("有 \(unavailableDocuments.count) 份稿件无法打开，未影响其他稿件。可以删除后重新导入原稿重建。")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 } icon: {
@@ -684,7 +693,7 @@ public struct TeleprompterView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.attention)
                 }
 
-                ForEach(session.unavailableDocuments, id: \.id) { item in
+                ForEach(unavailableDocuments, id: \.id) { item in
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Text(item.id)
                             .font(SpeechRailDesignTokens.Typography.technicalValue)
@@ -2586,21 +2595,44 @@ public struct TeleprompterView: View {
     }
 
     private func reloadDocuments() {
+        documentDirectoryRevision &+= 1
+    }
+
+    private func readDocumentDirectory(revision: Int) async {
+        guard !Task.isCancelled, revision == documentDirectoryRevision else { return }
         do {
-            documents = try session.listDocuments()
+            let directory = try await session.readDocumentDirectory()
+            guard !Task.isCancelled, revision == documentDirectoryRevision else { return }
+            // Edits can arrive while the directory read is suspended. Keep the
+            // latest in-memory version of rows the scan still found on disk.
+            var currentRows = Dictionary(
+                documents.map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            if let current = session.document {
+                currentRows[current.id] = current
+            }
+            documents = directory.documents.map { row in
+                guard let current = currentRows[row.id], current.updatedAt >= row.updatedAt else { return row }
+                return current
+            }
+            unavailableDocuments = directory.unavailableDocuments
         } catch {
+            guard !Task.isCancelled, revision == documentDirectoryRevision else { return }
             documents = []
             showOperationMessage(error.localizedDescription)
+            hasLoadedDocumentDirectory = true
             return
         }
-        // 自动打开第一份稿件失败时，列表本身仍然有用——不能把两者混在同一个
-        // `catch` 里连列表一起清空，那会让读者看到一份空工作台且没有任何说明。
-        if session.document == nil, let first = documents.first {
-            do {
-                try session.load(documentID: first.id)
-            } catch {
-                showOperationMessage(error.localizedDescription)
-            }
+        hasLoadedDocumentDirectory = true
+
+        // Leave the directory available if automatically opening its first item fails.
+        guard session.document == nil, !session.isLoadingDocument, let first = documents.first else { return }
+        do {
+            _ = try await session.loadForSelection(documentID: first.id)
+        } catch {
+            guard !Task.isCancelled, revision == documentDirectoryRevision else { return }
+            showOperationMessage(error.localizedDescription)
         }
     }
 

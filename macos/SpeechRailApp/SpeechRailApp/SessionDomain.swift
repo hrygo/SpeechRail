@@ -5678,6 +5678,16 @@ public struct MeetingLibraryPage: Sendable {
 /// 纪要、转录和条目必须来自同一次读取；分三次到齐再拼，
 /// 中间那一瞬用户看到的是"有标题没内容"的半成品。
 public struct MeetingReviewSnapshot: Identifiable, Sendable {
+    public struct TranscriptRow: Identifiable, Sendable {
+        public let id: String
+        public let text: String
+
+        public init(id: String, text: String) {
+            self.id = id
+            self.text = text
+        }
+    }
+
     public var id: String { documentID }
 
     public var documentID: String
@@ -5685,7 +5695,7 @@ public struct MeetingReviewSnapshot: Identifiable, Sendable {
     public var occurredAt: Date?
     public var status: MeetingLibraryStatus
     public var minutesBody: String?
-    public var transcriptLines: [String]
+    public var transcriptLines: [TranscriptRow]
     public var items: [KnowledgeEvidence]
     /// 详情正在显示的那一版纪要。导出必须跟着它走——
     /// 用户看的是这一版，导出的却是另一版，MC-48 说的"始终对应"就没做到。
@@ -5693,7 +5703,7 @@ public struct MeetingReviewSnapshot: Identifiable, Sendable {
 
     public init(
         documentID: String, title: String, occurredAt: Date?, status: MeetingLibraryStatus,
-        minutesBody: String?, transcriptLines: [String], items: [KnowledgeEvidence],
+        minutesBody: String?, transcriptLines: [TranscriptRow], items: [KnowledgeEvidence],
         minutesVersionID: String? = nil
     ) {
         self.documentID = documentID
@@ -5770,11 +5780,20 @@ public struct MinutesVersionDiff: Hashable, Sendable {
 }
 
 public enum MinutesDiff {
+    @concurrent
+    static func prepareLineDiff(from old: String, to new: String) async -> MinutesVersionDiff {
+        lineDiff(from: old, to: new)
+    }
+
     /// 逐行对比。**行是"看起来像同一句"的最小单位**：
     /// 按 LCS 做增删，不做同义改写判断——把"发布窗口定在九月"和
     /// "发布窗口改到十月"判成同一行的话，用户就看不见自己改了什么。
     public static func lineDiff(from old: String, to new: String) -> MinutesVersionDiff {
         let oldLines = old.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if old == new {
+            return MinutesVersionDiff(lines: oldLines.map(MinutesVersionDiff.LineChange.unchanged),
+                                      addedCount: 0, removedCount: 0)
+        }
         let newLines = new.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let table = lcsTable(oldLines, newLines)
 

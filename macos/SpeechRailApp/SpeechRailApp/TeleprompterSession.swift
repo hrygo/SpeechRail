@@ -92,7 +92,6 @@ public final class TeleprompterSession {
     public var isMicrophoneCapturing: Bool { source != nil }
     public private(set) var document: TeleprompterDocument?
     public private(set) var versions: [TeleprompterVersion] = []
-    public private(set) var unavailableDocuments: [TeleprompterV2DocumentListItem] = []
     public private(set) var pendingVersion: TeleprompterVersion?
     public private(set) var partialText: String?
     public private(set) var currentSegmentIndex = 0
@@ -293,13 +292,21 @@ public final class TeleprompterSession {
         }
     }
 
-    public func listDocuments() throws -> [TeleprompterDocument] {
-        let entries = try v2Store.readDocuments()
-        unavailableDocuments = entries.map(\.item).filter { !$0.isAvailable }
-        return entries.compactMap { entry in
+    @concurrent
+    nonisolated func readDocumentDirectory() async throws -> (
+        documents: [TeleprompterDocument],
+        unavailableDocuments: [TeleprompterV2DocumentListItem]
+    ) {
+        try Task.checkCancellation()
+        let urls = try await v2Store.documentURLsForReading()
+        let entries = try v2Store.readDocuments(at: urls)
+        try Task.checkCancellation()
+        let unavailableDocuments = entries.map(\.item).filter { !$0.isAvailable }
+        let documents: [TeleprompterDocument] = entries.compactMap { entry in
             guard let bundle = entry.bundle else { return nil }
-            return try? legacyDocument(from: bundle)
+            return try? Self.legacyDocument(from: bundle)
         }
+        return (documents, unavailableDocuments)
     }
 
     /// UI selection reads and validates the target off the main actor. The
@@ -424,17 +431,19 @@ public final class TeleprompterSession {
         }
         try v2Store.delete(documentID: documentID)
         if document?.id == documentID {
-            let remaining = try listDocuments()
-            if let first = remaining.first {
-                try load(documentID: first.id)
-            } else {
-                document = nil
-                versions = []
-                pendingVersion = nil
-                currentSegmentIndex = 0
-                phase = .draft
-                blocked = nil
-            }
+            // The directory refresh selects the next document once its snapshot is ready.
+            invalidateAnalysis()
+            clearPreparedEditHistory()
+            document = nil
+            versions = []
+            pendingVersion = nil
+            readingBlocks = []
+            importedSource = nil
+            savedRunState = nil
+            currentSegmentIndex = 0
+            readingOffset = 0
+            phase = .draft
+            blocked = nil
         }
     }
 
@@ -445,7 +454,7 @@ public final class TeleprompterSession {
         }
         let newBundle = try v2Store.duplicate(documentID: documentID)
         try load(documentID: newBundle.document.id)
-        return try legacyDocument(from: newBundle)
+        return try Self.legacyDocument(from: newBundle)
     }
 
     public func exportMarkdown() -> String? {
@@ -2870,7 +2879,7 @@ public final class TeleprompterSession {
         )
     }
 
-    private func legacyDocument(from bundle: TeleprompterV2DocumentBundle) throws -> TeleprompterDocument {
+    private nonisolated static func legacyDocument(from bundle: TeleprompterV2DocumentBundle) throws -> TeleprompterDocument {
         guard let source = bundle.sourceRevisions.first(where: {
             $0.id == bundle.document.currentSourceRevisionID
         }) else {

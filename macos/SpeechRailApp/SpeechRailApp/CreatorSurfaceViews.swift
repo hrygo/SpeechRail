@@ -4100,7 +4100,8 @@ public struct WorksView: View {
     }
 
     private var worksListSurface: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+        let visibleWorks = filteredWorks
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Picker("排序", selection: $sortOrder) {
                     ForEach(WorkSortOrder.allCases) { order in
@@ -4114,13 +4115,13 @@ public struct WorksView: View {
 
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
 
-                Text(countText)
+                Text(countText(for: visibleWorks))
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .monospacedDigit()
             }
 
-            if filteredWorks.isEmpty {
+            if visibleWorks.isEmpty {
                 ContentUnavailableView {
                     Label("没有匹配的作品", systemImage: "magnifyingglass")
                 } description: {
@@ -4132,7 +4133,7 @@ public struct WorksView: View {
                     workColumnsHeader
                     Divider()
                     List(selection: $selectedWorkID) {
-                        ForEach(filteredWorks) { work in
+                        ForEach(visibleWorks) { work in
                             workListRow(work)
                                 .tag(work.id)
                                 // 同音色库列表：选中行取稿的 `surface/railTint`（§12.4 决定 15）。
@@ -4343,12 +4344,12 @@ public struct WorksView: View {
 
     /// 「8 个作品 · 共 11:05」（Figma `toolbar` 右侧计数）。总时长只在每条作品
     /// 都读出时长时才相加，不把「未读取」当成 0。
-    private var countText: String {
-        let total = filteredWorks.count
+    private func countText(for visibleWorks: [CreativeWork]) -> String {
+        let total = visibleWorks.count
         guard total == model.works.count else {
             return "\(total) / \(model.works.count) 个作品"
         }
-        let durations = filteredWorks.compactMap(\.durationSeconds)
+        let durations = visibleWorks.compactMap(\.durationSeconds)
         guard total > 0, durations.count == total else { return "\(total) 个作品" }
         let seconds = durations.reduce(0, +)
         // 与作品行的时长同形（零填充 mm:ss），否则同一个工具栏里会出现

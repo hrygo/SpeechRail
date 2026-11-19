@@ -287,13 +287,21 @@ public struct SessionLibraryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var summaries: [SessionSummary] = []
     @State private var selectedID: String?
-    private typealias LibraryDetail = (review: SessionReviewSnapshot, recoveryLines: [TranscriptLine])
+    private struct LibraryDetail: Sendable {
+        let review: SessionReviewSnapshot
+        let transcript: SessionLibraryTranscriptPresentation
+        let recoveryLines: [TranscriptLine]
+    }
     @State private var detail: LibraryDetail?
     @State private var detailLoad = SpeechRailSelectionLoad<LibraryDetail>()
-    private var lines: [TranscriptLine] { detail?.review.lines ?? [] }
-    private var displayLines: [TranscriptLine] { SessionExporter.paragraphLines(lines) }
-    private var recoveryLines: [TranscriptLine] { detail?.recoveryLines ?? [] }
-    private var speakerNames: [String: String] { detail?.review.speakerNames ?? [:] }
+    private var selectedDetail: LibraryDetail? {
+        guard let detail, detail.review.record.id == selectedID else { return nil }
+        return detail
+    }
+    private var lines: [TranscriptLine] { selectedDetail?.review.lines ?? [] }
+    private var transcript: SessionLibraryTranscriptPresentation { selectedDetail?.transcript ?? .empty }
+    private var recoveryLines: [TranscriptLine] { selectedDetail?.recoveryLines ?? [] }
+    private var speakerNames: [String: String] { selectedDetail?.review.speakerNames ?? [:] }
     @State private var libraryDisplayMode: CaptionDisplayMode = .bilingual
     @State private var searchText = ""
     @State private var recordFilter: RecordListFilter = .all
@@ -1226,7 +1234,9 @@ public struct SessionLibraryView: View {
     }
 
     private var recordList: some View {
-        CardSurface {
+        let visibleSummaries = filteredSummaries
+        let visibleFilters = availableRecordListFilters
+        return CardSurface {
             VStack(spacing: 0) {
                 // 1. 紧凑单行栏头：标题 + 同行计数胶囊 + 可选筛选胶囊（消除「记录」与「13」上下两行堆叠割裂感）
                 HStack(alignment: .center, spacing: 6) {
@@ -1235,9 +1245,9 @@ public struct SessionLibraryView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
 
                     Text(
-                        filteredSummaries.count == summaries.count
+                        visibleSummaries.count == summaries.count
                             ? "\(summaries.count)"
-                            : "\(filteredSummaries.count)/\(summaries.count)"
+                            : "\(visibleSummaries.count)/\(summaries.count)"
                     )
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .monospacedDigit()
@@ -1251,9 +1261,9 @@ public struct SessionLibraryView: View {
 
                     Spacer(minLength: 4)
 
-                    if availableRecordListFilters.count > 1 {
+                    if visibleFilters.count > 1 {
                         HStack(spacing: 2) {
-                            ForEach(availableRecordListFilters) { filter in
+                            ForEach(visibleFilters) { filter in
                                 let isSelected = recordFilter == filter
                                 Button {
                                     recordFilter = filter
@@ -1354,7 +1364,7 @@ public struct SessionLibraryView: View {
                 SessionHairline()
 
                 List(selection: $selectedID) {
-                    ForEach(filteredSummaries) { summary in
+                    ForEach(visibleSummaries) { summary in
                         recordRow(summary)
                             .tag(summary.id)
                             .listRowBackground(
@@ -1434,16 +1444,11 @@ public struct SessionLibraryView: View {
                         StatusPill(tone: .attention, label: "整理中")
                     }
                 }
-                Text(
-                    recordSubtitle(
-                        summary,
-                        includeSpeakerCount: isSpeakerAttributionActive(for: summary)
-                    )
-                )
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .monospacedDigit()
-                .lineLimit(1)
+                Text(recordSubtitle(summary))
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
             }
 
             InPlaceDeleteButton(
@@ -1458,7 +1463,15 @@ public struct SessionLibraryView: View {
     }
 
     private func recordDetail(_ summary: SessionSummary) -> some View {
-        CardSurface {
+        let speakerActive = isSpeakerAttributionActive(for: summary)
+        let currentLoad = detailLoad.requestedID == summary.id
+        let isOpening = selectedDetail == nil || (currentLoad && detailLoad.isLoading)
+        let hasLoadFailure = currentLoad && detailLoad.failure != nil
+        let visibleLines = isOpening || hasLoadFailure ? [] : transcript.filteredLines(
+            matching: detailSearchText, speaker: selectedSpeakerFilter, speakerActive: speakerActive
+        )
+
+        return CardSurface {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                     if renamingRecordID == summary.id {
@@ -1500,16 +1513,11 @@ public struct SessionLibraryView: View {
                                 .help("重命名此条记录")
                                 .speechRailPointerCursor()
                             }
-                            Text(
-                                recordSubtitle(
-                                    summary,
-                                    includeSpeakerCount: isSpeakerAttributionActive(for: summary)
-                                )
-                            )
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            .monospacedDigit()
-                            .lineLimit(1)
+                            Text(recordSubtitle(summary))
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .monospacedDigit()
+                                .lineLimit(1)
                         }
                     }
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
@@ -1560,15 +1568,12 @@ public struct SessionLibraryView: View {
 
                 Divider()
 
-                if !displayLines.isEmpty {
-                    detailSpeakerAndFilterBar(for: summary)
+                if !transcript.lines.isEmpty {
+                    detailSpeakerAndFilterBar(for: summary, speakerActive: speakerActive)
                     Divider()
                 }
 
-                if detailLoad.isLoading {
-                    ProgressView("正在打开记录…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if detailLoad.failure != nil {
+                if hasLoadFailure {
                     ContentUnavailableView {
                         Label("记录暂时没能打开", systemImage: "exclamationmark.triangle")
                     } description: {
@@ -1577,12 +1582,15 @@ public struct SessionLibraryView: View {
                         Button("重试") { Task { await loadLines() } }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if isOpening {
+                    ProgressView("正在打开记录…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if lines.isEmpty && recoveryLines.isEmpty {
                     Text("这条记录里还没有正文。")
                         .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                } else if filteredDisplayLines.isEmpty {
+                } else if visibleLines.isEmpty {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Text("没有匹配的段落")
                             .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -1598,8 +1606,8 @@ public struct SessionLibraryView: View {
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            ForEach(filteredDisplayLines) { line in
-                                lineRow(line, summary: summary)
+                            ForEach(visibleLines) { line in
+                                lineRow(line, summary: summary, speakerActive: speakerActive)
                             }
                             if !recoveryLines.isEmpty {
                                 TranscriptRecoveryMaterialSection(lines: recoveryLines)
@@ -1612,7 +1620,7 @@ public struct SessionLibraryView: View {
                 Divider()
 
                 Text(
-                    isSpeakerAttributionActive(for: summary)
+                    speakerActive
                         ? "记录只保存在这台 Mac 上；点击任意段落左侧说话人标签即可标记姓名或调整归属。"
                         : "记录只保存在这台 Mac 上。"
                 )
@@ -1634,9 +1642,9 @@ public struct SessionLibraryView: View {
         if summary.record.diarization == .active || summary.speakerCount > 0 { return true }
         // 正在进行的当前实时字幕会话：跟随实时字幕会话的开关偏好
         if kind == .captions, let activeID = caption.sessionID, summary.id == activeID {
-            return preferences.captionsDiarizationEnabled || !sessionSpeakerLabels.isEmpty
+            return preferences.captionsDiarizationEnabled || !transcript.speakerLabels.isEmpty
         }
-        return !sessionSpeakerLabels.isEmpty
+        return !transcript.speakerLabels.isEmpty
     }
 
     private var availableRecordListFilters: [RecordListFilter] {
@@ -1656,8 +1664,7 @@ public struct SessionLibraryView: View {
 
     /// 详情页顶部说话人管理/标注栏与段内搜索过滤栏（根据是否开启分人自适应呈现）。
     @ViewBuilder
-    private func detailSpeakerAndFilterBar(for summary: SessionSummary) -> some View {
-        let speakerActive = isSpeakerAttributionActive(for: summary)
+    private func detailSpeakerAndFilterBar(for summary: SessionSummary, speakerActive: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 if speakerActive {
@@ -1667,7 +1674,7 @@ public struct SessionLibraryView: View {
                             Button {
                                 selectedSpeakerFilter = nil
                             } label: {
-                                Text("全部 (\(displayLines.count))")
+                                Text("全部 (\(transcript.lines.count))")
                                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                                     .foregroundStyle(
                                         selectedSpeakerFilter == nil
@@ -1688,10 +1695,10 @@ public struct SessionLibraryView: View {
                             .buttonStyle(.plain)
                             .speechRailPointerCursor()
 
-                            ForEach(sessionSpeakerLabels, id: \.self) { label in
+                            ForEach(transcript.speakerLabels, id: \.self) { label in
                                 let isSelected = selectedSpeakerFilter == label
                                 let name = speakerDisplayName(for: label)
-                                let count = displayLines.filter { $0.speakerLabel == label }.count
+                                let count = transcript.speakerCounts[label, default: 0]
                                 HStack(spacing: 3) {
                                     Button {
                                         selectedSpeakerFilter = isSelected ? nil : label
@@ -1737,7 +1744,7 @@ public struct SessionLibraryView: View {
                 } else {
                     // 1b. 未开启分人（纯享字幕态）：默认仅展示干净的段落计数，并提供按需手动标人入口
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Text("共 \(displayLines.count) 段")
+                        Text("共 \(transcript.lines.count) 段")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         Button {
@@ -1825,9 +1832,8 @@ public struct SessionLibraryView: View {
         .background(SpeechRailDesignTokens.Color.recessedField.opacity(0.45))
     }
 
-    private func lineRow(_ line: TranscriptLine, summary: SessionSummary) -> some View {
-        let speakerActive = isSpeakerAttributionActive(for: summary)
-        return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
+    private func lineRow(_ line: TranscriptLine, summary: SessionSummary, speakerActive: Bool) -> some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
             if speakerActive {
                 speakerMenuBadge(for: line, summary: summary)
                     .frame(width: SpeechRailDesignTokens.Layout.sessionSpeakerColumnWidth, alignment: .leading)
@@ -1922,7 +1928,7 @@ public struct SessionLibraryView: View {
 
     @ViewBuilder
     private func speakerAssignmentMenuItems(for line: TranscriptLine, summary: SessionSummary) -> some View {
-        let candidateLabels = Array(Set(sessionSpeakerLabels + ["A", "B", "C", "D"])).sorted()
+        let candidateLabels = Array(Set(transcript.speakerLabels + ["A", "B", "C", "D"])).sorted()
         ForEach(candidateLabels, id: \.self) { label in
             let display = speakerDisplayName(for: label)
             Button {
@@ -2051,53 +2057,11 @@ public struct SessionLibraryView: View {
     }
 
     private func speakerText(for line: TranscriptLine) -> String {
-        // 显式 `return`：`.speaker` 那一支里有两个语句，整个 switch 因此不是表达式，
-        // 不能靠隐式返回（上一版就是这么编译失败的）。
-        switch line.role {
-        case .user: return "你"
-        case .assistant: return "助手"
-        case .speaker:
-            guard let label = line.speakerLabel, !label.isEmpty else { return "未标" }
-            return speakerDisplayName(for: label)
-        }
-    }
-
-    /// 当前选中记录中出现过的全部说话人标签（按首次出现顺序）。
-    private var sessionSpeakerLabels: [String] {
-        var seen = Set<String>()
-        var result: [String] = []
-        for line in displayLines {
-            if let label = line.speakerLabel, !label.isEmpty, seen.insert(label).inserted {
-                result.append(label)
-            }
-        }
-        for key in speakerNames.keys.sorted() where !key.isEmpty && seen.insert(key).inserted {
-            result.append(key)
-        }
-        return result
+        transcript.speakerText(for: line)
     }
 
     private func speakerDisplayName(for label: String) -> String {
-        if let name = speakerNames[label]?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
-            return name
-        }
-        return SpeakerLabeling.chipText(label: label, displayName: nil)
-    }
-
-    /// 按详情页顶部的说话人胶囊与段内搜索词过滤后的展示行。
-    private var filteredDisplayLines: [TranscriptLine] {
-        let keyword = detailSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let speakerFilterActive = selectedSummary.map { isSpeakerAttributionActive(for: $0) } ?? false
-        return displayLines.filter { line in
-            if speakerFilterActive, let filterLabel = selectedSpeakerFilter, line.speakerLabel != filterLabel {
-                return false
-            }
-            guard !keyword.isEmpty else { return true }
-            let speakerMatch = speakerFilterActive && speakerText(for: line).localizedCaseInsensitiveContains(keyword)
-            let sourceMatch = line.text.localizedCaseInsensitiveContains(keyword)
-            let translationMatch = line.translatedText?.localizedCaseInsensitiveContains(keyword) ?? false
-            return speakerMatch || sourceMatch || translationMatch
-        }
+        transcript.speakerDisplayName(for: label)
     }
 
     /// 保存说话人改名（同时更新持久化记录与当前正在运行的字幕会话账本）。
@@ -2187,7 +2151,7 @@ public struct SessionLibraryView: View {
     }
 
     private func nextUnusedSpeakerLabel() -> String {
-        let used = Set(sessionSpeakerLabels)
+        let used = Set(transcript.speakerLabels)
         for candidate in ["A", "B", "C", "D", "E", "F"] where !used.contains(candidate) {
             return candidate
         }
@@ -2276,10 +2240,10 @@ public struct SessionLibraryView: View {
         return date.speechRailFormatted(.dateTime)
     }
 
-    private func recordSubtitle(_ summary: SessionSummary, includeSpeakerCount: Bool = true) -> String {
+    private func recordSubtitle(_ summary: SessionSummary) -> String {
         var parts = [SessionCoordinator.formatted(summary.duration())]
         parts.append("\(summary.lineCount) 行")
-        if includeSpeakerCount, summary.speakerCount > 1 {
+        if summary.speakerCount > 1 {
             parts.append("\(summary.speakerCount) 人")
         }
         if let appName = summary.record.targetAppName, !appName.isEmpty {
@@ -2337,7 +2301,10 @@ public struct SessionLibraryView: View {
                 }
                 let recovery = try await session.lines(sessionID: selectedID, includePartial: true)
                     .filter { $0.status == .partial }
-                return (review: snapshot, recoveryLines: recovery)
+                let transcript = try await SessionLibraryTranscriptPresentation.prepare(
+                    lines: snapshot.lines, speakerNames: snapshot.speakerNames
+                )
+                return LibraryDetail(review: snapshot, transcript: transcript, recoveryLines: recovery)
             }) else { return }
             guard self.selectedID == selectedID else { return }
             detail = snapshot

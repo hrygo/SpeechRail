@@ -471,13 +471,13 @@ extension SessionStore {
             offset: 0
         )
         var body: String?
-        var transcript: [String] = []
+        var transcript: [MeetingReviewSnapshot.TranscriptRow] = []
         var minutesVersionID: String?
         if let sessionID = document.sourceSessionID {
             let minutes = try acceptedMinutes(sessionID: sessionID) ?? latestUsableMinutes(sessionID: sessionID)
             body = minutes?.body
             minutesVersionID = minutes?.id
-            transcript = try lines(sessionID: sessionID).map(\.text)
+            transcript = try lines(sessionID: sessionID).map { .init(id: $0.id, text: $0.text) }
         }
         return MeetingReviewSnapshot(
             documentID: document.id,
@@ -493,8 +493,7 @@ extension SessionStore {
 
     /// 从库里读一场会议的导出件（MA-19 / 验收 4「导出已有资料」）。
     ///
-    /// **重新从库里读，不拿界面上正在显示的那份快照**：快照里的转录只有纯文本，
-    /// 丢了行 id、时间与说话人，导出去就再也对不回来源。宁可多读一次库。
+    /// 导出从库里读取完整转录行，保留时间与说话人信息。
     ///
     /// `minutesVersionID` 是详情正在显示的那一版。传 nil 表示"没选版本"，
     /// 这时导出当前采用版——与 `MeetingReviewSnapshot` 的取法一致。

@@ -479,18 +479,34 @@ public final class TeleprompterV2Store {
     }
 
     public func listDocuments() throws -> [TeleprompterV2DocumentListItem] {
-        try readDocuments().map(\.item)
+        try readDocuments(at: Self.documentURLs(in: directoryURL, using: fileManager)).map(\.item)
     }
 
-    /// A directory read decodes each bundle once. The list projection and the
-    /// editor share that snapshot instead of reopening every document.
-    func readDocuments() throws -> [(item: TeleprompterV2DocumentListItem, bundle: TeleprompterV2DocumentBundle?)] {
-        let urls = try fileManager.contentsOfDirectory(
+    func documentURLsForReading() async throws -> [URL] {
+        if fileManager === FileManager.default {
+            return try await Self.defaultDocumentURLs(in: directoryURL)
+        }
+        // An injected FileManager can have actor-bound behavior. Pass only its URL snapshot off actor.
+        return try Self.documentURLs(in: directoryURL, using: fileManager)
+    }
+
+    @concurrent
+    private nonisolated static func defaultDocumentURLs(in directoryURL: URL) async throws -> [URL] {
+        try documentURLs(in: directoryURL, using: .default)
+    }
+
+    private nonisolated static func documentURLs(in directoryURL: URL, using fileManager: FileManager) throws -> [URL] {
+        try fileManager.contentsOfDirectory(
             at: directoryURL,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ).filter { $0.pathExtension == "json" }
-        return urls.map { url in
+    }
+
+    /// Writers publish complete bundles atomically, so individual reads can run independently.
+    nonisolated func readDocuments(at urls: [URL]) throws -> [(item: TeleprompterV2DocumentListItem, bundle: TeleprompterV2DocumentBundle?)] {
+        return try urls.map { url in
+            try Task.checkCancellation()
             let id = url.deletingPathExtension().lastPathComponent
             do {
                 let bundle = try decode(Data(contentsOf: url))

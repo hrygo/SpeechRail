@@ -2230,6 +2230,34 @@ final class CaptionSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(projected[1].text, "另一位说话人接话。")
     }
 
+    func testHistoryTranscriptPreservesParagraphsAndSpeakerFilters() async throws {
+        let rawLines = [
+            TranscriptLine(id: "first", sessionID: "record", ordinal: 1, role: .speaker,
+                text: "开头，", source: .system, translatedText: "Opening", paragraphID: "paragraph"),
+            TranscriptLine(id: "second", sessionID: "record", ordinal: 2, role: .speaker,
+                speakerLabel: "B", text: "继续。", source: .system, paragraphID: "paragraph"),
+            TranscriptLine(id: "third", sessionID: "record", ordinal: 3, role: .speaker,
+                speakerLabel: "d1:S1", text: "另一位。", source: .system, paragraphID: "paragraph"),
+            TranscriptLine(id: "legacy", sessionID: "record", ordinal: 4, role: .speaker,
+                text: "旧记录。", source: .system),
+        ]
+        let presentation = try await SessionLibraryTranscriptPresentation.prepare(
+            lines: rawLines, speakerNames: ["B": "  主持人  ", "A": "嘉宾", "C": ""]
+        )
+
+        XCTAssertEqual(presentation.lines, SessionExporter.paragraphLines(rawLines))
+        XCTAssertEqual(presentation.lines.map(\.id), ["first", "third", "legacy"])
+        XCTAssertEqual(presentation.speakerLabels, ["B", "d1:S1", "A", "C"])
+        XCTAssertEqual(presentation.speakerCounts, ["B": 1, "d1:S1": 1])
+        XCTAssertEqual(presentation.speakerDisplayName(for: "C"), "说话人 C")
+        XCTAssertEqual(presentation.filteredLines(matching: " opening ", speaker: "B", speakerActive: true).map(\.id), ["first"])
+        XCTAssertEqual(presentation.filteredLines(matching: "主持人", speakerActive: true).map(\.id), ["first"])
+        XCTAssertEqual(presentation.filteredLines(matching: "未命名说话人", speakerActive: true).map(\.id), ["third"])
+        XCTAssertEqual(presentation.filteredLines(matching: "未标", speakerActive: true).map(\.id), ["legacy"])
+        XCTAssertTrue(presentation.filteredLines(matching: "主持人", speakerActive: false).isEmpty)
+        XCTAssertEqual(presentation.filteredLines(matching: " ", speaker: "B", speakerActive: false), presentation.lines)
+    }
+
     func testParagraphAssemblerFlushDelayAdaptsToCompletenessAndAssemblyToggle() {
         let now = Date()
         let incomplete = CaptionParagraph(

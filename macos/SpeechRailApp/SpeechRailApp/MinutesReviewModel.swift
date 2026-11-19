@@ -130,25 +130,26 @@ public final class MinutesReviewModel {
     /// 与「打开时的第一版」的差异。nil = 还没加载。
     public private(set) var comparison: MinutesVersionDiff?
 
-    private var openingVersionID: String
+    private let openingVersionID: String
+    @ObservationIgnored private var lineageLoadGeneration: UInt64 = 0
 
     /// 读一次血缘。进来时记下起点，之后一直和它比——
     /// 用户要回答的是"我这次改了什么"，不是"和上一版差了什么"。
     public func loadLineage() async {
-        lineage = (try? await coordinator.minutesEditLineage(minutesID: minutesID)) ?? []
-        recomputeComparison()
-    }
-
-    private func recomputeComparison() {
+        let requestedID = minutesID
+        lineageLoadGeneration &+= 1
+        let generation = lineageLoadGeneration
+        let loaded = (try? await coordinator.minutesEditLineage(minutesID: requestedID)) ?? []
+        guard generation == lineageLoadGeneration, minutesID == requestedID, !Task.isCancelled else { return }
+        lineage = loaded
+        comparison = nil
         // 基准是**用户打开时看到的那一版**，不是血缘的起点。
         // 打开一版已经改过的纪要时，起点是 AI 原文，但那不是用户这次想比的。
-        guard let opening = lineage.first(where: { $0.id == openingVersionID }),
-              let current = lineage.first(where: { $0.id == minutesID })
-        else {
-            comparison = nil
-            return
-        }
-        comparison = MinutesDiff.lineDiff(from: opening.body ?? "", to: current.body ?? "")
+        guard let opening = loaded.first(where: { $0.id == openingVersionID }),
+              let current = loaded.first(where: { $0.id == requestedID }) else { return }
+        let diff = await MinutesDiff.prepareLineDiff(from: opening.body ?? "", to: current.body ?? "")
+        guard generation == lineageLoadGeneration, minutesID == requestedID, !Task.isCancelled else { return }
+        comparison = diff
     }
 
     /// 采用当前这一版。**只有用户明确按下去才算**（MC-31）：

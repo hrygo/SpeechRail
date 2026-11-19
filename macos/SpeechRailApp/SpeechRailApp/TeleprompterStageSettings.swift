@@ -99,27 +99,52 @@ public struct TeleprompterStageDisplayLine: Equatable, Identifiable, Sendable {
     }
 }
 
-/// Uses AppKit's text layout to split each source segment into visual rows.
-/// Keep this result cached by the view until the source, font or width changes.
-@MainActor
+/// Splits each source segment into visual rows using a local TextKit stack.
 public enum TeleprompterStageLineLayout {
     public static func layout(
         segments: [TeleprompterSegment],
         pointSize: CGFloat,
         availableWidth: CGFloat
     ) -> [TeleprompterStageDisplayLine] {
+        layoutRows(segments: segments, pointSize: pointSize, availableWidth: availableWidth, checkCancellation: {})
+    }
+
+    @concurrent
+    static func prepare(
+        segments: [TeleprompterSegment],
+        pointSize: CGFloat,
+        availableWidth: CGFloat
+    ) async throws -> [TeleprompterStageDisplayLine] {
+        try layoutRows(
+            segments: segments,
+            pointSize: pointSize,
+            availableWidth: availableWidth,
+            checkCancellation: { try Task.checkCancellation() }
+        )
+    }
+
+    private static func layoutRows(
+        segments: [TeleprompterSegment],
+        pointSize: CGFloat,
+        availableWidth: CGFloat,
+        checkCancellation: () throws -> Void
+    ) rethrows -> [TeleprompterStageDisplayLine] {
+        try checkCancellation()
         let safeWidth = availableWidth.isFinite ? max(1, availableWidth) : 1
         let safePointSize = pointSize.isFinite ? max(1, pointSize) : 1
         let font = NSFont.systemFont(ofSize: safePointSize)
 
-        return segments.enumerated().flatMap { segmentIndex, segment in
-            layout(
+        let rows = try segments.enumerated().flatMap { segmentIndex, segment in
+            try checkCancellation()
+            return layout(
                 segment: segment,
                 segmentIndex: segmentIndex,
                 font: font,
                 width: safeWidth
             )
         }
+        try checkCancellation()
+        return rows
     }
 
     private static func layout(
@@ -139,6 +164,8 @@ public enum TeleprompterStageLineLayout {
         )
         let storage = NSTextStorage(attributedString: attributedText)
         let layoutManager = NSLayoutManager()
+        // Each call owns its entire TextKit stack and never attaches a view.
+        layoutManager.backgroundLayoutEnabled = false
         layoutManager.usesFontLeading = true
         let container = NSTextContainer(
             size: NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)

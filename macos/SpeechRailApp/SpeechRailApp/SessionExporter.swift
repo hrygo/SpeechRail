@@ -494,6 +494,65 @@ public enum SessionExporter {
     }
 }
 
+/// 记录库正文与说话人筛选共用同一份段落投影。编辑仍以原始行 ID 为依据。
+struct SessionLibraryTranscriptPresentation: Sendable {
+    static let empty = Self(lines: [], speakerLabels: [], speakerCounts: [:], speakerDisplayNames: [:])
+
+    let lines: [TranscriptLine]
+    let speakerLabels: [String]
+    let speakerCounts: [String: Int]
+    private let speakerDisplayNames: [String: String]
+
+    @concurrent
+    static func prepare(lines: [TranscriptLine], speakerNames: [String: String]) async throws -> Self {
+        try Task.checkCancellation()
+        let paragraphs = SessionExporter.paragraphLines(lines)
+        var speakerLabels: [String] = []
+        var speakerCounts: [String: Int] = [:]
+        for (index, line) in paragraphs.enumerated() {
+            if index.isMultiple(of: 128) { try Task.checkCancellation() }
+            guard let label = line.speakerLabel, !label.isEmpty else { continue }
+            if speakerCounts[label] == nil { speakerLabels.append(label) }
+            speakerCounts[label, default: 0] += 1
+        }
+        speakerLabels += speakerNames.keys.sorted().filter { !$0.isEmpty && speakerCounts[$0] == nil }
+        var speakerDisplayNames: [String: String] = [:]
+        for label in speakerLabels {
+            let name = speakerNames[label]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            speakerDisplayNames[label] = SpeakerLabeling.chipText(label: label, displayName: name)
+        }
+        try Task.checkCancellation()
+        return Self(lines: paragraphs, speakerLabels: speakerLabels, speakerCounts: speakerCounts,
+                    speakerDisplayNames: speakerDisplayNames)
+    }
+
+    func speakerDisplayName(for label: String) -> String {
+        speakerDisplayNames[label] ?? SpeakerLabeling.chipText(label: label, displayName: nil)
+    }
+
+    func speakerText(for line: TranscriptLine) -> String {
+        switch line.role {
+        case .user: return "你"
+        case .assistant: return "助手"
+        case .speaker:
+            guard let label = line.speakerLabel, !label.isEmpty else { return "未标" }
+            return speakerDisplayName(for: label)
+        }
+    }
+
+    func filteredLines(matching searchText: String, speaker: String? = nil, speakerActive: Bool) -> [TranscriptLine] {
+        let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let speaker = speakerActive ? speaker : nil
+        guard !keyword.isEmpty || speaker != nil else { return lines }
+        return lines.filter { line in
+            if let speaker, line.speakerLabel != speaker { return false }
+            return keyword.isEmpty || line.text.localizedCaseInsensitiveContains(keyword)
+                || line.translatedText?.localizedCaseInsensitiveContains(keyword) == true
+                || (speakerActive && speakerText(for: line).localizedCaseInsensitiveContains(keyword))
+        }
+    }
+}
+
 // MARK: - 系统保存面板
 
 #if canImport(AppKit)

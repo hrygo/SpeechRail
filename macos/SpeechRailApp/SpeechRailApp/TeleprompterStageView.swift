@@ -9,7 +9,7 @@ public struct TeleprompterStageView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @State private var scrollPosition = ScrollPosition(idType: String.self)
-    @State private var displayLines: [TeleprompterStageDisplayLine] = []
+    @State private var displayLayout: LineLayout?
     @State private var isBrowsingAll: Bool = false
     @State private var hoveredSegmentIndex: Int? = nil
     @State private var isAppearancePopoverPresented = false
@@ -32,10 +32,21 @@ public struct TeleprompterStageView: View {
         case close
     }
 
-    private struct LineLayoutRequest: Equatable {
+    private struct LineLayoutSource: Equatable {
+        let documentID: String?
+        let versionID: String?
         let segments: [TeleprompterSegment]
+    }
+
+    private struct LineLayoutRequest: Equatable {
+        let source: LineLayoutSource
         let pointSize: CGFloat
         let availableWidth: CGFloat
+    }
+
+    private struct LineLayout {
+        let source: LineLayoutSource
+        let lines: [TeleprompterStageDisplayLine]
     }
 
     public init(
@@ -541,18 +552,23 @@ public struct TeleprompterStageView: View {
 
     private var scriptStack: some View {
         GeometryReader { geometry in
-            let segments = session.activeVersion?.segments ?? []
+            let source = lineLayoutSource
+            let segments = source.segments
             let contentWidth = TeleprompterStageLayoutPolicy.contentLayoutWidth(
                 windowContentWidth: geometry.size.width,
                 requestedContentWidth: settings.contentWidth
             )
             let request = LineLayoutRequest(
-                segments: segments,
+                source: source,
                 pointSize: settings.scriptPointSize,
                 availableWidth: contentWidth
             )
             let browsingAll = isBrowsingAll && !isFollowing
-            let currentLineIndex = currentDisplayLineIndex
+            let lines = displayLayout?.source == source ? displayLayout?.lines ?? [] : []
+            let currentLineIndex = TeleprompterStagePresentation.displayLineIndex(
+                for: currentReadingPosition,
+                lines: lines
+            )
             let lineSpacing = browsingAll
                 ? SpeechRailDesignTokens.Teleprompter.stageSegmentSpacing
                 : max(SpeechRailDesignTokens.Teleprompter.stageSegmentSpacing, CGFloat(settings.lineSpacing))
@@ -568,12 +584,13 @@ public struct TeleprompterStageView: View {
                         let slots = TeleprompterStagePresentation.visibleLineSlots(
                             currentIndex: currentLineIndex,
                             visibleCount: settings.visibleLineCount,
-                            totalCount: displayLines.count
+                            totalCount: lines.count
                         )
                         ForEach(slots.indices, id: \.self) { slot in
                             if let lineIndex = slots[slot] {
-                                displayLineRow(at: lineIndex, currentLineIndex: currentLineIndex)
-                                    .id(displayLines[lineIndex].id)
+                                let line = lines[lineIndex]
+                                displayLineRow(line, at: lineIndex, currentLineIndex: currentLineIndex)
+                                    .id(line.id)
                             } else {
                                 Color.clear
                                     .frame(height: emptySlotHeight)
@@ -602,18 +619,48 @@ public struct TeleprompterStageView: View {
                     session.takeOverForManualScroll()
                 }
             }
-            .onChange(of: request, initial: true) { _, request in
-                displayLines = TeleprompterStageLineLayout.layout(
-                    segments: request.segments,
-                    pointSize: request.pointSize,
-                    availableWidth: request.availableWidth
-                )
-                scrollToReadingPosition()
+            .overlay {
+                if !browsingAll, !segments.isEmpty, displayLayout?.source != source {
+                    ProgressView("正在排版朗读稿…")
+                        .allowsHitTesting(false)
+                }
+            }
+            .task(id: request) {
+                await prepareDisplayLayout(request)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .textSelection(.enabled)
         .accessibilityLabel("朗读内容")
+    }
+
+    private var lineLayoutSource: LineLayoutSource {
+        let version = session.activeVersion
+        return LineLayoutSource(
+            documentID: session.document?.id,
+            versionID: version?.id,
+            segments: version?.segments ?? []
+        )
+    }
+
+    private var displayLines: [TeleprompterStageDisplayLine] {
+        guard let displayLayout, displayLayout.source == lineLayoutSource else { return [] }
+        return displayLayout.lines
+    }
+
+    private func prepareDisplayLayout(_ request: LineLayoutRequest) async {
+        // SwiftUI cancels the task when its source or geometry changes.
+        guard let lines = try? await TeleprompterStageLineLayout.prepare(
+            segments: request.source.segments,
+            pointSize: request.pointSize,
+            availableWidth: request.availableWidth
+        ), !Task.isCancelled,
+           request.source == lineLayoutSource,
+           request.pointSize == settings.scriptPointSize
+        else { return }
+
+        displayLayout = LineLayout(source: request.source, lines: lines)
+        scrollToReadingPosition()
     }
 
     private var currentReadingPosition: TeleprompterAligner.Position {
@@ -654,6 +701,7 @@ public struct TeleprompterStageView: View {
     }
 
     private func moveByDisplayLine(_ delta: Int) {
+        guard displayLayout?.source == lineLayoutSource else { return }
         if let target = TeleprompterStagePresentation.positionByMovingLine(
             by: delta,
             from: currentReadingPosition,
@@ -687,8 +735,11 @@ public struct TeleprompterStageView: View {
         return segments[index].id
     }
 
-    private func displayLineRow(at index: Int, currentLineIndex: Int) -> some View {
-        let line = displayLines[index]
+    private func displayLineRow(
+        _ line: TeleprompterStageDisplayLine,
+        at index: Int,
+        currentLineIndex: Int
+    ) -> some View {
         let isCurrent = index == currentLineIndex
 
         return Text(styledText(line, index: index, currentLineIndex: currentLineIndex))
