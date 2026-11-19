@@ -104,14 +104,11 @@ class AuxiliaryIngress(Protocol):
 @dataclass(frozen=True, slots=True)
 class RealtimeAuxiliaryPorts:
     aligner: AlignTextPort | None
-    engine: DiarizationEngine | None
     alignment_admission: AlignmentAdmission
     diarization_admission: DiarizationAdmission
     metrics: Metrics
-    ready: Callable[[], bool]
-    status_message: Callable[[], str]
-    engine_for_backend: Callable[[str], DiarizationEngine | None] | None = None
-    backend_ready: Callable[[str], bool] | None = None
+    engine_for_backend: Callable[[str], DiarizationEngine | None]
+    backend_status: Callable[[str], Mapping[str, object]]
 
 
 class RealtimeAuxiliaryOwner:
@@ -135,7 +132,6 @@ class RealtimeAuxiliaryOwner:
         self._send = send
         self._config_snapshot = config
         self._input = input_source
-        self._diarization_engine = ports.engine
         self._metadata_revision = 0
         self._diarization: DiarizationSession | None = None
         self._diarization_events: asyncio.Task[None] | None = None
@@ -883,20 +879,13 @@ class RealtimeAuxiliaryOwner:
             return
         if not self._diarization_enabled:
             return
-        engine = (
-            self._ports.engine_for_backend(self._diarization_backend)
-            if self._ports.engine_for_backend
-            else self._diarization_engine
-        )
-        ready = (
-            self._ports.backend_ready(self._diarization_backend)
-            if self._ports.backend_ready
-            else self._ports.ready()
-        )
-        if not ready or engine is None:
+        backend = self._diarization_backend
+        engine = self._ports.engine_for_backend(backend)
+        status = self._ports.backend_status(backend)
+        if not status["ready"] or engine is None:
             raise RealtimeAdapterError(
                 "diarization_not_available",
-                self._ports.status_message(),
+                str(status["message"]),
             )
         await self._reserve_diarization()
         try:

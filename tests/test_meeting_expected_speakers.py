@@ -102,7 +102,7 @@ async def test_requested_budget_reaches_worker_and_does_not_mutate_certification
     await default.cancel()
 
 
-def _meeting_client(certified=4):
+def _meeting_client(certified=4, *, sortformer=None, stable_ready=True):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -116,7 +116,7 @@ def _meeting_client(certified=4):
     )
 
     class BudgetEngine(_FakeDiarizationEngine):
-        readiness = DiarizationReadiness(True, True, None, "test only")
+        readiness = DiarizationReadiness(True, stable_ready, None, "test only")
         max_speakers = certified
 
         def __init__(self):
@@ -129,12 +129,56 @@ def _meeting_client(certified=4):
 
     engine = BudgetEngine()
     services = _services(
-        engine=engine, aligner=_FakeTextAligner(), streaming_factory=_FakeStreamingFactory()
+        engine=sortformer if sortformer is not None else _FakeDiarizationEngine(supports_stream=True),
+        aligner=_FakeTextAligner(),
+        streaming_factory=_FakeStreamingFactory(),
     )
     services.diarization_backends["meeting_dynamic"] = engine
     app = FastAPI()
     app.include_router(create_openai_realtime_router(services))
     return TestClient(app), engine
+
+
+@pytest.mark.parametrize("backend", ["sortformer", "meeting_dynamic"])
+def test_meeting_opens_only_the_requested_backend(backend):
+    from test_diarization_extensions import _FakeDiarizationEngine, _open, _pcm16, _update_session
+
+    basic = _FakeDiarizationEngine(supports_stream=True)
+    client, stable = _meeting_client(sortformer=basic)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        updated = _update_session(socket, session_update(
+            task="transcription",
+            alignment={"enabled": True, "granularity": "segment"},
+            diarization={"enabled": True, "backend": backend},
+        ))
+        assert updated["type"] == "session.updated"
+        assert updated["session"]["speechrail"]["diarization"]["backend"] == backend
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(2400)})
+        updated = _update_session(socket, session_update(task="transcription", event_id="sync"))
+        assert updated["type"] == "session.updated"
+        selected, other = (basic, stable) if backend == "sortformer" else (stable, basic)
+        assert len(selected.streams) == 1
+        assert selected.streams[0].next_start == 1600
+        assert other.streams == []
+
+
+def test_unavailable_stable_backend_does_not_report_ready_sortformer():
+    from test_diarization_extensions import _FakeDiarizationEngine, _open, _update_session
+
+    basic = _FakeDiarizationEngine(supports_stream=True)
+    client, stable = _meeting_client(sortformer=basic, stable_ready=False)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        refused = _update_session(socket, session_update(
+            task="transcription",
+            alignment={"enabled": True, "granularity": "segment"},
+            diarization={"enabled": True, "backend": "meeting_dynamic"},
+        ))
+        assert refused["type"] == "error"
+        assert refused["error"]["code"] == "diarization_not_available"
+        assert "meeting diarization" in refused["error"]["message"]
+        assert basic.streams == stable.streams == []
 
 
 @pytest.mark.parametrize("count", [None, 2, 3, 4])

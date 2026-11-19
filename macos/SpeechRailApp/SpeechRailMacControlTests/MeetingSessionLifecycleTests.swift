@@ -427,6 +427,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
 
         h.power.fireSleep()
         try await h.settle { $0.phase == .interrupted }
+        preferences.meetingDiarizationEnabled = false
         await h.session.continueAfterInterruption()
         try await h.settle { $0.phase == .recording }
         XCTAssertEqual(h.clients.madeConfigurations.map(\.diarizationBackend), [.sortformer, .sortformer])

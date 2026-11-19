@@ -164,8 +164,12 @@ def test_asr_and_auxiliary_owners_construct_without_tts_or_app_services() -> Non
         )
         auxiliary = RealtimeAuxiliaryOwner(
             ports=RealtimeAuxiliaryPorts(
-                None, None, AlignmentAdmission(), DiarizationAdmission(), metrics,
-                lambda: False, lambda: "not enabled",
+                aligner=None,
+                alignment_admission=AlignmentAdmission(),
+                diarization_admission=DiarizationAdmission(),
+                metrics=metrics,
+                engine_for_backend=lambda _: None,
+                backend_status=lambda _: {"ready": False, "message": "not enabled"},
             ),
             settings=settings,
             task_id="task",
