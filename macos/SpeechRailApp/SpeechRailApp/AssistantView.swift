@@ -1582,17 +1582,18 @@ public struct AssistantView: View {
     // MARK: 实时对讲主 Chat 工作台（对话中）
 
     private var liveChatWorkbenchCard: some View {
-        SessionPanel(expandsVertically: true) {
+        let rows = assistant.conversationRows
+        return SessionPanel(expandsVertically: true) {
             liveChatHeader
             SessionHairline()
 
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        if assistant.conversationRows.isEmpty && assistant.partialText == nil && assistant.streamingReply == nil {
+                        if rows.isEmpty && assistant.partialText == nil && assistant.streamingReply == nil {
                             liveListeningWorkspace
                         } else {
-                            ForEach(assistant.conversationRows) { row in
+                            ForEach(rows) { row in
                                 conversationRow(row)
                                     .id(row.id)
                             }
@@ -1619,12 +1620,12 @@ public struct AssistantView: View {
                     .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onChange(of: assistant.conversationRows.map(\.id)) { _, _ in
-                    guard let last = assistant.conversationRows.last else { return }
+                .onChange(of: rows.map(\.id)) { _, rowIDs in
+                    guard let lastID = rowIDs.last else { return }
                     if reduceMotion {
-                        proxy.scrollTo(last.id, anchor: .bottom)
+                        proxy.scrollTo(lastID, anchor: .bottom)
                     } else {
-                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                        withAnimation { proxy.scrollTo(lastID, anchor: .bottom) }
                     }
                 }
                 .onChange(of: assistant.streamingReply) { _, newReply in
@@ -3960,7 +3961,7 @@ public struct AssistantView: View {
 
                 ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        ForEach(Array((review?.lines ?? []).enumerated()), id: \.element.id) { _, line in
+                        ForEach(review?.lines ?? []) { line in
                             SessionTurnRow(
                                 who: line.role == .assistant ? "助手" : "你",
                                 isVoice: line.role == .assistant,

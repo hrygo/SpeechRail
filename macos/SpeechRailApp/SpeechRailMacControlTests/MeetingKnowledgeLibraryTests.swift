@@ -518,7 +518,11 @@ final class MeetingKnowledgeLibraryTests: XCTestCase {
         XCTAssertEqual(snapshot.documentID, documentID)
         XCTAssertEqual(snapshot.title, "发布评审")
         XCTAssertNotNil(snapshot.minutesBody, "纪要和条目必须来自同一次读取")
-        XCTAssertEqual(snapshot.transcriptLines, ["先确认这几点。"])
+        let document = try await store.meetingDocument(id: documentID)
+        let sessionID = try XCTUnwrap(document?.sourceSessionID)
+        let lines = try await store.lines(sessionID: sessionID)
+        XCTAssertEqual(snapshot.transcriptLines.map(\.id), lines.map(\.id))
+        XCTAssertEqual(snapshot.transcriptLines.map(\.text), ["先确认这几点。"])
         XCTAssertEqual(snapshot.items.count, 2)
         XCTAssertFalse(snapshot.isEmpty)
     }

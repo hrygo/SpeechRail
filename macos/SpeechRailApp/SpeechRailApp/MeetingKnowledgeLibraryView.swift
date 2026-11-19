@@ -1203,7 +1203,12 @@ struct MeetingKnowledgeLibraryView: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+                LazyVStack(
+                    alignment: .leading,
+                    spacing: model.detailTab == .transcript
+                        ? SpeechRailDesignTokens.Spacing.sm
+                        : SpeechRailDesignTokens.Spacing.gutter
+                ) {
                     changeProposalsBand
                     switch model.detailTab {
                     case .minutes: minutesSection(snapshot)
@@ -1823,39 +1828,37 @@ struct MeetingKnowledgeLibraryView: View {
                 .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         } else {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                HStack {
-                    Text("录音完整转录（共 \(snapshot.transcriptLines.count) 句）")
+            HStack {
+                Text("录音完整转录（共 \(snapshot.transcriptLines.count) 句）")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer()
+                Button {
+                    let fullTranscript = snapshot.transcriptLines.lazy.map(\.text).joined(separator: "\n")
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(fullTranscript, forType: .string)
+                } label: {
+                    Label("复制全文", systemImage: "doc.on.doc")
                         .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    Spacer()
-                    Button {
-                        let fullTranscript = snapshot.transcriptLines.joined(separator: "\n")
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(fullTranscript, forType: .string)
-                    } label: {
-                        Label("复制全文", systemImage: "doc.on.doc")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                    }
-                    .buttonStyle(.link)
                 }
-                .padding(.bottom, SpeechRailDesignTokens.Spacing.tight)
+                .buttonStyle(.link)
+            }
+            .padding(.bottom, SpeechRailDesignTokens.Spacing.tight)
 
-                ForEach(Array(snapshot.transcriptLines.enumerated()), id: \.offset) { index, line in
-                    HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Text("\(index + 1)")
-                            .font(SpeechRailDesignTokens.Typography.technical)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            .frame(width: SpeechRailDesignTokens.Layout.transcriptLineNumberWidth, alignment: .trailing)
+            ForEach(snapshot.transcriptLines.enumerated(), id: \.element.id) { index, line in
+                HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Text("\(index + 1)")
+                        .font(SpeechRailDesignTokens.Typography.technical)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .frame(width: SpeechRailDesignTokens.Layout.transcriptLineNumberWidth, alignment: .trailing)
 
-                        Text(line)
-                            .font(SpeechRailDesignTokens.Typography.body)
-                            .textSelection(.enabled)
-                            .lineSpacing(SpeechRailDesignTokens.Spacing.micro)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
+                    Text(line.text)
+                        .font(SpeechRailDesignTokens.Typography.body)
+                        .textSelection(.enabled)
+                        .lineSpacing(SpeechRailDesignTokens.Spacing.micro)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
             }
         }
     }

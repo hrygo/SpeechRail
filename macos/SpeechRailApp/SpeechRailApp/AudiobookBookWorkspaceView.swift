@@ -934,11 +934,12 @@ public struct AudiobookBookWorkspaceView: View {
                     ProgressView("正在读取本章…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
+                    let displayedAtoms = workflow.displayedChapterAtoms
                     ScrollViewReader { scrollProxy in
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                ForEach(Array(workflow.displayedChapterAtoms.enumerated()), id: \.element.id) { index, atom in
-                                    let previousAtom = index > 0 ? workflow.displayedChapterAtoms[index - 1] : nil
+                                ForEach(displayedAtoms.enumerated(), id: \.element.id) { index, atom in
+                                    let previousAtom = index > 0 ? displayedAtoms[index - 1] : nil
                                     atomRowView(atom: atom, previousAtom: previousAtom)
                                         .id(atom.id)
                                 }
@@ -3092,7 +3093,7 @@ private struct AudiobookProductionConfirmationSheet<Content: View>: View {
                 onClose: { dismiss() }
             )
             ScrollView {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+                LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
                     content
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3326,16 +3327,14 @@ private struct AudiobookRegenerationSheet: View {
         }
     }
 
-    private var blockedChapters: [AudiobookChapter] {
-        draft.chapters.filter { targetChapterIDs.contains($0.id) && draft.blockedChapterReasons[$0.id] != nil }
-    }
-
-    private var fragmentCount: Int {
-        if scope == .fragments { return fragmentIDs.count }
-        return targetChapterIDs.reduce(0) { $0 + draft.fragmentsByChapter[$1, default: []].count }
-    }
-
     var body: some View {
+        let targetChapterIDs = self.targetChapterIDs
+        let blockedChapters = draft.chapters.filter {
+            targetChapterIDs.contains($0.id) && draft.blockedChapterReasons[$0.id] != nil
+        }
+        let fragmentCount = scope == .fragments ? fragmentIDs.count : targetChapterIDs.reduce(0) {
+            $0 + draft.fragmentsByChapter[$1, default: []].count
+        }
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             SpeechRailSheetHeader(
                 title: "重新制作",
@@ -3343,14 +3342,14 @@ private struct AudiobookRegenerationSheet: View {
                 onClose: { dismiss() }
             )
             ScrollView {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+                LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
                     if workflow.selectedBook?.productionState == .paused {
                         NoticeBar(tone: .warning, message: "确认重新制作会替换已暂停任务的续作记录，已保存的音频和历史版本全部保留。")
                     }
                     Picker("重新制作范围", selection: $scope) {
                         ForEach(Scope.allCases) { Text($0.rawValue).tag($0) }
                     }
-                    scopeChoices
+                    scopeChoices(targetChapterIDs: targetChapterIDs)
                     ForEach(blockedChapters) { chapter in
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Label(chapter.title, systemImage: "exclamationmark.circle")
@@ -3404,21 +3403,24 @@ private struct AudiobookRegenerationSheet: View {
     }
 
     @ViewBuilder
-    private var scopeChoices: some View {
+    private func scopeChoices(targetChapterIDs: Set<UUID>) -> some View {
         switch scope {
         case .chapters:
             ForEach(draft.chapters) { chapter in chapterChoice(chapter) }
         case .fragments:
             let displayedChapters = draft.chapters.filter { targetChapterIDs.contains($0.id) || $0.id == draft.defaultChapterID }
             ForEach(displayedChapters) { chapter in
-                if displayedChapters.count > 1 {
-                    Text(chapter.title)
-                        .font(SpeechRailDesignTokens.Typography.caption.weight(.semibold))
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .padding(.top, SpeechRailDesignTokens.Spacing.xs)
-                }
-                ForEach(Array(draft.fragmentsByChapter[chapter.id, default: []].enumerated()), id: \.element.id) { entry in
-                    fragmentChoice(index: entry.offset, fragment: entry.element)
+                Section {
+                    ForEach(draft.fragmentsByChapter[chapter.id, default: []].enumerated(), id: \.element.id) { entry in
+                        fragmentChoice(index: entry.offset, fragment: entry.element)
+                    }
+                } header: {
+                    if displayedChapters.count > 1 {
+                        Text(chapter.title)
+                            .font(SpeechRailDesignTokens.Typography.caption.weight(.semibold))
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                    }
                 }
             }
         case .currentChapter:

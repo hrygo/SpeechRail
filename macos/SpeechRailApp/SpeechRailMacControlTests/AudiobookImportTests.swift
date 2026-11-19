@@ -130,6 +130,36 @@ final class AudiobookImportTests: XCTestCase {
         XCTAssertTrue(String(decoding: preview.referenceUTF8, as: UTF8.self).contains(original))
     }
 
+    func testOriginalPreviewKeepsExactUnicodeScalarPrefixForChapterAndFallback() throws {
+        let text = "  第一章 晨行\r\n前一章的內容。\r\n\r\n第二章 夜行\r\n\r\nCafe\u{0301}："
+            + String(repeating: "𠮷", count: AudiobookLimits.maxPreviewScalars + 1)
+            + "\r\n第三章 歸途\r\n最後一章。  "
+        let raw = Data(text.utf8)
+        let preview = try AudiobookTXTImporter.prepare(rawData: raw, encoding: .utf8)
+        XCTAssertEqual(preview.chapters.count, 3)
+        let chapter = preview.chapters[1]
+        let reference = try AudiobookSourceIndex(utf8: preview.referenceUTF8)
+
+        for chapterID in [chapter.id, nil, UUID()] {
+            let workingRange = preview.chapters.first(where: { $0.id == chapterID })?.sourceRange
+                ?? preview.sourceIndex.wholeRange
+            let spans = preview.preparedText.sourceMap.filter {
+                $0.workingRange.lowerBound < workingRange.upperBound
+                    && workingRange.lowerBound < $0.workingRange.upperBound
+            }
+            let fullExcerpt = try reference.text(in: .init(
+                lowerBound: spans.first?.referenceRange.lowerBound ?? 0,
+                upperBound: spans.last?.referenceRange.upperBound ?? reference.byteCount
+            ))
+            let expected = String(fullExcerpt.unicodeScalars.prefix(AudiobookLimits.maxPreviewScalars))
+            let actual = try preview.textPreview(for: chapterID, originalLayout: true)
+            XCTAssertEqual(Array(actual.utf8), Array(expected.utf8))
+            XCTAssertEqual(actual.unicodeScalars.count, AudiobookLimits.maxPreviewScalars)
+        }
+        XCTAssertEqual(preview.originalBytes, raw)
+        XCTAssertEqual(preview.referenceUTF8, raw)
+    }
+
     func testStrictEncodingPreview() throws {
         let sampleText = "第1章 雾港\n“你也看见灯了？”他问。合法替换符：\u{FFFD}。\n"
 

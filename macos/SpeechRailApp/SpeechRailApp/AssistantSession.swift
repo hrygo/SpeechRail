@@ -171,8 +171,10 @@ public final class AssistantSession {
     var conversationRows: [AssistantConversationRow] {
         let saved = turns.map(AssistantConversationRow.saved)
         guard let sessionID else { return saved }
+        let unsettled = inputPersistence.unsettledInputs(sessionID: sessionID)
+        guard !unsettled.isEmpty else { return saved }
         let savedIDs = Set(turns.map(\.id))
-        return saved + inputPersistence.unsettledInputs(sessionID: sessionID)
+        return saved + unsettled
             .filter { !savedIDs.contains($0.command.lineID) }
             .map { .accepted($0.command, failure: $0.failure) }
     }

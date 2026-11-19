@@ -230,7 +230,8 @@ public struct InnerOSDrawer: View {
     // MARK: - 左栏：本场提问历史列表
 
     private var historyColumn: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+        let activeExchangeID = selectedExchange?.id
+        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text("本场提问（\(session.exchanges.count)）")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
@@ -263,9 +264,9 @@ public struct InnerOSDrawer: View {
             .padding(.top, SpeechRailDesignTokens.Spacing.sm)
 
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                     ForEach(session.exchanges) { exchange in
-                        historyRow(exchange)
+                        historyRow(exchange, isSelected: exchange.id == activeExchangeID)
                     }
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
@@ -277,9 +278,8 @@ public struct InnerOSDrawer: View {
         .frame(width: Self.historyColumnWidth, alignment: .topLeading)
     }
 
-    private func historyRow(_ exchange: InnerOSExchange) -> some View {
-        let isSelected = exchange.id == (selectedExchange?.id)
-        return Button {
+    private func historyRow(_ exchange: InnerOSExchange, isSelected: Bool) -> some View {
+        Button {
             selectedExchangeID = exchange.id
         } label: {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {

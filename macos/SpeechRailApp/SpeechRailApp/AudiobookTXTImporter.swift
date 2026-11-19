@@ -147,16 +147,8 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
 
     public func textPreview(for chapterID: UUID?, originalLayout: Bool = false) throws -> String {
         let chapter = chapters.first(where: { $0.id == chapterID })
-        if originalLayout {
-            let workRange = chapter?.sourceRange ?? sourceIndex.wholeRange
-            let spans = preparedText.sourceMap.filter { $0.workingRange.lowerBound < workRange.upperBound && workRange.lowerBound < $0.workingRange.upperBound }
-            let start = spans.first?.referenceRange.lowerBound ?? 0
-            let end = spans.last?.referenceRange.upperBound ?? Int64(referenceUTF8.count)
-            let reference = try AudiobookSourceIndex(utf8: referenceUTF8)
-            let text = try reference.text(in: .init(lowerBound: start, upperBound: end))
-            return String(text.unicodeScalars.prefix(AudiobookLimits.maxPreviewScalars))
-        }
         let range = chapter?.sourceRange ?? sourceIndex.wholeRange
+        if originalLayout { return try originalTextPreview(for: range) }
         try sourceIndex.validateRangeBounds(range)
         let exclusions = (chapter?.excludedRanges ?? []).compactMap { excluded -> AudiobookSourceRange? in
             let lower = max(excluded.lowerBound, range.lowerBound)
@@ -175,13 +167,55 @@ public struct AudiobookImportPreview: Equatable, Sendable, Identifiable {
                 lowerBound: span.lowerBound,
                 upperBound: Int64(sourceIndex.scalarByteOffsets[startScalar + take])
             )
-            let piece = try originalLayout
-                ? sourceIndex.text(in: bounded)
-                : sourceIndex.text(in: bounded)
+            let piece = try sourceIndex.text(in: bounded)
             if !piece.isEmpty { pieces.append(piece) }
             remaining -= take
         }
-        return pieces.joined(separator: originalLayout ? "" : "\n\n")
+        return pieces.joined(separator: "\n\n")
+    }
+
+    private func originalTextPreview(for workingRange: AudiobookSourceRange) throws -> String {
+        let spans = preparedText.sourceMap
+        // Preparation emits contiguous spans in working byte order.
+        func spanBoundary(where predicate: (AudiobookWorkingSourceSpan) -> Bool) -> Int {
+            var lower = spans.startIndex
+            var upper = spans.endIndex
+            while lower < upper {
+                let middle = lower + (upper - lower) / 2
+                if predicate(spans[middle]) { upper = middle }
+                else { lower = middle + 1 }
+            }
+            return lower
+        }
+        let first = spanBoundary { $0.workingRange.upperBound > workingRange.lowerBound }
+        let end = spanBoundary { $0.workingRange.lowerBound >= workingRange.upperBound }
+        let byteCount = Int64(referenceUTF8.count)
+        let range = first < end
+            ? AudiobookSourceRange(lowerBound: spans[first].referenceRange.lowerBound,
+                                   upperBound: spans[end - 1].referenceRange.upperBound)
+            : AudiobookSourceRange(lowerBound: 0, upperBound: byteCount)
+
+        guard range.lowerBound <= range.upperBound else { throw AudiobookSourceError.invertedRange(range) }
+        guard range.lowerBound >= 0, range.upperBound <= byteCount else {
+            throw AudiobookSourceError.rangeOutOfBounds(range, totalBytes: byteCount)
+        }
+        let lower = referenceUTF8.startIndex + Int(range.lowerBound)
+        let upper = referenceUTF8.startIndex + Int(range.upperBound)
+        // The reference is decoded UTF-8. A byte outside 10xxxxxx starts a scalar.
+        func isScalarBoundary(_ index: Data.Index) -> Bool {
+            index == referenceUTF8.endIndex || (referenceUTF8[index] & 0b1100_0000) != 0b1000_0000
+        }
+        guard isScalarBoundary(lower) else { throw AudiobookSourceError.nonScalarBoundary(range.lowerBound) }
+        guard isScalarBoundary(upper) else { throw AudiobookSourceError.nonScalarBoundary(range.upperBound) }
+
+        // A UTF-8 scalar uses at most four bytes. Drop a partial scalar at the cutoff before decoding.
+        let limit = AudiobookLimits.maxPreviewScalars
+        var previewEnd = min(upper, lower + 4 * limit)
+        while !isScalarBoundary(previewEnd) { previewEnd -= 1 }
+        guard let excerpt = String(validating: referenceUTF8[lower..<previewEnd], as: UTF8.self) else {
+            throw AudiobookSourceError.invalidUTF8
+        }
+        return String(excerpt.unicodeScalars.prefix(limit))
     }
 }
 

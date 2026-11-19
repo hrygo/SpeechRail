@@ -237,6 +237,29 @@ struct TeleprompterStageSettingsTests {
         #expect(secondLines[0].text == secondText)
     }
 
+    @Test("background display-line layout preserves wrapping, IDs, and reading offsets")
+    func backgroundDisplayLayoutMatchesSynchronousLayout() async throws {
+        let sources = ["甲😀乙\r\n第二行和 additional words", "", "再读一段。\u{2028}末行"]
+        let segments = sources.enumerated().map { index, text in
+            TeleprompterSegment(
+                id: "segment-\(index)",
+                ordinal: index,
+                sourceRange: .init(start: 0, end: text.utf16.count),
+                text: text
+            )
+        }
+        let expected = TeleprompterStageLineLayout.layout(
+            segments: segments, pointSize: 20, availableWidth: 82
+        )
+        let actual = try await TeleprompterStageLineLayout.prepare(
+            segments: segments, pointSize: 20, availableWidth: 82
+        )
+
+        #expect(actual == expected)
+        #expect(actual.first?.id == "segment-0-0")
+        #expect(actual.last?.segmentIndex == 2)
+    }
+
     @Test("reading position resolves and steps across display lines without wrapping")
     func readingPositionStepsAcrossDisplayLines() throws {
         let source = "第一行内容第二行内容第三行内容"

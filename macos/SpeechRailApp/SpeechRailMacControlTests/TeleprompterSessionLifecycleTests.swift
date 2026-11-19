@@ -1640,7 +1640,7 @@ struct TeleprompterSessionLifecycleTests {
     }
 
     @Test("bundles this build cannot read keep their files and do not take the other documents down")
-    func unreadableBundlesArePreservedAndIsolated() throws {
+    func unreadableBundlesArePreservedAndIsolated() async throws {
         let harness = try TeleprompterSessionHarness()
         defer { harness.cleanup() }
         harness.makeThreeSegmentDocument()
@@ -1654,15 +1654,15 @@ struct TeleprompterSessionLifecycleTests {
         let invalid = harness.documentBundleURL(documentID: "invalid")
         try Data(#"{"format_version":2}"#.utf8).write(to: invalid)
 
-        let listed = try harness.session.listDocuments()
+        let directory = try await harness.session.readDocumentDirectory()
 
-        #expect(listed.map(\.id) == [goodID], "读不动的稿件不得污染可用列表")
+        #expect(directory.documents.map(\.id) == [goodID], "读不动的稿件不得污染可用列表")
         #expect(
-            harness.session.unavailableDocuments.map(\.id).sorted()
+            directory.unavailableDocuments.map(\.id).sorted()
                 == ["corrupt", "future-format", "invalid"],
             "三份读不动的稿件都要被单列出来，而不是从列表里消失"
         )
-        for item in harness.session.unavailableDocuments {
+        for item in directory.unavailableDocuments {
             #expect(item.error != nil, "\(item.id) 必须带失败原因")
             #expect(item.isAvailable == false)
         }
@@ -1687,6 +1687,25 @@ struct TeleprompterSessionLifecycleTests {
             harness.session.document?.id == goodID,
             "打开失败不得换掉读者当前正在用的稿件"
         )
+    }
+
+    @Test("deleting the selected draft cannot revive it during the next selection")
+    func deletingSelectedDraftDoesNotReviveIt() async throws {
+        let harness = try TeleprompterSessionHarness()
+        defer { harness.cleanup() }
+        harness.session.createDocument(title: "要保留", sourceText: "保留正文。")
+        let remainingID = try #require(harness.session.document?.id)
+        harness.session.createDocument(title: "要删除", sourceText: "将删除的正文。")
+        let deletedID = try #require(harness.session.document?.id)
+        harness.session.updateTitle("尚未保存的标题")
+
+        try harness.session.deleteDocument(documentID: deletedID)
+        #expect(harness.session.document == nil)
+        let directory = try await harness.session.readDocumentDirectory()
+        #expect(directory.documents.map(\.id) == [remainingID])
+        #expect(try await harness.session.loadForSelection(documentID: remainingID))
+        #expect(harness.session.document?.id == remainingID)
+        #expect(!FileManager.default.fileExists(atPath: harness.documentBundleURL(documentID: deletedID).path))
     }
 
     @Test("every stage cycle releases its capture, connection and occupancy")

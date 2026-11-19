@@ -244,6 +244,7 @@ final class MinutesReviewModelTests: XCTestCase {
         let diff = MinutesDiff.lineDiff(from: body, to: body)
         XCTAssertTrue(diff.isIdentical)
         XCTAssertEqual(diff.summary, "两版内容一样")
+        XCTAssertEqual(diff.lines, [.unchanged("# 发布评审"), .unchanged(""), .unchanged("发布窗口定在九月。"), .unchanged("")])
     }
 
     func testComparisonIsAgainstTheVersionOpenedNotThePreviousOne() async throws {
