@@ -1300,13 +1300,16 @@ public final class AudiobookWorkflowModel {
                 guard self.analysisInstallEpoch == installEpoch else { return }
                 let failureDescription = error.localizedDescription
                 self.isResolvingUnknownSpeakers = false
-                self.isAnalyzing = false
                 self.stopAnalysisClock()
                 await self.refreshShelf()
+                guard self.analysisInstallEpoch == installEpoch else { return }
                 if self.selectedBook?.id == targetID {
                     await self.openBook(targetID)
                 }
+                guard self.analysisInstallEpoch == installEpoch else { return }
+                // 报错和结束状态一起交给界面。
                 self.errorMessage = failureDescription
+                self.isAnalyzing = false
             }
         }
     }
