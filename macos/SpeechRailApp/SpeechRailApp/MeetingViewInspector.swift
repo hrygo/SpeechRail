@@ -1,6 +1,6 @@
 import SwiftUI
 
-// `MeetingView` 的会议信息栏（360pt）：这一场现在的事实、中断出口与纪要版本。
+// `MeetingView` 的会议信息栏（360pt）：这一场现在的事实、中断说明与纪要版本。
 // 纯搬移自主文件；跨文件共用的是主文件里的 `@State` 与 `body` 调用的入口。
 
 extension MeetingView {
@@ -147,8 +147,7 @@ extension MeetingView {
         .labeledContentStyle(SpeechRailInspectorLabeledContentStyle())
     }
 
-    /// 中断时右栏给两个出口（§6.2 的中断行）。四类断法的处置写在下方的表里——
-    /// 用户不需要记住它们，但需要知道"哪一种会自己接回来"。
+    /// 中断卡说明原因，续接和结束操作位于页头。
     private var interruptionCard: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -157,13 +156,6 @@ extension MeetingView {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button("继续录制") { Task { await meeting.continueAfterInterruption() } }
-                        .buttonStyle(.borderedProminent)
-                    Button("结束并整理") { Task { await meeting.requestFinish() } }
-                        .buttonStyle(.bordered)
-                }
-                .controlSize(.small)
                 Divider()
                 Text("中断处理说明")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
