@@ -115,11 +115,22 @@ extension MeetingView {
                 // 核心主题输入槽
                 titleField
 
-                // 快捷参数控制栏（横向排布）
-                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    audioSourceControls
-                    Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                    speakerCapacityControls
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        audioSourceControls.fixedSize()
+                        Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                        speakerCapacityControls.fixedSize()
+                    }
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        audioSourceControls
+                        speakerCapacityControls
+                    }
+                }
+
+                if preferences.meetingDiarizationEnabled && speakerMode == .basic {
+                    Text("基础分人最多区分 4 位。发言人更多或声音相近时，可能标错说话人。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
 
                 // 应用音频抽屉（折叠/展开）
@@ -235,6 +246,19 @@ extension MeetingView {
 
             if preferences.meetingDiarizationEnabled {
                 Divider().frame(height: 12)
+                Picker("分人方式", selection: $speakerMode) {
+                    ForEach(MeetingSpeakerMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .fixedSize()
+                .help("稳定分人会将超额或无法确认的声音标为未识别。也可以为本场选择基础分人。")
+            }
+
+            if preferences.meetingDiarizationEnabled && speakerMode == .stable {
                 Picker("发言人数", selection: $expectedSpeakerCount) {
                     ForEach(MeetingExpectedSpeakerCount.allCases) { count in
                         Text(count.title).tag(count)
@@ -454,8 +478,11 @@ extension MeetingView {
                         SessionKVRow("识别精度", profileRowText)
                         SessionKVRow("音频来源", sourceSummary)
                         SessionKVRow("发言人区分", preferences.meetingDiarizationEnabled
-                            ? expectedSpeakerCount.title
+                            ? speakerMode.title
                             : "未开启")
+                        if preferences.meetingDiarizationEnabled && speakerMode == .stable {
+                            SessionKVRow("预计发言人数", expectedSpeakerCount.title)
+                        }
                         SessionKVRow("纪要整理", preferences.isLLMConfigured(for: .minutes) ? "结束后自动生成" : "未配置模型（仅存文字）")
                         SessionKVRow("数据存储", "SQLite 本地库 · 长期保存")
                     }
@@ -589,8 +616,12 @@ extension MeetingView {
                 systemApps: systemApps.map { MeetingAudioApp(bundleID: $0.bundleID, name: $0.name) }
             ),
             title: titleDraft,
-            expectedSpeakerCount: expectedSpeakerCount
+            expectedSpeakerCount: expectedSpeakerCount,
+            speakerMode: speakerMode
         )
-        if meeting.phase == .recording { expectedSpeakerCount = .uncertain }
+        if meeting.phase == .recording {
+            expectedSpeakerCount = .uncertain
+            speakerMode = .stable
+        }
     }
 }

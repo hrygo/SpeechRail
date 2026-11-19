@@ -446,14 +446,18 @@ public final class MeetingSession {
     /// 同一个占着设备的应用上——他改不掉。空白按"没写"处理，不是存一个空标题。
     public private(set) var pendingTitle: String?
     private var expectedSpeakerCount: MeetingExpectedSpeakerCount = .uncertain
+    private var pendingSpeakerMode: MeetingSpeakerMode = .stable
+    public private(set) var speakerMode: MeetingSpeakerMode = .stable
 
     public func start(
         selection: MeetingAudioSelection,
         title: String? = nil,
-        expectedSpeakerCount: MeetingExpectedSpeakerCount = .uncertain
+        expectedSpeakerCount: MeetingExpectedSpeakerCount = .uncertain,
+        speakerMode: MeetingSpeakerMode = .stable
     ) async {
         self.selection = selection
         self.expectedSpeakerCount = expectedSpeakerCount
+        pendingSpeakerMode = speakerMode
         let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         // 每次开始都重设：下一场会议不该继承上一场的名字。
         pendingTitle = (trimmed?.isEmpty ?? true) ? nil : trimmed
@@ -665,6 +669,8 @@ public final class MeetingSession {
     // MARK: - 生命周期
 
     private func startPipeline(isNewSession: Bool) async throws {
+        let selectedSpeakerMode = isNewSession ? pendingSpeakerMode : speakerMode
+        let speakerBackend = selectedSpeakerMode.backend
         retiredWindowCaptures.removeAll { $0.queue.isComplete }
         guard allWindowCaptures.filter({ !$0.queue.isComplete }).count < 8 else {
             throw Blocked(reason:.streamFailed("请先保存或保留之前未保存的文字，再开始新一段。"))
@@ -721,8 +727,6 @@ public final class MeetingSession {
 
         var windowEnabled = dependencies.revisionWindowEnabled
             ?? UserDefaults.standard.bool(forKey: "speechrail.meetingRevisionWindowEnabled")
-        // Only the identity matcher can reject an extra or uncertain voice.
-        // Its certification gate remains on the service; unavailable means text only.
         windowFallbackNote = nil
 
         func makeClient(diarizationEnabled: Bool) -> any MeetingRealtimeClient {
@@ -734,8 +738,9 @@ public final class MeetingSession {
                     diarizationEnabled: diarizationEnabled,
                     expectedASRRevision: binding?.asrModelRevision,
                     windowScene: windowEnabled ? .meeting : nil,
-                    diarizationBackend: diarizationEnabled ? .meetingDynamic : nil,
-                    diarizationMaxSpeakers: diarizationEnabled ? expectedSpeakerCount.maximumStableIdentities : nil
+                    diarizationBackend: diarizationEnabled ? speakerBackend : nil,
+                    diarizationMaxSpeakers: diarizationEnabled && speakerBackend == .meetingDynamic
+                        ? expectedSpeakerCount.maximumStableIdentities : nil
                 )
             )
         }
@@ -822,9 +827,11 @@ public final class MeetingSession {
                 )
             }
         }
+        speakerMode = selectedSpeakerMode
         configureLabeling(
             sessionID: sessionID,
             enabled: diarizationEffective,
+            backend: speakerBackend,
             isNewSession: isNewSession,
             unavailableNote: diarizationUnavailableNote
         )
@@ -871,12 +878,13 @@ public final class MeetingSession {
     private func configureLabeling(
         sessionID: String?,
         enabled: Bool,
+        backend: SpeechRailDiarizationBackend,
         isNewSession: Bool,
         unavailableNote: String? = nil
     ) {
         guard let sessionID else { return }
         if isNewSession {
-            labeling.begin(sessionID: sessionID, enabled: enabled, stableIdentityRequired: true)
+            labeling.begin(sessionID: sessionID, enabled: enabled, requiredBackend: backend)
         } else {
             // Gap3：续接只重置 uid 坐标系，面板上已标出的标签/改名/计数保留。
             // 以前这里调 `begin`，中断前标的人会整屏消失，直到新归属到达。
@@ -1295,7 +1303,7 @@ public final class MeetingSession {
             owner = labeling
         } else {
             owner = SpeakerLabeling(coordinator: coordinator, attachAttribution: dependencies.attachTranscriptAttribution)
-            owner.begin(sessionID: recordID, enabled: labelsEnabled, stableIdentityRequired: true)
+            owner.begin(sessionID: recordID, enabled: labelsEnabled, requiredBackend: speakerMode.backend)
         }
         let command = owner.freezeAttribution(units: units, lineID: lineID)
         let acoustic: ClosedRange<TimeInterval>?

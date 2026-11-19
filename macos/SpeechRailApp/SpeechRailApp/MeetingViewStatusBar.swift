@@ -236,6 +236,11 @@ extension MeetingView {
             return meeting.selection.map { [$0.label] } ?? []
         }
         var facts: [String] = []
+        if meeting.labeling.state == .unavailable {
+            facts.append("说话人区分不可用")
+        } else if meeting.labeling.isEnabled && meeting.speakerMode == .basic {
+            facts.append("基础分人")
+        }
         // 来源摘要走 MA-10 的呈现门面
         if let selection = meeting.selection {
             facts.append(meeting.phase == .archived ? selection.label : sourcePresentation.sourceSummary)

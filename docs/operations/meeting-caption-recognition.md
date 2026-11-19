@@ -1,8 +1,8 @@
 ---
 title: "会议与字幕识别能力准备和验收"
 status: active
-version: "0.1.0"
-date: 2026-10-16
+version: "0.2.0"
+date: 2026-11-19
 ---
 
 # 会议与字幕识别能力准备和验收
@@ -33,7 +33,7 @@ speechrail model prepare-diarization --backend meeting_dynamic \
 唯一支持的原型规则是 `anchor_farthest_v1`。新身份至少 1500 ms、更新至少 2000 ms 独占语音，
 两个支持时长上限为 60000 ms，候选保留 60000 ms；重复窗口不重复累计支持。
 
-独立验收成功后，策略还需有效的 `certified_max_speakers`（5–32）与 `validation_digest`。
+独立验收成功后，策略还需有效的 `certified_max_speakers`（1–4）与 `validation_digest`。
 这些字段代表操作者冻结的验收证据，不能用开发集调参、系统 cap 或单次 smoke 伪造。
 未认证时 `max_speakers=null`、生产 not-ready；失败的候选保持关闭。
 `SPEECHRAIL_DIARIZATION_DYNAMIC_RESIDENT_BYTES=0` 表示尚无驻留峰值声明，准入按串行处理。
@@ -42,9 +42,9 @@ speechrail model prepare-diarization --backend meeting_dynamic \
 
 服务 `SPEECHRAIL_ASR_REVISION_WINDOWS_ENABLED` 与 `SPEECHRAIL_DIARIZATION_DYNAMIC_ENABLED`
 均默认 false。App 的 `speechrail.meetingRevisionWindowEnabled`、
-`speechrail.captionRevisionWindowEnabled`、`speechrail.meetingDynamicDiarizationEnabled`
-分别控制会议文字、字幕文字和会议多人路径，默认 false，在捕获开始前读取并冻结。
-未开启实验时仍使用现有标准转写与既有分人能力；显式多人请求失败后只记录文字，必须向用户说明。
+`speechrail.captionRevisionWindowEnabled` 分别控制会议和字幕的文字回溯，默认 false，在捕获开始前
+读取并冻结。会议的「稳定分人」请求 `meeting_dynamic`，用户会前选择「基础分人」时请求 `sortformer`。
+所选后端不可用时，App 显示原因并继续记录文字。运维检查分别读取能力快照中的两个后端状态。
 
 回退先停止当前捕获并完成保存，再关闭对应 App/服务开关；需要替换 runtime 时按
 [发布流程](../../.agents/skills/speechrail-release/SKILL.md)恢复上一 release。

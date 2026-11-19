@@ -52,14 +52,15 @@ public final class SpeakerLabeling {
     public private(set) var attributionRevision: UInt64 = 0
     public private(set) var maxSpeakers = 4
     private var scopeBinding: SpeakerScopeBinding?
-    private var usesStableIdentity = false
+    private var requiredBackend: SpeechRailDiarizationBackend?
+    private var requiresScopedIdentity = false
     private var rejectsAutomaticIdentity = false
     private var continuedConnection = false
 
     public func configureCapacity(_ capacity: SpeechRailDiarizationCapacity, recordID: String,
         generation: Int, serverSessionID: String, inputEpoch: Int) {
-        guard recordID == sessionID else { return }
-        if capacity.backend == .meetingDynamic { usesStableIdentity = true }
+        guard recordID == sessionID, requiredBackend == nil || capacity.backend == requiredBackend else { return }
+        if capacity.backend == .meetingDynamic { requiresScopedIdentity = true }
         guard capacity.enabled, capacity.isValid,
               let maximum = capacity.maxSpeakers else {
             rejectsAutomaticIdentity = true
@@ -67,8 +68,8 @@ public final class SpeakerLabeling {
             return
         }
         maxSpeakers = maximum
-        guard capacity.backend == .meetingDynamic else {
-            if usesStableIdentity, scopeBinding != nil { rejectsAutomaticIdentity = true }
+        guard requiredBackend != nil || capacity.backend == .meetingDynamic else {
+            if requiresScopedIdentity, scopeBinding != nil { rejectsAutomaticIdentity = true }
             return
         }
         if let scope = scopeBinding {
@@ -88,9 +89,17 @@ public final class SpeakerLabeling {
 
     private func localLabel(_ raw: String?) -> String? {
         guard let raw, !raw.isEmpty, !rejectsAutomaticIdentity else { return nil }
-        guard var scope = scopeBinding else { return usesStableIdentity ? nil : raw }
+        guard var scope = scopeBinding else { return requiresScopedIdentity ? nil : raw }
+        let scopedLabel: String
+        if requiredBackend == .sortformer {
+            // Sortformer emits A–D in order of first appearance on this connection.
+            guard let index = ["A", "B", "C", "D"].firstIndex(of: raw) else { return nil }
+            scopedLabel = "S\(index + 1)"
+        } else {
+            scopedLabel = raw
+        }
         do {
-            let label = try scope.serverLabel(raw, capacity: maxSpeakers)
+            let label = try scope.serverLabel(scopedLabel, capacity: maxSpeakers)
             scopeBinding = scope
             return label
         } catch SpeakerScopeBinding.Failure.capacityExceeded {
@@ -157,11 +166,12 @@ public final class SpeakerLabeling {
     // MARK: - 会话边界
 
     /// 新会话开始：账本归零（**不跨会话**——§14.3 的边界：不做跨会话身份）。
-    /// 会议要求稳定身份：有效 meeting_dynamic 作用域绑定前，自动归属保持未知。
-    public func begin(sessionID: String, enabled: Bool, stableIdentityRequired: Bool = false) {
+    /// 指定后端时，必须先核对会话回执并绑定作用域，才接纳自动归属。
+    public func begin(sessionID: String, enabled: Bool, requiredBackend: SpeechRailDiarizationBackend? = nil) {
         lifecycle = UUID()
         scopeBinding = nil; maxSpeakers = 4
-        usesStableIdentity = stableIdentityRequired
+        self.requiredBackend = requiredBackend
+        requiresScopedIdentity = requiredBackend != nil
         rejectsAutomaticIdentity = false; continuedConnection = false
         self.sessionID = sessionID
         labels = []
@@ -193,7 +203,7 @@ public final class SpeakerLabeling {
     public func beginNewConnection(sessionID: String) {
         lifecycle = UUID()
         continuedConnection = true
-        if usesStableIdentity {
+        if requiresScopedIdentity {
             rejectsAutomaticIdentity = true
             diagnosticCode = "speaker_continuity_unverified"
             note = "重新连接后暂时无法确认是否为原来的说话人；新发言保留为未识别，之前的标注不变。"

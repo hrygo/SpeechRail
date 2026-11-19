@@ -37,6 +37,7 @@ public struct MeetingView: View {
     /// 带着上一场的名字开始，事后还得回来改。
     @State var titleDraft = ""
     @State var expectedSpeakerCount: MeetingExpectedSpeakerCount = .uncertain
+    @State var speakerMode: MeetingSpeakerMode = .stable
     @State var sourceCandidates: [SystemAudioApp] = []
     @State private var isInspectorCollapsed = false
     @FocusState private var inspectorToggleFocused: Bool

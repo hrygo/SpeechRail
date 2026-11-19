@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.11.15"
-date: 2026-10-22
+version: "0.11.16"
+date: 2026-11-19
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -566,10 +566,10 @@ Popover、Sheet 与 Inspector 中的角色列表、分析依据、错误详情�
 默认复制可见文字，正式导出与纪要依赖已保存的正式记录；失败尾文明确标为待恢复内容。
 
 窗口实验开关 `speechrail.meetingRevisionWindowEnabled`、`speechrail.captionRevisionWindowEnabled`
-与多人实验开关 `speechrail.meetingDynamicDiarizationEnabled` 独立、默认关闭，在每次开始前冻结。
-未启用实验能力时保留标准转写与既有分人路径；显式请求多人但后端未就绪时说明「先记录文字」，
-不把既有四槽能力呈现成多人验收成功。历史与实时说话人均按本记录首次出现顺序显示匿名序号，
-重连后的相同裸标签不能合并旧身份。
+独立、默认关闭，在每次开始前冻结。会议开启「区分说话人」后，默认使用「稳定分人」，可在会前为本场
+选择「基础分人」。选中基础分人时在控件旁说明可能错标的情况。当前分人方式不可用时，状态栏显示
+「说话人区分不可用」，文字继续记录。历史与实时说话人均按本记录首次出现顺序显示匿名序号，重连后的
+相同裸标签不能合并旧身份。
 
 - [x] App target 的最低系统版本为 macOS 26.0，并使用系统 Liquid Glass 结构能力（2026-09-13 Debug build 已验证）。
 - [x] App 未通过自绘根背景阻断 scroll edge effect；玻璃只用于窗口/导航层，内容和 Inspector 使用统一内容表面（2026-09-13 代码审查已验证）。
