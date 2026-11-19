@@ -107,8 +107,7 @@ public enum TeleprompterStageLineLayout {
         pointSize: CGFloat,
         availableWidth: CGFloat
     ) -> [TeleprompterStageDisplayLine] {
-        let font = NSFont.systemFont(ofSize: layoutDimension(pointSize))
-        let width = layoutDimension(availableWidth)
+        let (font, width) = layoutGeometry(pointSize: pointSize, availableWidth: availableWidth)
         return segments.enumerated().flatMap { index, segment in
             layout(segment: segment, segmentIndex: index, font: font, width: width)
         }
@@ -120,8 +119,7 @@ public enum TeleprompterStageLineLayout {
         availableWidth: CGFloat
     ) async throws -> [TeleprompterStageDisplayLine] {
         try Task.checkCancellation()
-        let font = NSFont.systemFont(ofSize: layoutDimension(pointSize))
-        let width = layoutDimension(availableWidth)
+        let (font, width) = layoutGeometry(pointSize: pointSize, availableWidth: availableWidth)
         let clock = ContinuousClock()
         var yieldAt = clock.now
         var rows: [TeleprompterStageDisplayLine] = []
@@ -138,8 +136,10 @@ public enum TeleprompterStageLineLayout {
         return rows
     }
 
-    private static func layoutDimension(_ value: CGFloat) -> CGFloat {
-        value.isFinite ? max(1, value) : 1
+    private static func layoutGeometry(pointSize: CGFloat, availableWidth: CGFloat) -> (font: NSFont, width: CGFloat) {
+        let safeWidth = availableWidth.isFinite ? max(1, availableWidth) : 1
+        let safePointSize = pointSize.isFinite ? max(1, pointSize) : 1
+        return (NSFont.systemFont(ofSize: safePointSize), safeWidth)
     }
 
     private static func layout(
