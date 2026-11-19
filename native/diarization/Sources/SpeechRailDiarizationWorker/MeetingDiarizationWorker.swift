@@ -5,29 +5,89 @@ import SpeechRailDiarizationProtocol
 
 enum MeetingWorkerError: Error { case invalidRequest, invalidModel, invalidPolicy }
 
-/// One manager and matcher for one pipe/session. No model hub or compilation.
+/// One model set and matcher per pipe/session. No model hub or compilation.
 final class MeetingDiarizationWorker {
-    private let manager: OfflineDiarizerManager
+    private let acousticPipeline: AcousticPipeline
     private var matcher: SessionSpeakerMatcher
     private var calibrationCandidates: [DiarizationCalibrationCandidate] = []
     private var calibrationMatchers: [SessionSpeakerMatcher] = []
-    private var calibrationHistories: [[Activity]] = []
-    private var calibrationManagers: [DiarizationAcousticPolicy: OfflineDiarizerManager] = [:]
+    private var calibrationHistories: [ActivityHistory] = []
+    private var calibrationPipelines: [DiarizationAcousticPolicy: AcousticPipeline] = [:]
     private(set) var calibrationPayload = Data()
     private var epoch: String?
     private var stable = 0
     private var processed = 0
-    private struct Activity {
+    private typealias LocalActivity = (start: Int, end: Int, speakers: Set<String>)
+
+    private struct AcousticViews {
+        let evidence: DiarizationResult
+        let activity: DiarizationResult
+
+        static var silence: Self {
+            let empty = DiarizationResult(segments: [])
+            return Self(evidence: empty, activity: empty)
+        }
+    }
+
+    private struct AcousticPipeline {
+        let evidence: OfflineDiarizerManager
+        private let activity: OfflineDiarizerManager?
+
+        init(config: OfflineDiarizerConfig, models: OfflineDiarizerModels) {
+            var evidenceConfig = config
+            evidenceConfig.exposeChunkEmbeddings = true
+            evidence = OfflineDiarizerManager(config: evidenceConfig)
+            evidence.initialize(models: models)
+
+            // Zero-vote calibration may run additional embeddings in cluster().
+            guard !config.zeroVoteReembed.enabled else {
+                activity = nil
+                return
+            }
+            // Only this reconstruction sees the shorter duration. Both views
+            // cluster the embeddings from the same preparation pass.
+            var activityConfig = evidenceConfig
+            activityConfig.postProcessing.exclusiveSegments = false
+            activityConfig.embedding.minSegmentDurationSeconds = 0.20
+            let renderer = OfflineDiarizerManager(config: activityConfig)
+            renderer.initialize(models: models)
+            activity = renderer
+        }
+
+        func cluster(_ prepared: PreparedDiarization) throws -> AcousticViews {
+            let matching = try evidence.cluster(prepared)
+            guard let activity, let expanded = try? activity.cluster(prepared) else {
+                return AcousticViews(evidence: matching, activity: matching)
+            }
+            // A numeric cluster label is local to a clustering pass. Only
+            // project it across views when their chunk assignments agree.
+            guard let left = matching.chunkEmbeddings, let right = expanded.chunkEmbeddings,
+                  !left.isEmpty, left.count == right.count,
+                  zip(left, right).allSatisfy({ a, b in
+                      a.chunkIndex == b.chunkIndex && a.speakerIndex == b.speakerIndex && a.speakerId == b.speakerId
+                  }) else {
+                return AcousticViews(evidence: matching, activity: matching)
+            }
+            return AcousticViews(evidence: matching, activity: expanded)
+        }
+    }
+
+    private struct IdentityAnchor {
         let start: Int
         let end: Int
-        let slots: Set<Int>
+        let slot: Int
+    }
+    private struct ActivityHistory {
+        var anchors: [IdentityAnchor] = []
+        var preview = SpeakerActivityPreview()
+        var rejected: [SpeakerVoiceSpan] = []
     }
     private struct AnalysisKey: Hashable {
         let acousticPolicy: DiarizationAcousticPolicy
         let matchingEmbeddingSpace: DiarizationMatchingEmbeddingSpace
     }
     var maxSpeakers: Int { matcher.identityCapacity }
-    private var history: [Activity] = []
+    private var history = ActivityHistory()
 
     init(
         modelDirectory: String,
@@ -48,7 +108,7 @@ final class MeetingDiarizationWorker {
             let candidates = try DiarizationCalibrationCandidate.decodeArray(bytes)
             calibrationCandidates = candidates
             calibrationMatchers = try candidates.map { try SessionSpeakerMatcher(policy: $0.matchingPolicy) }
-            calibrationHistories = Array(repeating: [], count: candidates.count)
+            calibrationHistories = Array(repeating: ActivityHistory(), count: candidates.count)
         }
         let root = URL(fileURLWithPath: modelDirectory, isDirectory: true)
         func load(_ name: String, cpuOnly: Bool = false) throws -> MLModel {
@@ -72,10 +132,8 @@ final class MeetingDiarizationWorker {
         let config = OfflineDiarizerConfig(
             zeroVoteReembed: .init(enabled: zeroVoteReembed)
         )
-        let manager = OfflineDiarizerManager(config: config)
-        self.manager = manager
-        self.manager.initialize(models: models)
-        for candidate in calibrationCandidates where calibrationManagers[candidate.acousticPolicy] == nil {
+        self.acousticPipeline = AcousticPipeline(config: config, models: models)
+        for candidate in calibrationCandidates where calibrationPipelines[candidate.acousticPolicy] == nil {
             var config = OfflineDiarizerConfig()
             config.segmentation.stepRatio = candidate.preprocessingPolicy.segmentationStepRatio
             config.embedding.minSegmentDurationSeconds = candidate.preprocessingPolicy.embeddingMinSegmentDurationSeconds
@@ -86,12 +144,7 @@ final class MeetingDiarizationWorker {
             )
             config.clustering = clustering
             config.zeroVoteReembed = .init(enabled: zeroVoteReembed)
-            config.exposeChunkEmbeddings = calibrationCandidates.contains {
-                $0.matchingEmbeddingSpace == .pldaRho128Cosine
-            }
-            let candidateManager = OfflineDiarizerManager(config: config)
-            candidateManager.initialize(models: models)
-            calibrationManagers[candidate.acousticPolicy] = candidateManager
+            calibrationPipelines[candidate.acousticPolicy] = AcousticPipeline(config: config, models: models)
         }
     }
 
@@ -107,11 +160,15 @@ final class MeetingDiarizationWorker {
         }
         let end = start + audio.count
         guard end > processed, end >= stable else { throw MeetingWorkerError.invalidRequest }
-        let result: DiarizationResult
-        var calibrationResults: [DiarizationAcousticPolicy: DiarizationResult] = [:]
+        let result: AcousticViews
+        var calibrationResults: [DiarizationAcousticPolicy: AcousticViews] = [:]
         if calibrationCandidates.isEmpty {
-            do { result = try await manager.process(audio: audio) }
-            catch OfflineDiarizationError.noSpeechDetected { result = DiarizationResult(segments: []) }
+            do {
+                let prepared = try await acousticPipeline.evidence.prepare(audio: audio)
+                result = try acousticPipeline.cluster(prepared)
+            } catch OfflineDiarizationError.noSpeechDetected {
+                result = .silence
+            }
         } else {
             var preprocessingPolicies: [DiarizationPreprocessingPolicy] = []
             for candidate in calibrationCandidates where !preprocessingPolicies.contains(candidate.preprocessingPolicy) {
@@ -122,11 +179,11 @@ final class MeetingDiarizationWorker {
             for preprocessingPolicy in preprocessingPolicies {
                 guard let candidate = calibrationCandidates.first(where: {
                     $0.preprocessingPolicy == preprocessingPolicy
-                }), let preparationManager = calibrationManagers[candidate.acousticPolicy] else {
+                }), let pipeline = calibrationPipelines[candidate.acousticPolicy] else {
                     throw MeetingWorkerError.invalidPolicy
                 }
                 do {
-                    preparedByPolicy[preprocessingPolicy] = try await preparationManager.prepare(audio: audio)
+                    preparedByPolicy[preprocessingPolicy] = try await pipeline.evidence.prepare(audio: audio)
                 } catch OfflineDiarizationError.noSpeechDetected {
                     noSpeechPolicies.insert(preprocessingPolicy)
                 }
@@ -136,20 +193,20 @@ final class MeetingDiarizationWorker {
                 acousticPolicies.append(candidate.acousticPolicy)
             }
             for acousticPolicy in acousticPolicies {
-                guard let candidateManager = calibrationManagers[acousticPolicy] else {
+                guard let pipeline = calibrationPipelines[acousticPolicy] else {
                     throw MeetingWorkerError.invalidPolicy
                 }
                 if noSpeechPolicies.contains(acousticPolicy.preprocessing) {
-                    calibrationResults[acousticPolicy] = DiarizationResult(segments: [])
+                    calibrationResults[acousticPolicy] = .silence
                     continue
                 }
                 guard let prepared = preparedByPolicy[acousticPolicy.preprocessing] else {
                     throw MeetingWorkerError.invalidPolicy
                 }
                 do {
-                    calibrationResults[acousticPolicy] = try candidateManager.cluster(prepared)
+                    calibrationResults[acousticPolicy] = try pipeline.cluster(prepared)
                 } catch OfflineDiarizationError.noSpeechDetected {
-                    calibrationResults[acousticPolicy] = DiarizationResult(segments: [])
+                    calibrationResults[acousticPolicy] = .silence
                 }
             }
             guard let primaryPolicy = calibrationCandidates.first?.acousticPolicy,
@@ -157,20 +214,17 @@ final class MeetingDiarizationWorker {
             else { throw MeetingWorkerError.invalidPolicy }
             result = primaryResult
         }
-        typealias Analysis = (clusters: [SpeakerLocalCluster], localActivity: [(Int, Int, Set<String>)])
-        func analyze(
-            _ diarization: DiarizationResult,
-            matchingEmbeddingSpace: DiarizationMatchingEmbeddingSpace
-        ) throws -> Analysis {
-            guard diarization.segments.count <= 16384,
-                  diarization.segments.allSatisfy({
+        typealias Analysis = (clusters: [SpeakerLocalCluster], evidence: [LocalActivity],
+                              rendered: [LocalActivity], overlapCentroids: [String: [Double]])
+        func timeline(_ input: [TimedSpeakerSegment]) throws -> ([TimedSpeakerSegment], [LocalActivity]) {
+            guard input.count <= 16384,
+                  input.allSatisfy({
                       $0.startTimeSeconds.isFinite && $0.endTimeSeconds.isFinite
                       && $0.startTimeSeconds >= 0 && $0.endTimeSeconds >= $0.startTimeSeconds
                       && Double($0.endTimeSeconds) <= Double(audio.count) / 16000 + 1
                   }) else { throw MeetingWorkerError.invalidModel }
-            let segments = diarization.segments.filter { $0.endTimeSeconds > $0.startTimeSeconds }
-            let ids = Array(Set(segments.map(\.speakerId))).sorted()
-            guard ids.count <= 32 else { throw MeetingWorkerError.invalidRequest }
+            let segments = input.filter { $0.endTimeSeconds > $0.startTimeSeconds }
+            guard Set(segments.map(\.speakerId)).count <= 32 else { throw MeetingWorkerError.invalidRequest }
             func bounds(_ segment: TimedSpeakerSegment) -> SpeakerVoiceSpan {
                 .init(start: max(start, start + Int((Double(segment.startTimeSeconds) * 16000).rounded())),
                       end: min(end, start + Int((Double(segment.endTimeSeconds) * 16000).rounded())))
@@ -178,12 +232,22 @@ final class MeetingDiarizationWorker {
             var boundaries = Set([start, end])
             for segment in segments { let span = bounds(segment); boundaries.insert(span.start); boundaries.insert(span.end) }
             let points = boundaries.filter { start <= $0 && $0 <= end }.sorted()
-            var localActivity: [(Int, Int, Set<String>)] = []
-            var unique: [String: [SpeakerVoiceSpan]] = [:]
-            for index in 0..<max(0, points.count - 1) {
-                let a = points[index], b = points[index + 1]
+            let localActivity = zip(points, points.dropFirst()).map { a, b -> LocalActivity in
                 let active = Set(segments.filter { let span = bounds($0); return span.start < b && span.end > a }.map(\.speakerId))
-                localActivity.append((a,b,active))
+                return (a, b, active)
+            }
+            return (segments, localActivity)
+        }
+        func analyze(
+            _ views: AcousticViews,
+            matchingEmbeddingSpace: DiarizationMatchingEmbeddingSpace
+        ) throws -> Analysis {
+            let diarization = views.evidence
+            let (segments, evidence) = try timeline(diarization.segments)
+            let rendered = (try? timeline(views.activity.segments).1) ?? evidence
+            let ids = Set(segments.map(\.speakerId)).sorted()
+            var unique: [String: [SpeakerVoiceSpan]] = [:]
+            for (a,b,active) in evidence {
                 if active.count == 1, let id = active.first { unique[id, default: []].append(.init(start:a,end:b)) }
             }
             let rhoBySpeaker = Dictionary(
@@ -225,7 +289,14 @@ final class MeetingDiarizationWorker {
                 clusters.append(SpeakerLocalCluster(id:id,centroid:vector,
                     uniqueVoice:unique[id] ?? [],anchors:[]))
             }
-            return (clusters, localActivity)
+            var overlapCentroids: [String: [Double]] = [:]
+            if matchingEmbeddingSpace == .embedding256Cosine {
+                let overlappingIDs = Set(rendered.filter { $0.speakers.count == 2 }.flatMap(\.speakers))
+                for id in overlappingIDs {
+                    overlapCentroids[id] = views.activity.speakerDatabase?[id]?.map(Double.init)
+                }
+            }
+            return (clusters, evidence, rendered, overlapCentroids)
         }
         let primaryAnalysis = try analyze(result, matchingEmbeddingSpace: .embedding256Cosine)
         var analysesByPolicy: [AnalysisKey: Analysis] = [:]
@@ -244,43 +315,166 @@ final class MeetingDiarizationWorker {
             )
         }
         let previous = stable
+        let nextStable = final ? end : max(previous, end - 10 * 16000)
+        func responseHeader(_ matcher: SessionSpeakerMatcher) -> [String: Any] {
+            ["protocol_version":2,"backend":"meeting_dynamic","ok":true,"epoch":epoch,
+             "processed_through":end,"stable_through":nextStable,
+             "diagnostics":["identities":matcher.identityCount,"prototypes":matcher.prototypeCount,
+                            "candidates":matcher.candidateCount]]
+        }
+
         func activity(
             _ analysis: Analysis,
             matcher: inout SessionSpeakerMatcher,
-            history: inout [Activity]
+            history: inout ActivityHistory
         ) throws -> [[String:Any]] {
             let anchored = analysis.clusters.map { cluster -> SpeakerLocalCluster in
                 var support: [Int:Int] = [:]
                 for span in cluster.uniqueVoice {
-                    for old in history where old.end > span.start && old.start < span.end && old.slots.count == 1 {
+                    for old in history.anchors where old.end > span.start && old.start < span.end {
                         let count = min(old.end,span.end,previous) - max(old.start,span.start)
-                        if count > 0, let slot = old.slots.first { support[slot,default:0] += count }
+                        if count > 0 { support[old.slot,default:0] += count }
                     }
                 }
                 let total = support.values.reduce(0,+)
                 let anchors = Set(support.filter { $0.value >= 8000 && Double($0.value) >= Double(total)*0.6 }.keys)
                 return .init(id:cluster.id,centroid:cluster.centroid,uniqueVoice:cluster.uniqueVoice,anchors:anchors)
             }
-            let matches = try matcher.assign(anchored,through:end)
-            var frames: [[String:Any]] = []
-            var next = history.compactMap { old -> Activity? in
+            func project(_ timeline: [LocalActivity], matches: [String: SpeakerMatch]) -> [SpeakerActivityFrame] {
+                timeline.compactMap { a, b, active in
+                    guard b > max(previous, start) else { return nil }
+                    return .init(span: .init(start: max(a, previous), end: b),
+                                 decision: SpeakerActivityDecision.resolve(active.map { matches[$0] }))
+                }
+            }
+            let establishedSlots = 0..<matcher.identityCount
+            let previouslySealedSlots = Set(history.anchors.map(\.slot))
+            let previousPreview = history.preview
+            var rejected = history.rejected.filter { $0.end > start }
+            var evidenceFrames: [SpeakerActivityFrame] = []
+            var renderedFrames: [SpeakerActivityFrame] = []
+            // The two activity views can decline labels before a matched cluster
+            // contributes to the identity reference. Revisited audio stays excluded.
+            let matches = try matcher.assign(anchored, through: end, persist: nextStable > previous) { proposed in
+                let slots = Set(proposed.values.compactMap(\.slot))
+                let evidence = previousPreview.markingConflicts(
+                    in: project(analysis.evidence, matches: proposed), matchedSlots: slots,
+                    establishedSlots: establishedSlots, stableThrough: nextStable)
+                let rendered = previousPreview.markingConflicts(
+                    in: project(analysis.rendered, matches: proposed), matchedSlots: slots,
+                    establishedSlots: establishedSlots, stableThrough: nextStable)
+                evidenceFrames = evidence.frames
+                renderedFrames = rendered.frames
+                rejected.append(contentsOf: evidence.rejected)
+                rejected.append(contentsOf: rendered.rejected)
+                guard !rejected.isEmpty else { return [] }
+                return Set(anchored.compactMap { cluster -> Int? in
+                    guard let slot = proposed[cluster.id]?.slot, establishedSlots.contains(slot),
+                          cluster.uniqueVoice.contains(where: { span in
+                              rejected.contains { $0.start < span.end && span.start < $0.end }
+                          }) else { return nil }
+                    return slot
+                })
+            }
+            let matchedSlots = Set(matches.values.compactMap(\.slot).filter { $0 < matcher.identityCount })
+            var next = history.anchors.compactMap { old -> IdentityAnchor? in
                 let a = max(old.start,end-60*16000), b = min(old.end,previous)
-                return b > a ? Activity(start:a,end:b,slots:old.slots) : nil
+                return b > a ? IdentityAnchor(start:a,end:b,slot:old.slot) : nil
             }
-            if previous < start {
-                frames.append(["start":previous,"end":start,"active_slots":[Int](),"reason":"activity_gap"])
+            func wireFrames(_ projected: [SpeakerActivityFrame]) -> [[String: Any]] {
+                var frames: [[String: Any]] = []
+                if previous < start {
+                    frames.append(["start":previous,"end":start,"active_slots":[Int](),"reason":"activity_gap"])
+                }
+                var lastDecision: SpeakerActivityDecision?
+                for item in projected {
+                    let decision = item.decision
+                    if lastDecision == decision {
+                        frames[frames.count - 1]["end"] = item.span.end
+                    } else {
+                        var frame: [String:Any] = ["start":item.span.start,"end":item.span.end,
+                                                  "active_slots":decision.slots.sorted()]
+                        if let reason = decision.reason { frame["reason"] = reason }
+                        frames.append(frame)
+                        lastDecision = decision
+                    }
+                }
+                return frames
             }
-            for (a,b,active) in analysis.localActivity where b > max(previous,start) {
-                let decision = SpeakerActivityDecision.resolve(active.map { matches[$0] })
-                let slots = decision.slots
-                let begin = max(a,previous)
-                var frame: [String:Any] = ["start":begin,"end":b,"active_slots":slots.sorted()]
-                if let reason = decision.reason { frame["reason"] = reason }
-                frames.append(frame); next.append(Activity(start:begin,end:b,slots:slots))
+            // Only the identity view can anchor a later match. Extra activity
+            // in the expanded view cannot reserve or reinforce a slot.
+            for item in evidenceFrames where item.span.start < nextStable {
+                guard item.decision.reason == nil, item.decision.slots.count == 1,
+                      let slot = item.decision.slots.first else { continue }
+                next.append(IdentityAnchor(start: item.span.start, end: min(item.span.end, nextStable), slot: slot))
             }
-            guard next.count <= 16384 else { throw MeetingWorkerError.invalidRequest }
-            history = next
-            return frames
+            guard next.count <= 16384, rejected.count <= 16384 else { throw MeetingWorkerError.invalidRequest }
+            let output = try DiarizationPacketCodec.activityWithinHeaderBudget(
+                wireFrames(renderedFrames), evidence: { wireFrames(evidenceFrames) },
+                header: responseHeader(matcher), replacingFrom: previous, through: end)
+            let previewFrames: [SpeakerActivityFrame]
+            switch output.source {
+            case .rendered: previewFrames = renderedFrames
+            case .evidence: previewFrames = evidenceFrames
+            case .gap: previewFrames = []
+            }
+            let sealedSlots = Set(next.lazy.filter { $0.start < nextStable }.map(\.slot))
+            history = ActivityHistory(anchors: next, preview: .init(
+                frames: previewFrames, matchedSlots: matchedSlots.intersection(sealedSlots),
+                stableThrough: nextStable), rejected: rejected)
+            guard output.source == .rendered, previouslySealedSlots.count >= 2,
+                  nextStable > previous else { return output.frames }
+
+            // This pass only augments the output of already matched activity. It has
+            // no effect on enrollment, refusal reasons, prototypes, or the next preview.
+            let claimedSlots = Set(matches.values.compactMap(\.slot))
+            let windowAnchors = Dictionary(uniqueKeysWithValues: anchored.map { ($0.id, $0.anchors) })
+            var recovered: [Int: (slots: Set<Int>, spans: [SpeakerVoiceSpan])] = [:]
+            for (a, b, active) in analysis.rendered where active.count == 2 {
+                let span = SpeakerVoiceSpan(start: max(a, previous), end: min(b, nextStable))
+                let existing = active.compactMap { matches[$0]?.slot }
+                guard span.end - span.start >= 3200,
+                      existing.count == 1, let primary = existing.first, previouslySealedSlots.contains(primary),
+                      let id = active.first(where: { matches[$0]?.slot == nil }),
+                      matches[id]?.reason != "speaker_capacity",
+                      let centroid = analysis.overlapCentroids[id],
+                      let secondary = matcher.confirmedOverlapSlot(
+                          centroid: centroid, sealedSlots: previouslySealedSlots),
+                      !claimedSlots.contains(secondary) else { continue }
+                // Check agreement on the same audio and reject evidence of a third
+                // speaker. One cluster can include traces of both overlapping voices.
+                let pair: Set<Int> = [primary, secondary]
+                let spans = previousPreview.supportingOverlap(
+                    pair, during: span, windowAnchors: windowAnchors[id] ?? []
+                ).filter { $0.end - $0.start >= 3200 }
+                if !spans.isEmpty {
+                    recovered[span.start] = (pair, spans)
+                }
+            }
+            guard !recovered.isEmpty else { return output.frames }
+            var refined: [SpeakerActivityFrame] = []
+            for frame in renderedFrames {
+                guard let recovery = recovered[frame.span.start],
+                      case let decision = frame.decision.addingOverlap(recovery.slots),
+                      decision != frame.decision else {
+                    refined.append(frame)
+                    continue
+                }
+                var cursor = frame.span.start
+                for span in recovery.spans {
+                    if cursor < span.start {
+                        refined.append(.init(span: .init(start: cursor, end: span.start), decision: frame.decision))
+                    }
+                    refined.append(.init(span: span, decision: decision))
+                    cursor = span.end
+                }
+                if cursor < frame.span.end {
+                    refined.append(.init(span: .init(start: cursor, end: frame.span.end), decision: frame.decision))
+                }
+            }
+            return try DiarizationPacketCodec.activityWithinHeaderBudget(
+                wireFrames(refined), evidence: { output.frames }, header: responseHeader(matcher),
+                replacingFrom: previous, through: end).frames
         }
         let frames = try activity(primaryAnalysis, matcher:&matcher,history:&history)
         var variants: [[String:Any]] = []
@@ -310,10 +504,9 @@ final class MeetingDiarizationWorker {
             throw MeetingWorkerError.invalidRequest
         }
         calibrationPayload = candidatePayload
-        processed = end; stable = final ? end : max(stable,end - 10 * 16000)
-        return ["protocol_version":2,"backend":"meeting_dynamic","ok":true,"epoch":epoch,
-                "processed_through":processed,"stable_through":stable,"frames":frames,
-                "diagnostics":["identities":matcher.identityCount,"prototypes":matcher.prototypeCount,
-                               "candidates":matcher.candidateCount]]
+        processed = end; stable = nextStable
+        var response = responseHeader(matcher)
+        response["frames"] = frames
+        return response
     }
 }

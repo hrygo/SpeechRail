@@ -31,12 +31,13 @@ def test_unknown_evidence_cannot_be_swallowed_by_majority_known_speech(reason):
     assert result.speaker is None and result.reason == reason
 
 
-def test_unknown_overlap_is_not_resolved_by_known_speaker_probability():
+@pytest.mark.parametrize("reason", ["identity_uncertain", "speaker_capacity"])
+def test_unknown_overlap_refuses_text_attribution_with_confirmed_activity(reason):
     (result,) = replay(
-        [ActivityFrame(SampleSpan(0, 16000), None, frozenset({0}), "identity_uncertain")],
+        [ActivityFrame(SampleSpan(0, 16000), None, frozenset({0}), reason)],
         [TextUnit("unit", 0, 2, SampleSpan(0, 16000))],
     )
-    assert result.speaker is None and result.reason == "identity_uncertain"
+    assert result.speaker is None and result.active_speakers == () and result.reason == reason
 
 
 def test_two_known_speakers_talking_together_have_no_primary_speaker():
