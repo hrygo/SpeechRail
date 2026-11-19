@@ -625,7 +625,7 @@ public struct TeleprompterStageView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .task(id: request) {
+            .task(id: request, priority: .utility) {
                 await prepareDisplayLayout(request)
             }
         }
