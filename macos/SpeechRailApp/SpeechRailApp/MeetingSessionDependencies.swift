@@ -116,8 +116,25 @@ public protocol MeetingRealtimeClient: RealtimeTextDrainClient {
 
 extension RealtimeASRClient: MeetingRealtimeClient {}
 
-/// 建一条连接需要的参数。测试只看得出"建了几条、参数是什么"，
-/// 不需要真的握手。
+public enum MeetingSpeakerMode: String, CaseIterable, Sendable, Identifiable {
+    case stable, basic
+
+    public var id: String { rawValue }
+    public var title: String {
+        switch self {
+        case .stable: "稳定分人"
+        case .basic: "基础分人"
+        }
+    }
+
+    var backend: SpeechRailDiarizationBackend {
+        switch self {
+        case .stable: .meetingDynamic
+        case .basic: .sortformer
+        }
+    }
+}
+
 public enum MeetingExpectedSpeakerCount: String, CaseIterable, Sendable, Identifiable {
     case uncertain, two, three, four, moreThanFour
     public var id: String { rawValue }
@@ -141,6 +158,7 @@ public enum MeetingExpectedSpeakerCount: String, CaseIterable, Sendable, Identif
     }
 }
 
+/// 建立会议连接时传入的参数。
 public struct MeetingRealtimeClientConfiguration: Sendable, Equatable {
     public var port: Int
     public var scenePreset: ASRScenePreset

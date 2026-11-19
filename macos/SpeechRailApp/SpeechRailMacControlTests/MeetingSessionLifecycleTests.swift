@@ -385,6 +385,58 @@ final class MeetingSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(h.clients.madeConfigurations[0].diarizationBackend, .meetingDynamic)
     }
 
+    func testBasicDiarizationSavesLabelsAndDoesNotReuseThemAcrossConnections() async throws {
+        let h = try await makeHarness()
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
+        let preferences = SessionPreferences(defaults: defaults)
+        preferences.meetingDiarizationEnabled = true
+        h.session.preferences = { preferences }
+        await h.clients.openGate()
+        await h.session.start(selection: MeetingAudioSelection(usesMicrophone: true),
+                              expectedSpeakerCount: .two, speakerMode: .basic)
+        try await h.settle { $0.phase == .recording }
+        let recordID = try XCTUnwrap(h.session.sessionID)
+        XCTAssertEqual(h.clients.madeConfigurations.map(\.diarizationBackend), [.sortformer])
+        XCTAssertNil(h.clients.madeConfigurations.first?.diarizationMaxSpeakers)
+        let record = try await h.store.session(id: recordID)
+        XCTAssertEqual(record?.diarization, .active)
+
+        let capacity = try JSONDecoder().decode(SpeechRailDiarizationCapacity.self,
+            from: Data(#"{"enabled":true,"backend":"sortformer","max_speakers":4,"system_cap":4}"#.utf8))
+        func append(_ item: String, speaker: String) async throws -> String? {
+            try await h.emit(.completed(itemID: item, transcript: "甲"))
+            try await h.emit(.attribution(itemID: item, units: [
+                .init(segmentUID: item, speaker: speaker, textStart: 0, textEnd: 1)
+            ], isFinal: true))
+            try await h.emit(.serverError(code: "test_barrier", message: item, requestID: nil))
+            try await h.settle { $0.session.lastFailure == "test_barrier：\(item)" }
+            let settlement = await h.session.waitForPendingSaves(recordID: recordID)
+            XCTAssertTrue(settlement.isComplete)
+            return try await h.store.lines(sessionID: recordID).last?.speakerLabel
+        }
+
+        let unconfirmed = try await append("pre-ack", speaker: "A")
+        XCTAssertNil(unconfirmed)
+        try await h.emit(.diarizationConfigured(capacity, serverSessionID: "first"))
+        let first = try await append("first", speaker: "A")
+        let second = try await append("second", speaker: "B")
+        XCTAssertTrue(first?.hasSuffix(":S1") == true)
+        XCTAssertTrue(second?.hasSuffix(":S2") == true)
+        let invalid = try await append("out-of-range", speaker: "E")
+        XCTAssertNil(invalid)
+
+        h.power.fireSleep()
+        try await h.settle { $0.phase == .interrupted }
+        await h.session.continueAfterInterruption()
+        try await h.settle { $0.phase == .recording }
+        XCTAssertEqual(h.clients.madeConfigurations.map(\.diarizationBackend), [.sortformer, .sortformer])
+        try await h.emit(.diarizationConfigured(capacity, serverSessionID: "second"))
+        let afterReconnect = try await append("after-reconnect", speaker: "A")
+        XCTAssertNil(afterReconnect)
+        let rows = try await h.store.lines(sessionID: recordID)
+        XCTAssertEqual(rows.map(\.speakerLabel), [nil, first, second, nil, nil])
+    }
+
     func testMeetingRejectsRawIdentityUntilValidDynamicHandshake() async throws {
         let h = try await makeHarness()
         let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
