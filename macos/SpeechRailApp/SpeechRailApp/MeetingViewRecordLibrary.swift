@@ -1,7 +1,6 @@
 import SwiftUI
 
 // `MeetingView` 的会议记录库快捷入口：空态下方那一段，点一场进去回看。
-// 纯搬移自主文件；跨文件共用的是主文件里的 `@State` 与 `body` 调用的入口。
 
 extension MeetingView {
     // MARK: - 记录库（空态下方那一段：会议**库**在记录库里，不在这一页的主区）
@@ -111,7 +110,13 @@ extension MeetingView {
     }
 
     private func recentMeetingRow(_ summary: SessionSummary) -> some View {
-        Button {
+        let isOpening = historyReviewLoad.isLoading && historyReviewLoad.requestedID == summary.id
+        let detail = isOpening
+            ? "正在打开…"
+            : "\(summary.record.startedAt.speechRailFormatted())"
+                + " · \(summary.lineCount) 段发言"
+                + (summary.speakerCount > 0 ? " · \(summary.speakerCount) 位说话人" : "")
+        return Button {
             Task { await openRecord(summary) }
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -132,14 +137,10 @@ extension MeetingView {
                         .font(SpeechRailDesignTokens.Typography.bodyMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                         .lineLimit(1)
-                    Text(
-                        "\(summary.record.startedAt.speechRailFormatted())"
-                            + " · \(summary.lineCount) 段发言"
-                            + (summary.speakerCount > 0 ? " · \(summary.speakerCount) 位说话人" : "")
-                    )
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    .monospacedDigit()
+                    Text(detail)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .monospacedDigit()
                 }
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                 if summary.openInterruption != nil {

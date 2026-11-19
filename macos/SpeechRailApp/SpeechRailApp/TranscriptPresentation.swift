@@ -11,6 +11,64 @@ public struct TranscriptDisplayPage<Row: TranscriptPresentationRow>: Sendable {
 }
 public typealias TranscriptPage = TranscriptDisplayPage<TranscriptLine>
 
+/// 会后筛选复用按记录准备的说话人索引，正文按可见行投影。
+struct MeetingTranscriptReview: Sendable {
+    static let empty = Self(lines: [], recoveryLines: [], speakerNames: [:],
+        orderedSpeakerLabels: [], speakerDisplayNames: [:], speakerLabelsByLineID: [:])
+
+    let lines: [TranscriptLine]
+    let recoveryLines: [TranscriptLine]
+    let speakerNames: [String: String]
+    let orderedSpeakerLabels: [String]
+    let speakerDisplayNames: [String: String]
+    private let speakerLabelsByLineID: [String: [String]]
+
+    @concurrent
+    static func prepare(lines: [TranscriptLine], speakerNames: [String: String]) async throws -> Self {
+        var finalLines: [TranscriptLine] = []
+        var recoveryLines: [TranscriptLine] = []
+        var orderedSpeakerLabels: [String] = []
+        var speakerDisplayNames: [String: String] = [:]
+        var speakerLabelsByLineID: [String: [String]] = [:]
+        finalLines.reserveCapacity(lines.count)
+
+        for (index, line) in lines.enumerated() {
+            if index.isMultiple(of: 128) { try Task.checkCancellation() }
+            guard line.status == .final else {
+                recoveryLines.append(line)
+                continue
+            }
+            finalLines.append(line)
+            let labels = line.speakerLabels
+            guard !labels.isEmpty else { continue }
+            speakerLabelsByLineID[line.id] = labels
+            for label in labels where speakerDisplayNames[label] == nil {
+                orderedSpeakerLabels.append(label)
+                speakerDisplayNames[label] = SpeakerLabeling.chipText(
+                    label: label, displayName: speakerNames[label], ordinal: orderedSpeakerLabels.count)
+            }
+        }
+        try Task.checkCancellation()
+        return Self(lines: finalLines, recoveryLines: recoveryLines, speakerNames: speakerNames,
+            orderedSpeakerLabels: orderedSpeakerLabels, speakerDisplayNames: speakerDisplayNames,
+            speakerLabelsByLineID: speakerLabelsByLineID)
+    }
+
+    func filteredLines(
+        matching searchText: String, speaker: String? = nil, bookmarkedLineIDs: Set<String> = []
+    ) -> [TranscriptLine] {
+        let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty || speaker != nil || !bookmarkedLineIDs.isEmpty else { return lines }
+        return lines.filter { line in
+            if !bookmarkedLineIDs.isEmpty, !bookmarkedLineIDs.contains(line.id) { return false }
+            let labels = speakerLabelsByLineID[line.id] ?? []
+            if let speaker, !labels.contains(speaker) { return false }
+            return keyword.isEmpty || line.text.localizedCaseInsensitiveContains(keyword)
+                || labels.contains { (speakerDisplayNames[$0] ?? $0).localizedCaseInsensitiveContains(keyword) }
+        }
+    }
+}
+
 /// Fixed physical slots keep normal append/eviction and ID replacement independent of archive size.
 private struct TranscriptTail<Row: TranscriptPresentationRow> {
     let capacity: Int
