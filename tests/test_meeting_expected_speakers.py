@@ -129,7 +129,9 @@ def _meeting_client(certified=4, *, sortformer=None, stable_ready=True):
 
     engine = BudgetEngine()
     services = _services(
-        engine=sortformer if sortformer is not None else _FakeDiarizationEngine(supports_stream=True),
+        engine=(
+            sortformer if sortformer is not None else _FakeDiarizationEngine(supports_stream=True)
+        ),
         aligner=_FakeTextAligner(),
         streaming_factory=_FakeStreamingFactory(),
     )
